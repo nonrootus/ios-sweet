@@ -1,0 +1,159 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 4da50d8..1554d2f 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -1,5 +1,6 @@
+ /*
+- * SWEET PM6150L L11C bring-up; see report.md for DT and source evidence.
++ * SWEET PM6150L LDO bring-up (L11C on sweet, L7C on sweet_k6a); see
++ * report.md for DT and source evidence.
+  * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
+  * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
+  */
+@@ -219,7 +220,7 @@ rh_free(unsigned t)
+ }
+ 
+ static int
+-rh_send(uint32_t address, unsigned mv)
++rh_send(uint32_t address, unsigned mv, const char *res)
+ {
+ 	int chosen = -1;
+ 	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
+@@ -234,7 +235,8 @@ rh_send(uint32_t address, unsigned mv)
+ 		for (unsigned c = 0; c < rh_ncpt; ++c) {
+ 			if ((enabled & (1u << c)) &&
+ 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
+-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
++				printf("SWEET RPMH: conflicting inherited %s request in TCS%u\n",
++				    res, t);
+ 				return EBUSY;
+ 			}
+ 		}
+@@ -320,7 +322,8 @@ rh_send(uint32_t address, unsigned mv)
+ 		return EIO;
+ 	}
+ 	rh_poisoned = false;
+-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
++	printf("SWEET RPMH: %s ACTIVE vote complete (rail voltage requires hardware verification)\n",
++	    res);
+ 	return 0;
+ }
+ 
+@@ -328,8 +331,9 @@ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+ 	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	bool known = res && (!strcmp(res, "ldoc11") || !strcmp(res, "ldoc7"));
++	if (!known || mv < 2950 || mv > 3400) {
++		printf("SWEET RPMH: expected ldoc7/ldoc11 and 2950..3400 mV\n");
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+@@ -346,7 +350,7 @@ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ 		error = rh_lookup(res, &address);
+ 	}
+ 	if (!error) {
+-		error = rh_send(address, mv);
++		error = rh_send(address, mv, res);
+ 	}
+ out:
+ 	if (error) {
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..5c78373 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1,7 +1,8 @@
+ /*
+  * SWEET SE7 FIFO I2C / GT9896 Yellowstone / Focaltech 54:52 bring-up.
+  * Call once after the scheduler is running; all work runs on one thread.
+- * Requires ABL-loaded GENI I2C firmware; votes L11C through sweet_rpmh.c.
++ * Requires ABL-loaded GENI I2C firmware; votes the touch rail (L11C on
++ * sweet, L7C on sweet_k6a) through sweet_rpmh.c.
+  * No firmware/config upload or direct PMIC writes. Only IC data write:
+  * zero to GT9896's event status after reading a report. See touch2/report.md.
+  */
+@@ -77,6 +78,8 @@ static struct {
+ 	int kind, irq_hint;
+ 	uint32_t irq_status, irq_last, active;
+ 	unsigned sent, got;
++	char rail[16];
++	unsigned goodix_scale;
+ 	int x[TOUCH_MAX], y[TOUCH_MAX];
+ } st;
+ static int touch_sleep_chan;
+@@ -389,6 +392,7 @@ touch_goodix(void)
+ 	uint8_t buf[90];
+ 	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
+ 	uint32_t mask = 0;
++	unsigned scale = st.goodix_scale ? st.goodix_scale : 1u;
+ 	int err = touch_read(0x5d, GOODIX_EVENT_REG, true, buf, GOODIX_HEAD_LEN);
+ 	if (err) {
+ 		return err;
+@@ -422,7 +426,9 @@ touch_goodix(void)
+ 	for (unsigned i = 0; i < n; ++i) {
+ 		const uint8_t *p = buf + GOODIX_HEAD_LEN + i * GOODIX_POINT_LEN;
+ 		unsigned id = p[0] >> 4;
+-		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
++		/* sweet_k6a's GT9896 reports 8640x19200; scale to the panel. */
++		unsigned px = touch_be16(p + 2) / scale;
++		unsigned py = touch_be16(p + 4) / scale;
+ 		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+ 		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+ 		    (mask & (1u << id)) || px > 1079 || py > 2399) {
+@@ -569,15 +575,16 @@ touch_thread(void *arg, wait_result_t result)
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
++	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting %s through RPMh\n",
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)), st.rail);
+ 	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+ 	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+ 	touch_gpio(8, 0, 3, 3, true, false);
+-	int power_error = sweet_rpmh_vreg_enable("ldoc11", 3200);
++	int power_error = sweet_rpmh_vreg_enable(st.rail, 3200);
+ 	if (power_error) {
+-		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
++		printf("SWEET TOUCH: %s RPMh enable failed %d; probes skipped\n",
++		    st.rail, power_error);
+ 		goto out;
+ 	}
+ 	touch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */
+@@ -640,6 +647,9 @@ sweet_touch_init(void)
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
++	char model[16] = "";
++	char rail[16] = "ldoc11";
++	unsigned goodix_scale = 1;
+ 	if (st.started) {
+ 		return;
+ 	}
+@@ -650,6 +660,23 @@ sweet_touch_init(void)
+ 		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
+ 		return;
+ 	}
++	/* sweet_k6a moved the touch rail from PM6150L L11C to L7C and its
++	 * GT9896 reports native coordinates 8x the 1080x2400 panel. */
++	(void)PE_parse_boot_argn("sweetmodel", model, sizeof(model));
++	if (!strcmp(model, "k6a") || !strcmp(model, "sweet_k6a")) {
++		strlcpy(rail, "ldoc7", sizeof(rail));
++		goodix_scale = 8;
++	}
++	(void)PE_parse_boot_argn("sweettouchrail", rail, sizeof(rail));
++	(void)PE_parse_boot_argn("sweetgoodixscale", &goodix_scale, sizeof(goodix_scale));
++	if (goodix_scale == 0 || goodix_scale > 16) {
++		printf("SWEET TOUCH: invalid goodix scale, using 1\n");
++		goodix_scale = 1;
++	}
++	strlcpy(st.rail, rail, sizeof(st.rail));
++	st.goodix_scale = goodix_scale;
++	printf("SWEET TOUCH: model=%s rail=%s goodix-scale=%u\n",
++	    model[0] ? model : "sweet", st.rail, st.goodix_scale);
+ 	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);

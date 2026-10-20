@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Pack an xnu kernel Mach-O + ADT into the payload the sweet shim boots.
 
-  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE]
+  mkpayload.py KERNEL ADT OUT [--cmdline "..."] [--ramdisk IMAGE] [--model MODEL]
+
+--model appends sweetmodel=MODEL to the kernel command line (e.g. sweet_k6a
+selects that board's touch rail and Goodix coordinate scale).
 
 The kernel is linked as a PIE with LC_DYLD_CHAINED_FIXUPS. Nobody else
 (no kmutil, no iBoot) resolves those for us, and xnu only rebases static
@@ -198,8 +201,15 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--model', help='append sweetmodel=MODEL (e.g. sweet_k6a)')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    cmdline = a.cmdline
+    if a.model:
+        if not a.model.replace('_', '').replace('-', '').isalnum():
+            sys.exit('--model must be alphanumeric')
+        if 'sweetmodel=' not in cmdline.split():
+            cmdline = f'{cmdline} sweetmodel={a.model}'
+    blob, info = build(a.kernel, a.adt, cmdline, a.ramdisk)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

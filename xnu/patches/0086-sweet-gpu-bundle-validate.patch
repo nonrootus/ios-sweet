@@ -1,0 +1,153 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_firmware.c
+@@ -0,0 +1,72 @@
++#include <sys/types.h>
++#include <sys/systm.h>
++#include "sweet_gpu_bundle.h"
++
++#define HEADER 24u
++#define ENTRY 80u
++#define PAGE 4096u
++#define LIMIT (1024u*1024u)
++static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
++static uint64_t le64(const uint8_t *p){return (uint64_t)le32(p)|((uint64_t)le32(p+4)<<32);}
++int sweet_gpu_bundle_parse(const void *buffer,size_t size,struct sweet_gpu_blob out[SWEET_GPU_BUNDLE_FILES]){
++ static const char *const names[]={"a618_gmu.bin","a630_sqe.fw","a615_zap.mdt","a615_zap.b02"};
++ const uint8_t *b=buffer;struct sweet_gpu_blob tmp[SWEET_GPU_BUNDLE_FILES];uint64_t end=PAGE;unsigned i;
++ if(!b||!out||size<PAGE||memcmp(b,"SWEETGPU",8)||le32(b+8)!=1||le32(b+12)!=SWEET_GPU_BUNDLE_FILES||le64(b+16)!=size)return -1;
++ for(i=0;i<SWEET_GPU_BUNDLE_FILES;i++){
++  const uint8_t *e=b+HEADER+i*ENTRY; size_t n=strlen(names[i]);uint64_t off=le64(e+32),len=le64(e+40);unsigned j;
++  if(memcmp(e,names[i],n))return -1;
++  for(j=(unsigned)n;j<32;j++)if(e[j])return -1;
++  if(off!=end||!len||len>LIMIT||off>size||len>(uint64_t)size-off)return -1;
++  tmp[i].data=b+(size_t)off;tmp[i].size=(size_t)len;tmp[i].sha256=e+48;
++  end=(off+len+PAGE-1)&~(uint64_t)(PAGE-1);
++ }
++ if(end!=size)return -1;
++ memcpy(out,tmp,sizeof(tmp));return 0;
++}
++
++/* A618 legacy GMU and a630 SQE firmware validation, with no hardware access.
++ * Linux reference: adreno_gpu.c adreno_fw_create_bo and
++ * a6xx_gpu.c a6xx_ucode_check_version; a6xx_gmu.c legacy loader.
++ */
++#include <sys/types.h>
++#include "sweet_a618_firmware.h"
++
++static uint32_t
++fw_le32(const uint8_t *p)
++{
++    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
++        (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++int
++sweet_a618_firmware_prepare(const void *gmu, size_t gmu_size,
++    const void *sqe, size_t sqe_size, struct sweet_a618_firmware_view *out)
++{
++    const uint8_t *payload;
++    uint32_t v, p;
++    if (!gmu || !sqe || !out) return SWEET_A618_FW_BAD_ARGUMENT;
++    if (!gmu_size || gmu_size > 0x8000 || (gmu_size & 3))
++        return SWEET_A618_FW_BAD_GMU_SIZE;
++    if (sqe_size < 16 || (sqe_size & 3)) return SWEET_A618_FW_BAD_SQE_SIZE;
++    payload = (const uint8_t *)sqe + 4; /* first word is not loaded */
++    v = fw_le32(payload);
++    p = fw_le32(payload + 8);
++    if (!(((v & 0xf) == 0xa && (p & 0xf) >= 1) || (v & 0xfff) >= 0x190))
++        return SWEET_A618_FW_OLD_SQE;
++    out->gmu = gmu;
++    out->gmu_size = gmu_size;
++    out->sqe_payload = payload;
++    out->sqe_payload_size = sqe_size - 4;
++    out->sqe_version_word = v;
++    out->sqe_patch_word = p;
++    return SWEET_A618_FW_OK;
++}
++
++int sweet_gpu_firmware_check(const void *data, size_t size)
++{
++    struct sweet_gpu_blob blobs[SWEET_GPU_BUNDLE_FILES];
++    struct sweet_a618_firmware_view fw;
++    int err = sweet_gpu_bundle_parse(data, size, blobs);
++    if (err) return err;
++    return sweet_a618_firmware_prepare(blobs[0].data, blobs[0].size, blobs[1].data, blobs[1].size, &fw);
++}
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_bundle.h
+@@ -0,0 +1,8 @@
++#ifndef SWEET_GPU_BUNDLE_H
++#define SWEET_GPU_BUNDLE_H
++#include <sys/types.h>
++#define SWEET_GPU_BUNDLE_FILES 4
++struct sweet_gpu_blob { const uint8_t *data; size_t size; const uint8_t *sha256; };
++/* Caller must verify hashes, signatures, source and memory lifetime. */
++int sweet_gpu_bundle_parse(const void *buffer, size_t size, struct sweet_gpu_blob out[SWEET_GPU_BUNDLE_FILES]);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_a618_firmware.h
+@@ -0,0 +1,26 @@
++#ifndef SWEET_A618_FIRMWARE_H
++#define SWEET_A618_FIRMWARE_H
++#include <sys/types.h>
++
++/* No MMIO or allocations: these views remain valid while input buffers live. */
++struct sweet_a618_firmware_view {
++    const uint8_t *gmu;
++    size_t gmu_size;
++    const uint8_t *sqe_payload;
++    size_t sqe_payload_size;
++    uint32_t sqe_version_word;
++    uint32_t sqe_patch_word;
++};
++
++enum sweet_a618_fw_result {
++    SWEET_A618_FW_OK = 0,
++    SWEET_A618_FW_BAD_ARGUMENT = -1,
++    SWEET_A618_FW_BAD_GMU_SIZE = -2,
++    SWEET_A618_FW_BAD_SQE_SIZE = -3,
++    SWEET_A618_FW_OLD_SQE = -4
++};
++
++/* Checks format/version, not cryptographic authenticity or SoC compatibility. */
++int sweet_a618_firmware_prepare(const void *gmu, size_t gmu_size,
++    const void *sqe, size_t sqe_size, struct sweet_a618_firmware_view *out);
++#endif
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -651,6 +651,10 @@
+ 	return true;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern "C" int sweet_gpu_firmware_check(const void *, size_t);
++#endif
++
+ kern_return_t
+ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+     dev_t * root, u_int32_t * oflags )
+@@ -773,6 +777,14 @@
+                     }
+                 }
+ #endif
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++                int gpu_fw_check = 0;
++                if (PE_parse_boot_argn("sweetgpucheck", &gpu_fw_check, sizeof(gpu_fw_check)) && gpu_fw_check == 1 &&
++                    ramdParms[1] >= 4096 && ramdParms[1] <= (4u << 20)) {
++                    const void *gpu_blob = (const void *)ml_static_ptovirt(ramdParms[0]);
++                    IOLog("SWEET GPU: firmware layout/version check %d (not authenticated)\n", sweet_gpu_firmware_check(gpu_blob, ramdParms[1]));
++                }
++#endif
+ 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
+ 			}
+ 			regEntry->release();                                                            /* Toss the entry */

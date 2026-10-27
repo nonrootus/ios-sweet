@@ -1,0 +1,83 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -80,6 +80,8 @@
+ 	int x[TOUCH_MAX], y[TOUCH_MAX];
+ } st;
+ static int touch_sleep_chan;
++/* Explicit opt-in: original sweet retains its existing rail and coordinates. */
++static int touch_k6a;
+ 
+ static uint32_t
+ touch_rd(vm_offset_t base, uint32_t off)
+@@ -423,6 +425,11 @@
+ 		const uint8_t *p = buf + GOODIX_HEAD_LEN + i * GOODIX_POINT_LEN;
+ 		unsigned id = p[0] >> 4;
+ 		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
++		if (touch_k6a) {
++			/* Live k6a FDT: 8640 x 19200 raw -> 1080 x 2400. */
++			px /= 8;
++			py /= 8;
++		}
+ 		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+ 		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+ 		    (mask & (1u << id)) || px > 1079 || py > 2399) {
+@@ -569,15 +576,15 @@
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
++	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting %s through RPMh\n",
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
++	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)), touch_k6a ? "L7C" : "L11C");
+ 	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+ 	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+ 	touch_gpio(8, 0, 3, 3, true, false);
+-	int power_error = sweet_rpmh_vreg_enable("ldoc11", 3200);
++	int power_error = sweet_rpmh_vreg_enable(touch_k6a ? "ldoc7" : "ldoc11", 3200);
+ 	if (power_error) {
+-		printf("SWEET TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
++		printf("SWEET TOUCH: RPMh enable failed %d; probes skipped\n", power_error);
+ 		goto out;
+ 	}
+ 	touch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */
+@@ -644,6 +651,7 @@
+ 		return;
+ 	}
+ 	st.started = true;
++	(void)PE_parse_boot_argn("sweetk6a", &touch_k6a, sizeof(touch_k6a));
+ 	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
+ 	if (!enabled) {
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -234,7 +234,7 @@
+ 		for (unsigned c = 0; c < rh_ncpt; ++c) {
+ 			if ((enabled & (1u << c)) &&
+ 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
+-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
++				printf("SWEET RPMH: conflicting inherited regulator request in TCS%u\n", t);
+ 				return EBUSY;
+ 			}
+ 		}
+@@ -320,7 +320,7 @@
+ 		return EIO;
+ 	}
+ 	rh_poisoned = false;
+-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
++	printf("SWEET RPMH: regulator ACTIVE vote complete (rail voltage requires hardware verification)\n");
+ 	return 0;
+ }
+ 
+@@ -328,8 +328,9 @@
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+ 	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	if (!res || (strcmp(res, "ldoc11") && strcmp(res, "ldoc7")) ||
++	    (strcmp(res, "ldoc7") == 0 ? mv != 3200 : (mv < 2950 || mv > 3400))) {
++		printf("SWEET RPMH: invalid touch regulator or voltage\n");
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {

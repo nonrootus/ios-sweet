@@ -1,0 +1,72 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void sweet_gpu_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -660,6 +661,7 @@
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_usb_probe();
++	sweet_gpu_probe();
+ 	return 0;
+ }
+ 
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -0,0 +1,41 @@
++/*
++ * Opt-in first-stage GPU bus diagnostic for the captured sweet_k6a.
++ * Only reads the global clock controller; does not touch GPU or GPUCC.
++ * Source for register: Qualcomm gcc-sdmmagpie, gcc_gpu_cfg_ahb_clk.
++ * A readback does not prove the GPU is safe to access.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_gpu_probe(void);
++
++#define SWEET_GPU_GCC_PAGE 0x00171000ull
++#define SWEET_GPU_GCC_SIZE 0x1000u
++#define SWEET_GPU_CFG_AHB  0x004u
++#define SWEET_CLK_OFF      (1u << 31)
++
++void
++sweet_gpu_probe(void)
++{
++    int enabled = 0, k6a = 0;
++    vm_offset_t gcc;
++    uint32_t state;
++
++    if (!PE_parse_boot_argn("sweetgpuprobe", &enabled, sizeof(enabled)) || enabled != 1 ||
++        !PE_parse_boot_argn("sweetk6a", &k6a, sizeof(k6a)) || k6a != 1) {
++        return;
++    }
++    gcc = ml_io_map(SWEET_GPU_GCC_PAGE, SWEET_GPU_GCC_SIZE);
++    if (!gcc) {
++        printf("SWEET GPU: GCC mapping failed\n");
++        return;
++    }
++    state = *(volatile uint32_t *)(gcc + SWEET_GPU_CFG_AHB);
++    __asm__ volatile ("dmb oshld" ::: "memory");
++    printf("SWEET GPU: cfg AHB CBCR 0x%08x (%s); no GPU registers accessed\n",
++        state, (state & SWEET_CLK_OFF) ? "off" : "not reported off");
++}
++#endif

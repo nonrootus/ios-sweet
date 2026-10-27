@@ -1,0 +1,22 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -760,6 +760,19 @@
+ 					panic("ramdisk params");
+ 				}
+ #endif /* __LP64__ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++                /* Diagnostic only: this does not authenticate or load firmware. */
++                int gpu_bundle_probe = 0;
++                if (PE_parse_boot_argn("sweetgpubundle", &gpu_bundle_probe, sizeof(gpu_bundle_probe)) &&
++                    gpu_bundle_probe == 1 && ramdParms[1] >= 4096 && ramdParms[1] <= (4u << 20)) {
++                    const uint8_t *gpu_blob = (const uint8_t *)ml_static_ptovirt(ramdParms[0]);
++                    if (gpu_blob && memcmp(gpu_blob, "SWEETGPU", 8) == 0) {
++                        IOLog("SWEET GPU: bundle magic found, %llu bytes; contents unverified\n", (uint64_t)ramdParms[1]);
++                    } else {
++                        IOLog("SWEET GPU: no bundle magic\n");
++                    }
++                }
++#endif
+ 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
+ 			}
+ 			regEntry->release();                                                            /* Toss the entry */

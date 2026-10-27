@@ -1,0 +1,61 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 6a0a847..9e9437b 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -356,4 +356,56 @@ out:
+ 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+ 	return error;
+ }
++
++/* Read the raw ARC operating-level map needed by the A618 GPU power driver.
++ * A caller must interpret the platform's level encoding and aggregate votes;
++ * this function never issues an RPMh request or changes a power domain. */
++int
++sweet_rpmh_gpu_arc_info(const char *res, uint32_t *address,
++    uint16_t levels[16], unsigned *level_count)
++{
++    uint32_t key[2] = {0, 0}, found_addr = 0;
++    uint16_t found_levels[16] = {0};
++    unsigned count_found = 0, matches = 0;
++    int error;
++    if (!res || !address || !levels || !level_count ||
++        (strcmp(res, "cx.lvl") && strcmp(res, "gfx.lvl"))) return EINVAL;
++    for (unsigned i = 0; i < 8 && res[i]; ++i)
++        key[i / 4] |= (uint32_t)(uint8_t)res[i] << (8u * (i % 4));
++    if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
++    error = rh_map();
++    if (error) goto out;
++    for (unsigned i = 0; i < 8; ++i) {
++        uint32_t h = 8u + 16u * i;
++        unsigned slave = rh_db16(h);
++        if (!slave) break;
++        uint32_t entries = RH_DB_HEADER + rh_db16(h + 2);
++        uint32_t aux = RH_DB_HEADER + rh_db16(h + 4);
++        unsigned count = rh_db16(h + 6);
++        if (slave < 3 || slave > 5 || (entries & 3u) ||
++            !rh_range(entries, count * RH_DB_ENTRY) || !rh_range(aux, 0)) {
++            error = EINVAL; goto out;
++        }
++        for (unsigned j = 0; j < count; ++j) {
++            uint32_t e = entries + RH_DB_ENTRY * j;
++            if (rh_read(rh_db, e) != key[0] || rh_read(rh_db, e + 4) != key[1]) continue;
++            uint32_t addr = rh_read(rh_db, e + 16);
++            unsigned length = rh_db16(e + 20);
++            uint32_t start = aux + rh_db16(e + 22);
++            if (slave != 3 || (addr >> 16) != 3 || !length || length > 32 ||
++                (length & 1u) || (start & 1u) || !rh_range(start, length) || ++matches != 1) {
++                error = EINVAL; goto out;
++            }
++            found_addr = addr; count_found = length / 2;
++            for (unsigned k = 0; k < count_found; ++k) found_levels[k] = rh_db16(start + 2 * k);
++        }
++    }
++    if (matches != 1) { error = ENODEV; goto out; }
++    *address = found_addr; *level_count = count_found;
++    memcpy(levels, found_levels, sizeof(found_levels));
++    error = 0;
++out:
++    __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++    return error;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

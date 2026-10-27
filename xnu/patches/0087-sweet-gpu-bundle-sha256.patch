@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/sweet_gpu_firmware.c b/bsd/dev/sweet_gpu_firmware.c
+index 135735f..e6f0a9e 100644
+--- a/bsd/dev/sweet_gpu_firmware.c
++++ b/bsd/dev/sweet_gpu_firmware.c
+@@ -1,6 +1,7 @@
+ #include <sys/types.h>
+ #include <sys/systm.h>
+ #include "sweet_gpu_bundle.h"
++#include <libkern/crypto/sha2.h>
+ 
+ #define HEADER 24u
+ #define ENTRY 80u
+@@ -68,5 +69,14 @@ int sweet_gpu_firmware_check(const void *data, size_t size)
+     struct sweet_a618_firmware_view fw;
+     int err = sweet_gpu_bundle_parse(data, size, blobs);
+     if (err) return err;
++    /* This checks accidental corruption; bundle hashes are not signatures. */
++    for (unsigned i = 0; i < SWEET_GPU_BUNDLE_FILES; ++i) {
++        SHA256_CTX ctx;
++        uint8_t digest[SHA256_DIGEST_LENGTH];
++        SHA256_Init(&ctx);
++        SHA256_Update(&ctx, blobs[i].data, blobs[i].size);
++        SHA256_Final(digest, &ctx);
++        if (memcmp(digest, blobs[i].sha256, sizeof(digest)) != 0) return -2;
++    }
+     return sweet_a618_firmware_prepare(blobs[0].data, blobs[0].size, blobs[1].data, blobs[1].size, &fw);
+ }

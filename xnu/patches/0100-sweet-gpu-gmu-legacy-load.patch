@@ -1,0 +1,59 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 5e42746..28be7f6 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,7 @@ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_gdsc.c			standard
++bsd/dev/sweet_gpu_gmu.c			standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_gpu_gmu.c b/bsd/dev/sweet_gpu_gmu.c
+new file mode 100644
+index 0000000..95c9254
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_gmu.c
+@@ -0,0 +1,21 @@
++#include "sweet_gpu_gmu.h"
++/* A618 legacy firmware is a flat image up to 0x8000 bytes. The register
++ * window spans 0x4000 bytes of ITCM followed by 0x4000 bytes of DTCM;
++ * do not use the A650 block-format loader. This routine never starts CM3. */
++int sweet_gpu_gmu_load_legacy(const struct sweet_gpu_gmu_ops *o,
++    const void *firmware, size_t size, size_t *written) {
++    const uint8_t *b=firmware;
++    uint32_t reset;
++    if (!o || !o->read32 || !o->write32 || !b || !written || !size ||
++        size>0x8000 || (size & 3u)) return -1;
++    *written=0;
++    if (o->read32(o->ctx, 0x14000, &reset)) return -2;
++    if (reset != 1) return -3;
++    for (size_t i=0; i<size; i+=4) {
++        uint32_t word=(uint32_t)b[i] | (uint32_t)b[i+1]<<8 |
++            (uint32_t)b[i+2]<<16 | (uint32_t)b[i+3]<<24;
++        if (o->write32(o->ctx, 0x3000u+(uint32_t)i, word)) return -2;
++        *written=i+4;
++    }
++    return 0;
++}
+diff --git a/bsd/dev/sweet_gpu_gmu.h b/bsd/dev/sweet_gpu_gmu.h
+new file mode 100644
+index 0000000..4e21406
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_gmu.h
+@@ -0,0 +1,14 @@
++#ifndef SWEET_GPU_GMU_H
++#define SWEET_GPU_GMU_H
++#include <stddef.h>
++#include <stdint.h>
++/* Offsets relative to GMU window 0x0506a000. Caller must ensure power,
++ * clocks, ownership, bus access and CM3 reset before using this interface. */
++struct sweet_gpu_gmu_ops {
++    void *ctx;
++    int (*read32)(void *, uint32_t, uint32_t *);
++    int (*write32)(void *, uint32_t, uint32_t);
++};
++int sweet_gpu_gmu_load_legacy(const struct sweet_gpu_gmu_ops *,
++    const void *, size_t, size_t *written);
++#endif

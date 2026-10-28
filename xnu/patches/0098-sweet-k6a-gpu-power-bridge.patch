@@ -1,0 +1,100 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 83b558a..5e42746 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,7 @@ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_gdsc.c			standard
++bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+diff --git a/bsd/dev/sweet_gpu_k6a_power.c b/bsd/dev/sweet_gpu_k6a_power.c
+new file mode 100644
+index 0000000..6fa81e7
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_k6a_power.c
+@@ -0,0 +1,56 @@
++#include "sweet_gpu_k6a_power.h"
++/* Only specific sdmmagpie GPUCC registers used in the GX/CX sequence. */
++static int allowed(uint32_t off) {
++    return off==0x1008 || off==0x100c || off==0x101c ||
++        off==0x106c || off==0x1508 || off==0x1540;
++}
++static void barrier_read(void) {
++#if defined(__aarch64__)
++    __asm__ volatile("dmb oshld" ::: "memory");
++#else
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++#endif
++}
++static void barrier_write(void) {
++#if defined(__aarch64__)
++    __asm__ volatile("dsb osh" ::: "memory");
++#else
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++#endif
++}
++static int reg_read(void *ctx, uint32_t off, uint32_t *value) {
++    struct sweet_gpu_k6a_power *p=ctx;
++    if (!value || !allowed(off) || off>p->mapped_size || p->mapped_size-off<4) return -1;
++    *value=p->gpucc[off/4]; barrier_read(); return 0;
++}
++static int reg_write(void *ctx, uint32_t off, uint32_t value) {
++    struct sweet_gpu_k6a_power *p=ctx;
++    if (!allowed(off) || off==0x1540 || off>p->mapped_size || p->mapped_size-off<4) return -1;
++    barrier_write(); p->gpucc[off/4]=value; barrier_write(); return 0;
++}
++static void sleep_us(void *ctx, unsigned us) {
++    struct sweet_gpu_k6a_power *p=ctx; p->delay(p->delay_context,us);
++}
++static int root_clock(void *ctx, int enable) {
++    struct sweet_gpu_k6a_power *p=ctx;
++    return enable ? sweet_gpu_root_acquire(&p->ops,&p->root) : sweet_gpu_root_release(&p->ops,&p->root);
++}
++int sweet_gpu_k6a_power_init(struct sweet_gpu_k6a_power *p, volatile void *base,
++    size_t size, void (*delay)(void *, unsigned), void *delay_context) {
++    if (!p || !base || ((uintptr_t)base & 3u) || size<0x1544 || !delay) return -1;
++    *p=(struct sweet_gpu_k6a_power){0};
++    p->gpucc=base;p->mapped_size=size;p->delay=delay;p->delay_context=delay_context;
++    p->ops=(struct sweet_gpu_gdsc_ops){p,reg_read,reg_write,root_clock,sleep_us};
++    return 0;
++}
++int sweet_gpu_k6a_power_start(struct sweet_gpu_k6a_power *p) {
++    int rc;
++    if (!p || !p->gpucc || !p->delay || p->started || p->poisoned) return -1;
++    /* After first hardware access, any error leaves state uncertain. */
++    p->poisoned=1;
++    rc=sweet_gpu_cx_enable(&p->ops,&p->cx);
++    if (rc) return rc;
++    rc=sweet_gpu_gx_enable(&p->ops,&p->gx);
++    if (rc) return rc;
++    p->started=1;p->poisoned=0;return 0;
++}
+diff --git a/bsd/dev/sweet_gpu_k6a_power.h b/bsd/dev/sweet_gpu_k6a_power.h
+new file mode 100644
+index 0000000..4521787
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_k6a_power.h
+@@ -0,0 +1,20 @@
++#ifndef SWEET_GPU_K6A_POWER_H
++#define SWEET_GPU_K6A_POWER_H
++#include "sweet_gpu_gdsc.h"
++#include <stddef.h>
++/* The caller owns the mapping, parent supplies, clock parents and all locks.
++ * This experimental code is not called during boot. */
++struct sweet_gpu_k6a_power {
++    volatile uint32_t *gpucc;
++    size_t mapped_size;
++    void *delay_context;
++    void (*delay)(void *, unsigned);
++    struct sweet_gpu_gdsc_ops ops;
++    struct sweet_gpu_root_state root;
++    struct sweet_gpu_gdsc_result cx, gx;
++    unsigned started, poisoned;
++};
++int sweet_gpu_k6a_power_init(struct sweet_gpu_k6a_power *, volatile void *, size_t,
++    void (*)(void *, unsigned), void *);
++int sweet_gpu_k6a_power_start(struct sweet_gpu_k6a_power *);
++#endif

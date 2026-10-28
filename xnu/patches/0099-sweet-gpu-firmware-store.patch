@@ -1,0 +1,73 @@
+diff --git a/bsd/dev/sweet_gpu_firmware.c b/bsd/dev/sweet_gpu_firmware.c
+index e6f0a9e..afaf479 100644
+--- a/bsd/dev/sweet_gpu_firmware.c
++++ b/bsd/dev/sweet_gpu_firmware.c
+@@ -80,3 +80,47 @@ int sweet_gpu_firmware_check(const void *data, size_t size)
+     }
+     return sweet_a618_firmware_prepare(blobs[0].data, blobs[0].size, blobs[1].data, blobs[1].size, &fw);
+ }
++
++/* Kernel-owned immutable copies outlive the boot RAM disk. Only publish after
++ * all copied bytes pass SHA-256 checks and A618 layout validation. These hashes
++ * detect corruption; they do not authenticate the source of the bundle. */
++static uint8_t sweet_gmu_store[0x8000], sweet_sqe_store[0x10000];
++static uint8_t sweet_zap_mdt_store[0x4000], sweet_zap_segment_store[0x4000];
++static size_t sweet_fw_sizes[SWEET_GPU_BUNDLE_FILES];
++static unsigned sweet_fw_ready, sweet_fw_lock;
++int sweet_gpu_firmware_store(const void *buffer, size_t size)
++{
++    struct sweet_gpu_blob blobs[SWEET_GPU_BUNDLE_FILES];
++    struct sweet_a618_firmware_view view;
++    uint8_t *dest[] = {sweet_gmu_store,sweet_sqe_store,sweet_zap_mdt_store,sweet_zap_segment_store};
++    const size_t cap[] = {sizeof(sweet_gmu_store),sizeof(sweet_sqe_store),sizeof(sweet_zap_mdt_store),sizeof(sweet_zap_segment_store)};
++    size_t sizes[SWEET_GPU_BUNDLE_FILES];
++    int err = -1;
++    if (__atomic_exchange_n(&sweet_fw_lock, 1, __ATOMIC_ACQUIRE)) return -1;
++    if (__atomic_load_n(&sweet_fw_ready, __ATOMIC_ACQUIRE)) goto out;
++    if (sweet_gpu_bundle_parse(buffer, size, blobs)) goto out;
++    for (unsigned i = 0; i < SWEET_GPU_BUNDLE_FILES; ++i) {
++        SHA256_CTX ctx;
++        uint8_t digest[SHA256_DIGEST_LENGTH];
++        if (blobs[i].size > cap[i]) goto out;
++        sizes[i] = blobs[i].size;
++        memcpy(dest[i], blobs[i].data, sizes[i]);
++        SHA256_Init(&ctx); SHA256_Update(&ctx, dest[i], sizes[i]); SHA256_Final(digest, &ctx);
++        if (memcmp(digest, blobs[i].sha256, sizeof(digest))) goto out;
++    }
++    if (sweet_a618_firmware_prepare(dest[0], sizes[0], dest[1], sizes[1], &view)) goto out;
++    memcpy(sweet_fw_sizes, sizes, sizeof(sizes));
++    __atomic_store_n(&sweet_fw_ready, 1, __ATOMIC_RELEASE);
++    err = 0;
++out:
++    __atomic_store_n(&sweet_fw_lock, 0, __ATOMIC_RELEASE);
++    return err;
++}
++int sweet_gpu_firmware_get(unsigned index, const void **data, size_t *size)
++{
++    const void *dest[] = {sweet_gmu_store,sweet_sqe_store,sweet_zap_mdt_store,sweet_zap_segment_store};
++    if (!data || !size || index >= SWEET_GPU_BUNDLE_FILES ||
++        !__atomic_load_n(&sweet_fw_ready, __ATOMIC_ACQUIRE)) return -1;
++    *data = dest[index]; *size = sweet_fw_sizes[index];
++    return 0;
++}
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index 9501c60..dfafaec 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -653,6 +653,7 @@ do_reboot:
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern "C" int sweet_gpu_firmware_check(const void *, size_t);
++extern "C" int sweet_gpu_firmware_store(const void *, size_t);
+ #endif
+ 
+ kern_return_t
+@@ -782,7 +783,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+                 if (PE_parse_boot_argn("sweetgpucheck", &gpu_fw_check, sizeof(gpu_fw_check)) && gpu_fw_check == 1 &&
+                     ramdParms[1] >= 4096 && ramdParms[1] <= (4u << 20)) {
+                     const void *gpu_blob = (const void *)ml_static_ptovirt(ramdParms[0]);
+-                    IOLog("SWEET GPU: firmware layout/version check %d (not authenticated)\n", sweet_gpu_firmware_check(gpu_blob, ramdParms[1]));
++                    IOLog("SWEET GPU: firmware copy/check %d (not authenticated)\n", sweet_gpu_firmware_store(gpu_blob, ramdParms[1]));
+                 }
+ #endif
+ 				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */

@@ -1,0 +1,52 @@
+diff --git a/bsd/dev/sweet_gpu_k6a_power.c b/bsd/dev/sweet_gpu_k6a_power.c
+index 6fa81e7..d475bf9 100644
+--- a/bsd/dev/sweet_gpu_k6a_power.c
++++ b/bsd/dev/sweet_gpu_k6a_power.c
+@@ -1,4 +1,5 @@
+ #include "sweet_gpu_k6a_power.h"
++#include "sweet_gpu_gmu.h"
+ /* Only specific sdmmagpie GPUCC registers used in the GX/CX sequence. */
+ static int allowed(uint32_t off) {
+     return off==0x1008 || off==0x100c || off==0x101c ||
+@@ -54,3 +55,30 @@ int sweet_gpu_k6a_power_start(struct sweet_gpu_k6a_power *p) {
+     if (rc) return rc;
+     p->started=1;p->poisoned=0;return 0;
+ }
++
++/* Firmware copy is supplied by the early-boot kernel store. */
++extern int sweet_gpu_firmware_get(unsigned, const void **, size_t *);
++struct sweet_gmu_window { volatile uint32_t *base; size_t size; };
++static int gmu_read(void *ctx, uint32_t off, uint32_t *value) {
++    struct sweet_gmu_window *w=ctx;
++    if (!value || off!=0x14000 || off>w->size || w->size-off<4) return -1;
++    *value=w->base[off/4];barrier_read();return 0;
++}
++static int gmu_write(void *ctx, uint32_t off, uint32_t value) {
++    struct sweet_gmu_window *w=ctx;
++    if (off<0x3000 || off>=0xb000 || (off&3u) || off>w->size || w->size-off<4) return -1;
++    barrier_write();w->base[off/4]=value;barrier_write();return 0;
++}
++int sweet_gpu_k6a_gmu_load(struct sweet_gpu_k6a_power *p, volatile void *base,
++    size_t size, int clocks_verified, size_t *written) {
++    const void *fw; size_t fw_size; int rc;
++    if (!p || !p->started || p->poisoned || !base || ((uintptr_t)base&3u) ||
++        size<0x14004 || !clocks_verified || !written) return -1;
++    if (sweet_gpu_firmware_get(0,&fw,&fw_size)) return -1;
++    struct sweet_gmu_window window={(volatile uint32_t *)base,size};
++    struct sweet_gpu_gmu_ops ops={&window,gmu_read,gmu_write};
++    p->poisoned=1;
++    rc=sweet_gpu_gmu_load_legacy(&ops,fw,fw_size,written);
++    if (!rc) p->poisoned=0;
++    return rc;
++}
+diff --git a/bsd/dev/sweet_gpu_k6a_power.h b/bsd/dev/sweet_gpu_k6a_power.h
+index 4521787..7ee2ef9 100644
+--- a/bsd/dev/sweet_gpu_k6a_power.h
++++ b/bsd/dev/sweet_gpu_k6a_power.h
+@@ -17,4 +17,6 @@ struct sweet_gpu_k6a_power {
+ int sweet_gpu_k6a_power_init(struct sweet_gpu_k6a_power *, volatile void *, size_t,
+     void (*)(void *, unsigned), void *);
+ int sweet_gpu_k6a_power_start(struct sweet_gpu_k6a_power *);
++/* Caller must separately establish and verify GMU clock/bus readiness. */
++int sweet_gpu_k6a_gmu_load(struct sweet_gpu_k6a_power *, volatile void *, size_t, int, size_t *);
+ #endif

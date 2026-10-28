@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -8,6 +8,8 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include "sweet_gpu_branch.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_gpu_probe(void);
+@@ -18,6 +20,20 @@
+ #define SWEET_GPU_GCC_SIZE 0x1000u
+ #define SWEET_GPU_CFG_AHB  0x004u
+ #define SWEET_CLK_OFF      (1u << 31)
++
++/* Single early-boot owner. No concurrent GCC client may touch this branch.
++ * Register mapping and power prerequisites are not proved by this test. */
++static struct sweet_gpu_branch_state memnoc_state;
++static int memnoc_read(void *ctx, uint32_t *v) {
++    *v = *(volatile uint32_t *)((vm_offset_t)ctx + 0x00cu);
++    __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
++}
++static int memnoc_write(void *ctx, uint32_t v) {
++    __asm__ volatile ("dsb osh" ::: "memory");
++    *(volatile uint32_t *)((vm_offset_t)ctx + 0x00cu) = v;
++    __asm__ volatile ("dsb osh" ::: "memory"); return 0;
++}
++static void memnoc_delay(void *ctx, unsigned us) { (void)ctx; delay(us); }
+ 
+ void
+ sweet_gpu_probe(void)
+@@ -45,6 +61,13 @@
+     __asm__ volatile ("dmb oshld" ::: "memory");
+     printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
+         memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
++    int clock_test = 0;
++    if (PE_parse_boot_argn("sweetgpuclk", &clock_test, sizeof(clock_test)) && clock_test == 1) {
++        struct sweet_gpu_branch_ops ops = {(void *)gcc, memnoc_read, memnoc_write, memnoc_delay};
++        int rc = sweet_gpu_branch_acquire(&ops, &memnoc_state);
++        printf("SWEET GPU: memnoc vote test rc=%d state=0x%08x owned=%u poisoned=%u; no GPU/SMMU access\n",
++            rc, memnoc_state.last, memnoc_state.owned, memnoc_state.poisoned);
++    }
+     int arc_probe = 0;
+     if (PE_parse_boot_argn("sweetgpuarcread", &arc_probe, sizeof(arc_probe)) && arc_probe == 1) {
+         const char *names[2] = {"cx.lvl", "gfx.lvl"};

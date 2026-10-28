@@ -1,0 +1,19 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -38,7 +38,14 @@
+     state = *(volatile uint32_t *)(gcc + SWEET_GPU_CFG_AHB);
+     __asm__ volatile ("dmb oshld" ::: "memory");
+     printf("SWEET GPU: cfg AHB CBCR 0x%08x (%s); no GPU registers accessed\n",
+-        state, (state & SWEET_CLK_OFF) ? "off" : "not reported off");    int arc_probe = 0;
++        state, (state & SWEET_CLK_OFF) ? "off" : "not reported off");
++    /* GCC memnoc branch is needed by the GPU SMMU. A status read alone
++     * does not establish ownership, power, or permission to access SMMU. */
++    uint32_t memnoc = *(volatile uint32_t *)(gcc + 0x00cu);
++    __asm__ volatile ("dmb oshld" ::: "memory");
++    printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
++        memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
++    int arc_probe = 0;
+     if (PE_parse_boot_argn("sweetgpuarcread", &arc_probe, sizeof(arc_probe)) && arc_probe == 1) {
+         const char *names[2] = {"cx.lvl", "gfx.lvl"};
+         for (unsigned j=0; j<2; ++j) {

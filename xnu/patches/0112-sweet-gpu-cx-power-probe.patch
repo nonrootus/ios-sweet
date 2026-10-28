@@ -1,0 +1,63 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -10,6 +10,7 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include "sweet_gpu_branch.h"
++#include "sweet_gpu_gdsc.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_gpu_probe(void);
+@@ -34,6 +35,19 @@
+     __asm__ volatile ("dsb osh" ::: "memory"); return 0;
+ }
+ static void memnoc_delay(void *ctx, unsigned us) { (void)ctx; delay(us); }
++
++/* GPUCC mapping covers only the previously read CX control/status page. */
++static int cx_read(void *ctx, uint32_t off, uint32_t *value) {
++    if (!value || (off != 0x106cu && off != 0x1540u)) return -1;
++    *value = *(volatile uint32_t *)((vm_offset_t)ctx + off - 0x1000u);
++    __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
++}
++static int cx_write(void *ctx, uint32_t off, uint32_t value) {
++    if (off != 0x106cu) return -1;
++    __asm__ volatile ("dsb osh" ::: "memory");
++    *(volatile uint32_t *)((vm_offset_t)ctx + 0x06cu) = value;
++    __asm__ volatile ("dsb osh" ::: "memory"); return 0;
++}
+ 
+ void
+ sweet_gpu_probe(void)
+@@ -61,8 +75,30 @@
+     __asm__ volatile ("dmb oshld" ::: "memory");
+     printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
+         memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
++    /* Experimental CX power-on: caller opts in, prechecks only APPS DRV
++     * vote; this is not a measured voltage or proof of exclusive ownership. */
++    int cx_on = 0, cx_ok = 0;
++    if (PE_parse_boot_argn("sweetgpucxon", &cx_on, sizeof(cx_on)) && cx_on == 1) {
++        unsigned cx_vote = 0;
++        int vote_rc = sweet_rpmh_gpu_arc_read("cx.lvl", &cx_vote);
++        if ((state & SWEET_CLK_OFF) || vote_rc || !cx_vote) {
++            printf("SWEET GPU: CX enable skipped cfg=0x%08x vote_rc=%d vote=%u\n", state, vote_rc, cx_vote);
++        } else {
++            printf("SWEET GPU: about to request CX power; partial failure may hang\n");
++            delay(1000000);
++            vm_offset_t cc = ml_io_map(0x05091000ull, 0x1000u);
++            if (!cc) printf("SWEET GPU: CX enable map failed\n");
++            else {
++                struct sweet_gpu_gdsc_ops ops = {(void *)cc, cx_read, cx_write, 0, memnoc_delay};
++                struct sweet_gpu_gdsc_result result;
++                int rc = sweet_gpu_cx_enable(&ops, &result);
++                cx_ok = (rc == 0);
++                printf("SWEET GPU: CX enable rc=%d stage=%u status=0x%08x\n", rc, result.stage, result.status);
++            }
++        }
++    }
+     int clock_test = 0;
+-    if (PE_parse_boot_argn("sweetgpuclk", &clock_test, sizeof(clock_test)) && clock_test == 1) {
++    if (PE_parse_boot_argn("sweetgpuclk", &clock_test, sizeof(clock_test)) && clock_test == 1 && (!cx_on || cx_ok)) {
+         struct sweet_gpu_branch_ops ops = {(void *)gcc, memnoc_read, memnoc_write, memnoc_delay};
+         int rc = sweet_gpu_branch_acquire(&ops, &memnoc_state);
+         printf("SWEET GPU: memnoc vote test rc=%d state=0x%08x owned=%u poisoned=%u; no GPU/SMMU access\n",

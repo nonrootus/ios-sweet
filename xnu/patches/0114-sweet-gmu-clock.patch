@@ -1,0 +1,73 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -120,6 +120,7 @@
+ bsd/dev/sweet_hfi_transport.c		standard
+ bsd/dev/sweet_smmu_discover.c		standard
+ bsd/dev/sweet_gpu_branch.c		standard
++bsd/dev/sweet_gmu_clock.c		standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_gmu_clock.c b/bsd/dev/sweet_gmu_clock.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_clock.c
+@@ -0,0 +1,42 @@
++#include "sweet_gmu_clock.h"
++#define CMD 0x1120u
++#define CFG 0x1124u
++#define BRANCH 0x1098u
++#define CXO 0x109cu
++#define OFF (1u<<31)
++#define UPDATE 1u
++#define SRC_MASK (7u<<8)
++#define DIV_MASK 31u
++#define MODE_MASK (3u<<12)
++#define HW_CTRL (1u<<20)
++int sweet_gmu_clock_enable_200(const struct sweet_gmu_clock_ops *o, int parent_verified, struct sweet_gmu_clock_state *s) {
++    uint32_t cmd,cfg,branch,cxo,v;
++    if (!o || !s || !o->read || !o->write || !o->delay_us || parent_verified != 1 || s->stage || s->poisoned) return -1;
++    if (o->read(o->ctx,CMD,&cmd) || o->read(o->ctx,CFG,&cfg) || o->read(o->ctx,BRANCH,&branch) || o->read(o->ctx,CXO,&cxo)) return -2;
++    if (cmd==0xffffffffu || cfg==0xffffffffu || branch==0xffffffffu || cxo==0xffffffffu ||
++        !(cmd&OFF) || (cmd&UPDATE) || !(branch&OFF) || (branch&1u) || (cxo&OFF) || (cfg&HW_CTRL)) return -3;
++    /* sdmmagpie: source 6 = GPLL0 main divided, half-divider 2 = 1.5. */
++    cfg=(cfg & ~(SRC_MASK|DIV_MASK|MODE_MASK)) | (6u<<8) | 2u;
++    s->poisoned=1;
++    if (o->write(o->ctx,CFG,cfg) || o->write(o->ctx,CMD,cmd|UPDATE)) return -2;
++    s->stage=1;
++    for (unsigned i=0;i<500;i++) {
++        if (o->read(o->ctx,CMD,&v)) return -2;
++        s->last=v;
++        if (!(v&UPDATE)) break;
++        if (i==499) return -4;
++        o->delay_us(o->ctx,1);
++    }
++    if (o->write(o->ctx,BRANCH,branch|1u)) return -2;
++    s->stage=2;
++    for (unsigned i=0;i<500;i++) {
++        if (o->read(o->ctx,BRANCH,&v)) return -2;
++        s->last=v;
++        if (!(v&OFF) && (v&1u)) {
++            if (o->read(o->ctx,CMD,&cmd)) return -2;
++            if (!(cmd&OFF)) { s->stage=3; s->poisoned=0; return 0; }
++        }
++        o->delay_us(o->ctx,1);
++    }
++    return -4;
++}
+diff --git a/bsd/dev/sweet_gmu_clock.h b/bsd/dev/sweet_gmu_clock.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_clock.h
+@@ -0,0 +1,10 @@
++#ifndef SWEET_GMU_CLOCK_H
++#define SWEET_GMU_CLOCK_H
++#include <stdint.h>
++/* GPUCC-relative offsets. Caller must own the clock, establish CX and the
++ * 300 MHz divided GPLL0 parent, and serialize all other clock clients.
++ * No automatic rollback: failure after a write leaves state uncertain. */
++struct sweet_gmu_clock_ops { void *ctx; int (*read)(void *,uint32_t,uint32_t *); int (*write)(void *,uint32_t,uint32_t); void (*delay_us)(void *,unsigned); };
++struct sweet_gmu_clock_state { unsigned stage, poisoned; uint32_t last; };
++int sweet_gmu_clock_enable_200(const struct sweet_gmu_clock_ops *, int parent_verified, struct sweet_gmu_clock_state *);
++#endif

@@ -1,0 +1,81 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -12,6 +12,7 @@
+ #include "sweet_gpu_branch.h"
+ #include "sweet_gpu_gdsc.h"
+ #include "sweet_smmu_discover.h"
++#include "sweet_gmu_clock.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_gpu_probe(void);
+@@ -54,6 +55,19 @@
+     if (!value || off > 0xffcu || (off & 3u)) return -1;
+     *value = *(volatile uint32_t *)((vm_offset_t)ctx + off);
+     __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
++}
++
++/* 200 MHz GMU clock test; no GMU register or SMMU write access. */
++static int gmu_clk_read(void *ctx, uint32_t off, uint32_t *v) {
++    if (!v || (off != 0x1098u && off != 0x109cu && off != 0x1120u && off != 0x1124u)) return -1;
++    *v = *(volatile uint32_t *)((vm_offset_t)ctx + off - 0x1000u);
++    __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
++}
++static int gmu_clk_write(void *ctx, uint32_t off, uint32_t v) {
++    if (off != 0x1098u && off != 0x1120u && off != 0x1124u) return -1;
++    __asm__ volatile ("dsb osh" ::: "memory");
++    *(volatile uint32_t *)((vm_offset_t)ctx + off - 0x1000u) = v;
++    __asm__ volatile ("dsb osh" ::: "memory"); return 0;
+ }
+ 
+ void
+@@ -143,6 +157,49 @@
+             }
+         }
+     }
++    /* GPU GPLL0 parent: the described divider is fixed at /2. Accept only
++     * the expected 600 MHz PLL register encoding and active/locked mode.
++     * This is not a direct clock measurement or proof of ownership. */
++    int gmu_clock_test = 0;
++    if (PE_parse_boot_argn("sweetgmuclock", &gmu_clock_test, sizeof(gmu_clock_test)) && gmu_clock_test == 1) {
++        if (!cx_ok || !memnoc_state.acquired || memnoc_state.poisoned) {
++            printf("SWEET GPU: GMU clock skipped: CX or memnoc unavailable\n");
++        } else {
++            vm_offset_t pll = ml_io_map(0x00100000ull, 0x1000u);
++            vm_offset_t vote = ml_io_map(0x00152000ull, 0x1000u);
++            vm_offset_t cc = ml_io_map(0x05091000ull, 0x1000u);
++            if (!pll || !vote || !cc) printf("SWEET GPU: GMU clock map failed\n");
++            else {
++                uint32_t mode = *(volatile uint32_t *)(pll + 0x000u);
++                uint32_t l = *(volatile uint32_t *)(pll + 0x004u);
++                uint32_t frac = *(volatile uint32_t *)(pll + 0x038u);
++                uint32_t gates = *(volatile uint32_t *)(vote + 0x004u);
++                __asm__ volatile ("dmb oshld" ::: "memory");
++                printf("SWEET GPU: GPLL0 mode=%08x L=%08x frac=%08x gates=%08x\n", mode, l, frac, gates);
++                if (mode == 0xffffffffu || gates == 0xffffffffu ||
++                    !(mode & ((1u<<30)|(1u<<31))) || l != 31u || frac != 0x40000000u) {
++                    printf("SWEET GPU: GMU clock skipped: GPLL0 prerequisites unconfirmed\n");
++                } else {
++                    printf("SWEET GPU: about to vote parent and configure GMU clock; access may fault\n");
++                    delay(1000000);
++                    __asm__ volatile ("dsb osh" ::: "memory");
++                    *(volatile uint32_t *)(vote + 0x004u) = gates | (1u<<16);
++                    __asm__ volatile ("dsb osh" ::: "memory");
++                    delay(10);
++                    uint32_t check = *(volatile uint32_t *)(vote + 0x004u);
++                    __asm__ volatile ("dmb oshld" ::: "memory");
++                    if (check == 0xffffffffu || !(check & (1u<<16))) {
++                        printf("SWEET GPU: GMU parent vote not confirmed: %08x\n", check);
++                    } else {
++                        struct sweet_gmu_clock_ops ops = {(void *)cc, gmu_clk_read, gmu_clk_write, memnoc_delay};
++                        struct sweet_gmu_clock_state st = {0};
++                        int rc = sweet_gmu_clock_enable_200(&ops, 1, &st);
++                        printf("SWEET GPU: GMU 200MHz clock rc=%d stage=%u last=%08x poisoned=%u\n", rc, st.stage, st.last, st.poisoned);
++                    }
++                }
++            }
++        }
++    }
+     /* GPUCC status-only probe: explicit opt-in because cfg clock status
+      * does not prove the target domain is powered or MMIO is safe. */
+     int cx_probe = 0;

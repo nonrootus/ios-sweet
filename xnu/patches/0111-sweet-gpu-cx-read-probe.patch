@@ -1,0 +1,30 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -68,6 +68,26 @@
+         printf("SWEET GPU: memnoc vote test rc=%d state=0x%08x owned=%u poisoned=%u; no GPU/SMMU access\n",
+             rc, memnoc_state.last, memnoc_state.owned, memnoc_state.poisoned);
+     }
++    /* GPUCC status-only probe: explicit opt-in because cfg clock status
++     * does not prove the target domain is powered or MMIO is safe. */
++    int cx_probe = 0;
++    if (PE_parse_boot_argn("sweetgpucxread", &cx_probe, sizeof(cx_probe)) && cx_probe == 1) {
++        if (state & SWEET_CLK_OFF) {
++            printf("SWEET GPU: GPUCC CX probe skipped: cfg AHB off\n");
++        } else {
++            printf("SWEET GPU: about to read GPUCC CX status; access may fault\n");
++            delay(1000000); /* give persistent logger a chance before MMIO */
++            vm_offset_t cc = ml_io_map(0x05091000ull, 0x1000u);
++            if (!cc) printf("SWEET GPU: GPUCC CX map failed\n");
++            else {
++                uint32_t ctrl = *(volatile uint32_t *)(cc + 0x06cu);
++                __asm__ volatile ("dmb oshld" ::: "memory");
++                uint32_t status = *(volatile uint32_t *)(cc + 0x540u);
++                __asm__ volatile ("dmb oshld" ::: "memory");
++                printf("SWEET GPU: CX GDSC ctrl=0x%08x status=0x%08x; no GPUCC writes\n", ctrl, status);
++            }
++        }
++    }
+     int arc_probe = 0;
+     if (PE_parse_boot_argn("sweetgpuarcread", &arc_probe, sizeof(arc_probe)) && arc_probe == 1) {
+         const char *names[2] = {"cx.lvl", "gfx.lvl"};

@@ -1,0 +1,119 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index faa8b3d..c2d89df 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -115,6 +115,8 @@ bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_gdsc.c			standard
+ bsd/dev/sweet_gpu_gmu.c			standard
+ bsd/dev/sweet_gpu_hfi_table.c		standard
++bsd/dev/sweet_hfi_codec.c		standard
++bsd/dev/sweet_hfi_ring.c			standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_hfi_codec.c b/bsd/dev/sweet_hfi_codec.c
+new file mode 100644
+index 0000000..c3db22c
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_codec.c
+@@ -0,0 +1,22 @@
++#include "sweet_hfi_codec.h"
++int sweet_hfi_command_header(uint8_t id, uint16_t sequence, size_t words, uint32_t *header) {
++    if (!header || !words || words > 255 || sequence > 4095) return -1;
++    *header = ((uint32_t)sequence << 20) | ((uint32_t)words << 8) | id;
++    return 0;
++}
++int sweet_hfi_response(const uint32_t *msg, size_t available, uint8_t command,
++    uint16_t sequence, uint32_t *firmware_error, const uint32_t **payload, size_t *payload_words) {
++    size_t words;
++    uint32_t original;
++    if (!msg || !firmware_error || !payload || !payload_words || sequence > 4095 || available < 1) return -1;
++    words = (msg[0] >> 8) & 255u;
++    if (words < 3 || words > available) return -1;
++    /* Firmware error events and unknown response IDs are not command ACKs. */
++    if ((msg[0] & 255u) != 126u || ((msg[0] >> 16) & 15u) != 2u) return -1;
++    original = msg[1];
++    if ((original & 255u) != command || ((original >> 20) & 4095u) != sequence) return 1;
++    *firmware_error = msg[2];
++    *payload = msg + 3;
++    *payload_words = words - 3;
++    return msg[2] ? 2 : 0;
++}
+diff --git a/bsd/dev/sweet_hfi_codec.h b/bsd/dev/sweet_hfi_codec.h
+new file mode 100644
+index 0000000..702a3d2
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_codec.h
+@@ -0,0 +1,10 @@
++#ifndef SWEET_HFI_CODEC_H
++#define SWEET_HFI_CODEC_H
++#include <stddef.h>
++#include <stdint.h>
++/* Host-side packet codec only; does not access shared memory or hardware. */
++int sweet_hfi_command_header(uint8_t id, uint16_t sequence, size_t words, uint32_t *header);
++/* 0: matching success, 1: different command, 2: firmware error, -1: malformed. */
++int sweet_hfi_response(const uint32_t *msg, size_t available, uint8_t command,
++    uint16_t sequence, uint32_t *firmware_error, const uint32_t **payload, size_t *payload_words);
++#endif
+diff --git a/bsd/dev/sweet_hfi_ring.c b/bsd/dev/sweet_hfi_ring.c
+new file mode 100644
+index 0000000..bb2fe0b
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_ring.c
+@@ -0,0 +1,38 @@
++#include "sweet_hfi_ring.h"
++/* Keep one unused word to distinguish full from empty. Legacy HFI v1 has
++ * no four-word padding. Never publish indexes to a live device from here. */
++int sweet_hfi_ring_write(uint32_t *ring, size_t size, size_t read_index,
++    size_t *write_index, const uint32_t *message, size_t words) {
++    size_t used, index, i;
++    if (!ring || !write_index || !message || size < 2 || read_index >= size ||
++        *write_index >= size || !words || words > 255 || words >= size ||
++        ((message[0] >> 8) & 255u) != words) return -1;
++    index = *write_index;
++    used = index >= read_index ? index - read_index : size - read_index + index;
++    if (words > size - used - 1) return 1;
++    for (i = 0; i < words; ++i) {
++        ring[index] = message[i];
++        if (++index == size) index = 0;
++    }
++    *write_index = index;
++    return 0;
++}
++int sweet_hfi_ring_read(const uint32_t *ring, size_t size, size_t *read_index,
++    size_t write_index, uint32_t *output, size_t capacity, size_t *words) {
++    size_t available, count, index, i;
++    if (!ring || !read_index || !output || !words || size < 2 ||
++        *read_index >= size || write_index >= size) return -1;
++    index = *read_index;
++    available = write_index >= index ? write_index - index : size - index + write_index;
++    if (!available) return 1;
++    count = (ring[index] >> 8) & 255u;
++    if (!count || count >= size || count > capacity) return -1;
++    if (count > available) return 1;
++    for (i = 0; i < count; ++i) {
++        output[i] = ring[index];
++        if (++index == size) index = 0;
++    }
++    *read_index = index;
++    *words = count;
++    return 0;
++}
+diff --git a/bsd/dev/sweet_hfi_ring.h b/bsd/dev/sweet_hfi_ring.h
+new file mode 100644
+index 0000000..df4e7f4
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_ring.h
+@@ -0,0 +1,12 @@
++#ifndef SWEET_HFI_RING_H
++#define SWEET_HFI_RING_H
++#include <stddef.h>
++#include <stdint.h>
++/* Offline legacy HFI ring: caller owns synchronization, cache and barriers.
++ * The API does not touch a hardware queue or signal the GMU. */
++int sweet_hfi_ring_write(uint32_t *ring, size_t size, size_t read_index,
++    size_t *write_index, const uint32_t *message, size_t words);
++/* 0 success, 1 empty or incomplete, -1 invalid or output too small. */
++int sweet_hfi_ring_read(const uint32_t *ring, size_t size, size_t *read_index,
++    size_t write_index, uint32_t *output, size_t capacity, size_t *words);
++#endif

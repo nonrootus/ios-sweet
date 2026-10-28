@@ -1,0 +1,50 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 3889652..6fce9b3 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -445,4 +445,45 @@ sweet_rpmh_gpu_arc_select(const char *res, unsigned requested,
+     *address = addr; *selector = selected; *actual_level = selected_level;
+     return 0;
+ }
++
++/* A GPU client may only raise an ARC vote above a verified existing vote.
++ * Never call until every local writer of this shared resource is coordinated
++ * and the baseline is obtained from a reliable source. This backend does not
++ * implement lowering, release, sleep/wake votes, or hardware initialization. */
++struct sweet_arc_vote { bool ready; unsigned baseline, current; };
++static struct sweet_arc_vote sweet_gpu_arc_votes[2];
++int
++sweet_rpmh_gpu_arc_raise(const char *res, unsigned requested,
++    unsigned verified_baseline, unsigned *effective_selector)
++{
++    uint32_t address, offset = 0, value;
++    unsigned selector, level, domain;
++    int error;
++    if (!res || !effective_selector || !verified_baseline || verified_baseline > 15)
++        return EINVAL;
++    if (!strcmp(res, "cx.lvl")) domain = 0;
++    else if (!strcmp(res, "gfx.lvl")) domain = 1;
++    else return EINVAL;
++    error = sweet_rpmh_gpu_arc_select(res, requested, &address, &selector, &level);
++    if (error) return error;
++    if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
++    struct sweet_arc_vote *vote = &sweet_gpu_arc_votes[domain];
++    if (rh_poisoned) { error = EIO; goto out; }
++    if (!vote->ready) {
++        vote->baseline = verified_baseline;
++        vote->current = verified_baseline;
++        vote->ready = true;
++    } else if (vote->baseline != verified_baseline) { error = EINVAL; goto out; }
++    if (selector > vote->current) {
++        value = selector;
++        error = rh_send_commands(address, &offset, &value, 1);
++        if (error) goto out;
++        vote->current = selector;
++    }
++    *effective_selector = vote->current;
++    error = 0;
++out:
++    __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++    return error;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

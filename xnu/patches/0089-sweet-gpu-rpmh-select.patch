@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 9e9437b..3515eaa 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -408,4 +408,33 @@ out:
+     __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+     return error;
+ }
++
++/* Translate the requested consumer level to the ARC hardware selector.
++ * The command-db table is device-specific; zero entries after the first
++ * are padding. This function does not send a request to the hardware. */
++int
++sweet_rpmh_gpu_arc_select(const char *res, unsigned requested,
++    uint32_t *address, unsigned *selector, unsigned *actual_level)
++{
++    uint16_t raw[16];
++    uint32_t addr;
++    unsigned count, previous = 0, selected = 0, selected_level = 0;
++    bool found = false, padding = false;
++    int error;
++    if (!address || !selector || !actual_level || requested < 2) return EINVAL;
++    error = sweet_rpmh_gpu_arc_info(res, &addr, raw, &count);
++    if (error) return error;
++    for (unsigned i = 0; i < count; ++i) {
++        if (i && !raw[i]) { padding = true; continue; }
++        if (padding || (i && raw[i] <= previous)) return EINVAL;
++        previous = raw[i];
++        unsigned level = (unsigned)raw[i] + 1u;
++        if (!found && level >= requested) {
++            selected = i; selected_level = level; found = true;
++        }
++    }
++    if (!found || !selected) return ENODEV;
++    *address = addr; *selector = selected; *actual_level = selected_level;
++    return 0;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

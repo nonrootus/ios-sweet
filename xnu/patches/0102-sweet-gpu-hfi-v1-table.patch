@@ -1,0 +1,53 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 28be7f6..faa8b3d 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -114,6 +114,7 @@ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_gdsc.c			standard
+ bsd/dev/sweet_gpu_gmu.c			standard
++bsd/dev/sweet_gpu_hfi_table.c		standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_gpu_hfi_table.c b/bsd/dev/sweet_gpu_hfi_table.c
+new file mode 100644
+index 0000000..a8dc681
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_hfi_table.c
+@@ -0,0 +1,20 @@
++#include "sweet_gpu_hfi_table.h"
++/* Legacy A615-family downstream HFI layout. Table header is 6 dwords,
++ * four queue headers are 12 dwords each, first queue begins at byte 224. */
++static void put32(uint8_t *p, uint32_t x) {
++    p[0]=(uint8_t)x;p[1]=(uint8_t)(x>>8);p[2]=(uint8_t)(x>>16);p[3]=(uint8_t)(x>>24);
++}
++int sweet_gpu_hfi_table_init(void *buffer, size_t capacity, uint32_t base) {
++    uint8_t *b=buffer;
++    static const uint8_t id[4]={0,4,5,1}, priority[4]={10,10,40,20};
++    if (!b || capacity<SWEET_HFI_V1_BYTES || (base&15u) ||
++        (uint64_t)base+SWEET_HFI_V1_BYTES>UINT64_C(0x100000000)) return -1;
++    for (size_t i=0;i<SWEET_HFI_V1_BYTES;i++) b[i]=0;
++    put32(b+4,54);put32(b+8,6);put32(b+12,12);put32(b+16,4);put32(b+20,4);
++    for (unsigned i=0;i<4;i++) {
++        uint8_t *h=b+24+i*48;
++        put32(h, i!=3);put32(h+4,base+224+i*4096);
++        put32(h+8,id[i] | (uint32_t)priority[i]<<8);put32(h+12,1024);
++    }
++    return 0;
++}
+diff --git a/bsd/dev/sweet_gpu_hfi_table.h b/bsd/dev/sweet_gpu_hfi_table.h
+new file mode 100644
+index 0000000..ae1e79c
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_hfi_table.h
+@@ -0,0 +1,9 @@
++#ifndef SWEET_GPU_HFI_TABLE_H
++#define SWEET_GPU_HFI_TABLE_H
++#include <stddef.h>
++#include <stdint.h>
++#define SWEET_HFI_V1_BYTES 16608u
++/* Downstream four-header legacy layout. Caller owns aligned GPU-visible memory,
++ * cache maintenance, mapping, synchronization and hardware protocol. */
++int sweet_gpu_hfi_table_init(void *, size_t, uint32_t gmu_iova);
++#endif

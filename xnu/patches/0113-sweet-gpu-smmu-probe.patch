@@ -1,0 +1,63 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -11,6 +11,7 @@
+ #include <kern/clock.h>
+ #include "sweet_gpu_branch.h"
+ #include "sweet_gpu_gdsc.h"
++#include "sweet_smmu_discover.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_gpu_probe(void);
+@@ -47,6 +48,12 @@
+     __asm__ volatile ("dsb osh" ::: "memory");
+     *(volatile uint32_t *)((vm_offset_t)ctx + 0x06cu) = value;
+     __asm__ volatile ("dsb osh" ::: "memory"); return 0;
++}
++
++static int smmu_read(void *ctx, uint32_t off, uint32_t *value) {
++    if (!value || off > 0xffcu || (off & 3u)) return -1;
++    *value = *(volatile uint32_t *)((vm_offset_t)ctx + off);
++    __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
+ }
+ 
+ void
+@@ -104,6 +111,38 @@
+         printf("SWEET GPU: memnoc vote test rc=%d state=0x%08x owned=%u poisoned=%u; no GPU/SMMU access\n",
+             rc, memnoc_state.last, memnoc_state.owned, memnoc_state.poisoned);
+     }
++    /* SMMU and GPUCC diagnostics, only after successful CX and memnoc
++     * acquisition. Preconditions do not guarantee MMIO access is safe. */
++    int smmu_probe = 0;
++    if (PE_parse_boot_argn("sweetgpusmmuread", &smmu_probe, sizeof(smmu_probe)) && smmu_probe == 1) {
++        if (!cx_ok || !memnoc_state.acquired || memnoc_state.poisoned) {
++            printf("SWEET GPU: SMMU probe skipped: CX or memnoc not acquired\n");
++        } else {
++            printf("SWEET GPU: about to read SMMU and GMU clock status; access may fault\n");
++            delay(1000000);
++            vm_offset_t cc = ml_io_map(0x05091000ull, 0x1000u);
++            if (cc) {
++                uint32_t gmu = *(volatile uint32_t *)(cc + 0x098u);
++                uint32_t cxo = *(volatile uint32_t *)(cc + 0x09cu);
++                uint32_t root = *(volatile uint32_t *)(cc + 0x120u);
++                __asm__ volatile ("dmb oshld" ::: "memory");
++                printf("SWEET GPU: GMU CLK=0x%08x CXO=0x%08x ROOT=0x%08x\n", gmu, cxo, root);
++            } else printf("SWEET GPU: clock status map failed\n");
++            vm_offset_t smmu = ml_io_map(0x05040000ull, 0x1000u);
++            if (!smmu) printf("SWEET GPU: SMMU map failed\n");
++            else {
++                const uint16_t sid[4] = {0, 2, 4, 5};
++                struct sweet_smmu_ops ops = {(void *)smmu, smmu_read};
++                for (unsigned i = 0; i < 4; ++i) {
++                    struct sweet_smmu_match m = {0};
++                    int rc = sweet_smmu_discover(&ops, sid[i], &m);
++                    printf("SWEET GPU: SMMU sid=%u rc=%d id=%08x/%08x/%08x entry=%u type=%u cb=%u\n",
++                        sid[i], rc, m.id0, m.id1, m.id2, m.index, m.type, m.context_bank);
++                    if (rc < 0) break;
++                }
++            }
++        }
++    }
+     /* GPUCC status-only probe: explicit opt-in because cfg clock status
+      * does not prove the target domain is powered or MMIO is safe. */
+     int cx_probe = 0;

@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/sweet_gpu_gdsc.c b/bsd/dev/sweet_gpu_gdsc.c
+index c4b1caf..8096c7d 100644
+--- a/bsd/dev/sweet_gpu_gdsc.c
++++ b/bsd/dev/sweet_gpu_gdsc.c
+@@ -51,3 +51,28 @@ int sweet_gpu_gx_enable(const struct sweet_gpu_gdsc_ops *o,
+     }
+     return -4; /* Keep clock held after uncertain failure for caller recovery. */
+ }
++
++/* Root generator for GX GFX3D at GPUCC + 0x101c. Parent must be prepared;
++ * this does not configure PLL, source mux, voltage or bus access. */
++int sweet_gpu_root_acquire(const struct sweet_gpu_gdsc_ops *o, struct sweet_gpu_root_state *s) {
++    uint32_t value;
++    if (!o || !s || !o->read32 || !o->write32 || !o->delay_us || s->active) return -1;
++    if (o->read32(o->ctx, 0x101c, &value)) return -2;
++    s->active=1; s->owned=!(value & 2u);
++    if (s->owned && o->write32(o->ctx, 0x101c, value | 2u)) return -2;
++    for (unsigned i=0;i<500;i++) {
++        if (o->read32(o->ctx, 0x101c, &value)) return -2;
++        if (!(value & (1u << 31))) return 0;
++        o->delay_us(o->ctx, 1);
++    }
++    return -4;
++}
++int sweet_gpu_root_release(const struct sweet_gpu_gdsc_ops *o, struct sweet_gpu_root_state *s) {
++    uint32_t value;
++    if (!o || !s || !s->active || !o->read32 || !o->write32 || !o->delay_us) return -1;
++    if (s->owned) {
++        if (o->read32(o->ctx, 0x101c, &value) || o->write32(o->ctx, 0x101c, value & ~2u)) return -2;
++        o->delay_us(o->ctx, 100);
++    }
++    s->active=0; s->owned=0; return 0;
++}
+diff --git a/bsd/dev/sweet_gpu_gdsc.h b/bsd/dev/sweet_gpu_gdsc.h
+index d73d6ab..1b5d648 100644
+--- a/bsd/dev/sweet_gpu_gdsc.h
++++ b/bsd/dev/sweet_gpu_gdsc.h
+@@ -13,4 +13,9 @@ struct sweet_gpu_gdsc_ops {
+ };
+ struct sweet_gpu_gdsc_result { unsigned root_held, stage; uint32_t status; };
+ int sweet_gpu_gx_enable(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_gdsc_result *);
++/* Caller must serialize all root-clock clients and ensure the parent clock
++ * is running. Releases only a force-enable bit acquired by this helper. */
++struct sweet_gpu_root_state { unsigned active, owned; };
++int sweet_gpu_root_acquire(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_root_state *);
++int sweet_gpu_root_release(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_root_state *);
+ #endif

@@ -1,0 +1,93 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 8812c26..83b558a 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,7 @@ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/sweet_gpu_firmware.c		standard
++bsd/dev/sweet_gpu_gdsc.c			standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+diff --git a/bsd/dev/sweet_gpu_gdsc.c b/bsd/dev/sweet_gpu_gdsc.c
+new file mode 100644
+index 0000000..c4b1caf
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_gdsc.c
+@@ -0,0 +1,53 @@
++#include "sweet_gpu_gdsc.h"
++/* Derived from the captured sweet_k6a FDT and Qualcomm GDSC register protocol.
++ * No address mapping or power/clock vote occurs here. Do not wire to boot
++ * until parent supplies, the root clock, and shared ownership are established. */
++#define GX_RESET 0x1008u
++#define GX_GDSC 0x100cu
++#define GX_DOMAIN 0x1508u
++#define PWR_ON (1u << 31)
++#define HW_CTRL (1u << 1)
++#define COLLAPSE (1u << 0)
++#define RESET (1u << 0)
++#define GMEM_RESET (1u << 4)
++#define GMEM_CLAMP (1u << 0)
++static int change(const struct sweet_gpu_gdsc_ops *o, uint32_t reg,
++    uint32_t set, uint32_t clear) {
++    uint32_t value, check;
++    if (o->read32(o->ctx, reg, &value)) return -1;
++    value = (value | set) & ~clear;
++    if (o->write32(o->ctx, reg, value) || o->read32(o->ctx, reg, &check)) return -1;
++    return ((check & (set | clear)) == (value & (set | clear))) ? 0 : -1;
++}
++int sweet_gpu_gx_enable(const struct sweet_gpu_gdsc_ops *o,
++    struct sweet_gpu_gdsc_result *result) {
++    uint32_t state;
++    if (!o || !result || !o->read32 || !o->write32 || !o->root_clock || !o->delay_us) return -1;
++    result->root_held=0; result->stage=0; result->status=0;
++    if (o->root_clock(o->ctx, 1)) return -2;
++    result->root_held=1; result->stage=1;
++    if (o->read32(o->ctx, GX_GDSC, &state)) return -2;
++    result->status=state;
++    /* Do not reset a running or hardware-controlled domain. */
++    if ((state & (PWR_ON | HW_CTRL)) || !(state & COLLAPSE)) return -3;
++    if (change(o, GX_RESET, RESET, 0)) return -2;
++    result->stage=2; o->delay_us(o->ctx, 1);
++    if (change(o, GX_RESET, 0, RESET)) return -2;
++    if (change(o, GX_DOMAIN, GMEM_RESET, 0)) return -2;
++    result->stage=3; o->delay_us(o->ctx, 1);
++    if (change(o, GX_DOMAIN, 0, GMEM_RESET)) return -2;
++    if (change(o, GX_DOMAIN, 0, GMEM_CLAMP)) return -2;
++    if (change(o, GX_GDSC, 0, COLLAPSE)) return -2;
++    result->stage=4; o->delay_us(o->ctx, 1);
++    for (unsigned i=0; i<100; ++i) {
++        if (o->read32(o->ctx, GX_GDSC, &state)) return -2;
++        result->status=state;
++        if (state & PWR_ON) {
++            result->stage=5;
++            if (o->root_clock(o->ctx, 0)) return -2;
++            result->root_held=0; return 0;
++        }
++        o->delay_us(o->ctx, 1);
++    }
++    return -4; /* Keep clock held after uncertain failure for caller recovery. */
++}
+diff --git a/bsd/dev/sweet_gpu_gdsc.h b/bsd/dev/sweet_gpu_gdsc.h
+new file mode 100644
+index 0000000..d73d6ab
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_gdsc.h
+@@ -0,0 +1,16 @@
++#ifndef SWEET_GPU_GDSC_H
++#define SWEET_GPU_GDSC_H
++#include <stdint.h>
++/* All offsets relative to sdmmagpie GPUCC (0x05090000). Call only after
++ * parent rails and the configuration bus are safely enabled. Caller owns
++ * serialization, clock/reference accounting and recovery on partial failure. */
++struct sweet_gpu_gdsc_ops {
++    void *ctx;
++    int (*read32)(void *, uint32_t, uint32_t *);
++    int (*write32)(void *, uint32_t, uint32_t);
++    int (*root_clock)(void *, int enable);
++    void (*delay_us)(void *, unsigned);
++};
++struct sweet_gpu_gdsc_result { unsigned root_held, stage; uint32_t status; };
++int sweet_gpu_gx_enable(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_gdsc_result *);
++#endif

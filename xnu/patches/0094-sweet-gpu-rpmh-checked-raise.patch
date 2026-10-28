@@ -1,0 +1,52 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 52c7348..b8d80c9 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -520,4 +520,47 @@ out:
+     __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+     return error;
+ }
++
++/* Read and optionally raise this APPS DRV vote under the same lock. This
++ * is not global rail state; every APPS DRV writer must use this lock.
++ * Deliberately no automatic caller until the hardware is validated. */
++int
++sweet_rpmh_gpu_arc_raise_checked(const char *res, unsigned requested,
++    unsigned *effective_selector)
++{
++    uint16_t raw[16];
++    uint32_t addr, selected_addr, offset = 0, current = 0, value;
++    unsigned count, selected, level, domain;
++    int error;
++    if (!res || !effective_selector) return EINVAL;
++    if (!strcmp(res, "cx.lvl")) domain = 0;
++    else if (!strcmp(res, "gfx.lvl")) domain = 1;
++    else return EINVAL;
++    error = sweet_rpmh_gpu_arc_info(res, &addr, raw, &count);
++    if (error) return error;
++    error = sweet_rpmh_gpu_arc_select(res, requested, &selected_addr, &selected, &level);
++    if (error) return error;
++    if (addr != selected_addr) return EIO;
++    if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
++    struct sweet_arc_vote *vote = &sweet_gpu_arc_votes[domain];
++    if (rh_poisoned) { error = EIO; goto out; }
++    error = rh_send_commands(addr, &offset, NULL, 1, &current);
++    if (error) goto out;
++    if (current >= count || (current && !raw[current])) { error = EIO; goto out; }
++    if (vote->ready && vote->current != current) { error = EBUSY; goto out; }
++    if (!vote->ready) {
++        vote->baseline = current; vote->current = current; vote->ready = true;
++    }
++    if (selected > current) {
++        value = selected;
++        error = rh_send_commands(addr, &offset, &value, 1, NULL);
++        if (error) goto out;
++        vote->current = selected;
++    }
++    *effective_selector = vote->current;
++    error = 0;
++out:
++    __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++    return error;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

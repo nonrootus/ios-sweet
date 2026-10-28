@@ -1,0 +1,100 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index 6fce9b3..f14af55 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -34,6 +34,7 @@ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ #define RH_ADDR         0x34u
+ #define RH_DATA         0x38u
+ #define RH_CMD_STATUS   0x3cu
++#define RH_RESP_DATA    0x40u
+ #define RH_AMC_EN       (1u << 16)
+ #define RH_TRIGGER      (1u << 24)
+ #define RH_ISSUED       (1u << 8)
+@@ -220,9 +221,9 @@ rh_free(unsigned t)
+ 
+ static int
+ rh_send_commands(uint32_t address, const uint32_t *offsets,
+-    const uint32_t *values, unsigned n)
++    const uint32_t *values, unsigned n, uint32_t *response)
+ {
+-	if (!offsets || !values || !n || n > 3 || n > rh_ncpt) return EINVAL;
++	if (!offsets || !n || n > 3 || n > rh_ncpt || (response ? n != 1 : !values)) return EINVAL;
+ 	uint32_t mask = (1u << n) - 1u;
+ 	int chosen = -1;
+ 	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
+@@ -272,9 +273,9 @@ rh_send_commands(uint32_t address, const uint32_t *offsets,
+ 	printf("SWEET RPMH: TCS%u ACTIVE %u commands irq-enable=%#x\n", t, n, irq_en);
+ 	for (unsigned c = 0; c < n; ++c) {
+ 		uint32_t cmd = b + c * RH_CMD_STRIDE;
+-		if (!rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) ||
++		if (!rh_sync(cmd + RH_MSGID, response ? (8u | (1u << 8)) : RH_WRITE_ACK) ||
+ 		    !rh_sync(cmd + RH_ADDR, address + offsets[c]) ||
+-		    !rh_sync(cmd + RH_DATA, values[c])) {
++		    (response ? false : !rh_sync(cmd + RH_DATA, values[c]))) {
+ 			return EIO;
+ 		}
+ 	}
+@@ -309,6 +310,8 @@ rh_send_commands(uint32_t address, const uint32_t *offsets,
+ 		printf("SWEET RPMH: timeout; TCS quarantined, IRQ remains masked; no reset/retry\n");
+ 		return ETIMEDOUT;
+ 	}
++	/* Capture the read response before releasing the command slot. */
++	uint32_t read_result = response ? rh_read(rh_tcs, b + RH_RESP_DATA) : 0;
+ 	/* Proven completion: clear trigger before mode, then free only our commands. */
+ 	if (!rh_sync(b + RH_CONTROL, RH_AMC_EN) || !rh_sync(b + RH_CONTROL, 0) ||
+ 	    !rh_sync(b + RH_ENABLE, 0) || !rh_sync(b + RH_WAIT, 0)) {
+@@ -319,6 +322,7 @@ rh_send_commands(uint32_t address, const uint32_t *offsets,
+ 	    !rh_sync(RH_IRQ_EN, (rh_read(rh_tcs, RH_IRQ_EN) & ~bit) | (irq_en & bit))) {
+ 		return EIO;
+ 	}
++	if (response) *response = read_result;
+ 	rh_poisoned = false;
+ 	printf("SWEET RPMH: regulator ACTIVE vote complete (rail voltage requires hardware verification)\n");
+ 	return 0;
+@@ -330,7 +334,7 @@ rh_send(uint32_t address, unsigned mv)
+     /* Preserve PMIC5 LDO sequence: voltage, HPM, then enable. */
+     const uint32_t offsets[3] = {0, 8, 4};
+     const uint32_t values[3] = {mv, 7, 1};
+-    return rh_send_commands(address, offsets, values, 3);
++    return rh_send_commands(address, offsets, values, 3, NULL);
+ }
+ int
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+@@ -476,7 +480,7 @@ sweet_rpmh_gpu_arc_raise(const char *res, unsigned requested,
+     } else if (vote->baseline != verified_baseline) { error = EINVAL; goto out; }
+     if (selector > vote->current) {
+         value = selector;
+-        error = rh_send_commands(address, &offset, &value, 1);
++        error = rh_send_commands(address, &offset, &value, 1, NULL);
+         if (error) goto out;
+         vote->current = selector;
+     }
+@@ -486,4 +490,28 @@ out:
+     __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+     return error;
+ }
++
++/* Reads only this APPS DRV's vote; this is not the global rail state.
++ * RPMh read transactions still program a temporary TCS command slot. */
++int
++sweet_rpmh_gpu_arc_read(const char *res, unsigned *selector)
++{
++    uint16_t raw[16];
++    uint32_t address, offset = 0, response = 0;
++    unsigned count;
++    int error;
++    if (!selector) return EINVAL;
++    error = sweet_rpmh_gpu_arc_info(res, &address, raw, &count);
++    if (error) return error;
++    if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
++    if (rh_poisoned) { error = EIO; goto out; }
++    error = rh_send_commands(address, &offset, NULL, 1, &response);
++    if (!error) {
++        if (response >= count || (response && !raw[response])) error = EIO;
++        else *selector = response;
++    }
++out:
++    __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++    return error;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

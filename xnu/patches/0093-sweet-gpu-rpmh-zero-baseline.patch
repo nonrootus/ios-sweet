@@ -1,0 +1,32 @@
+diff --git a/bsd/dev/sweet_rpmh.c b/bsd/dev/sweet_rpmh.c
+index f14af55..52c7348 100644
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -458,18 +458,24 @@ struct sweet_arc_vote { bool ready; unsigned baseline, current; };
+ static struct sweet_arc_vote sweet_gpu_arc_votes[2];
+ int
+ sweet_rpmh_gpu_arc_raise(const char *res, unsigned requested,
+-    unsigned verified_baseline, unsigned *effective_selector)
++    unsigned verified_baseline, bool baseline_verified, unsigned *effective_selector)
+ {
+-    uint32_t address, offset = 0, value;
++    uint32_t address, offset = 0, value, checked_address;
++    uint16_t levels[16];
++    unsigned count;
+     unsigned selector, level, domain;
+     int error;
+-    if (!res || !effective_selector || !verified_baseline || verified_baseline > 15)
++    if (!res || !effective_selector || !baseline_verified || verified_baseline > 15)
+         return EINVAL;
+     if (!strcmp(res, "cx.lvl")) domain = 0;
+     else if (!strcmp(res, "gfx.lvl")) domain = 1;
+     else return EINVAL;
++    error = sweet_rpmh_gpu_arc_info(res, &checked_address, levels, &count);
++    if (error) return error;
++    if (verified_baseline >= count || (verified_baseline && !levels[verified_baseline])) return EINVAL;
+     error = sweet_rpmh_gpu_arc_select(res, requested, &address, &selector, &level);
+     if (error) return error;
++    if (address != checked_address) return EIO;
+     if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
+     struct sweet_arc_vote *vote = &sweet_gpu_arc_votes[domain];
+     if (rh_poisoned) { error = EIO; goto out; }

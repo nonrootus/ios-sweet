@@ -1,0 +1,41 @@
+diff --git a/bsd/dev/sweet_gpu_gdsc.c b/bsd/dev/sweet_gpu_gdsc.c
+index 8096c7d..5ed5bbc 100644
+--- a/bsd/dev/sweet_gpu_gdsc.c
++++ b/bsd/dev/sweet_gpu_gdsc.c
+@@ -76,3 +76,24 @@ int sweet_gpu_root_release(const struct sweet_gpu_gdsc_ops *o, struct sweet_gpu_
+     }
+     s->active=0; s->owned=0; return 0;
+ }
++
++/* CX GDSC has a separate hardware status register on sweet_k6a. Parent
++ * supply and the configuration bus must already be enabled by the caller. */
++int sweet_gpu_cx_enable(const struct sweet_gpu_gdsc_ops *o,
++    struct sweet_gpu_gdsc_result *result) {
++    uint32_t ctrl, status;
++    if (!o || !result || !o->read32 || !o->write32 || !o->delay_us) return -1;
++    result->root_held=0; result->stage=0; result->status=0;
++    if (o->read32(o->ctx, 0x106c, &ctrl) || o->read32(o->ctx, 0x1540, &status)) return -2;
++    result->status=status;
++    if ((ctrl & HW_CTRL) || (status & PWR_ON) || !(ctrl & COLLAPSE)) return -3;
++    if (change(o, 0x106c, 0, COLLAPSE)) return -2;
++    result->stage=1; o->delay_us(o->ctx, 1);
++    for (unsigned i=0;i<500;i++) {
++        if (o->read32(o->ctx, 0x1540, &status)) return -2;
++        result->status=status;
++        if (status & PWR_ON) { result->stage=2; return 0; }
++        o->delay_us(o->ctx, 1);
++    }
++    return -4; /* state unknown; no automatic rollback */
++}
+diff --git a/bsd/dev/sweet_gpu_gdsc.h b/bsd/dev/sweet_gpu_gdsc.h
+index 1b5d648..b9470c8 100644
+--- a/bsd/dev/sweet_gpu_gdsc.h
++++ b/bsd/dev/sweet_gpu_gdsc.h
+@@ -12,6 +12,7 @@ struct sweet_gpu_gdsc_ops {
+     void (*delay_us)(void *, unsigned);
+ };
+ struct sweet_gpu_gdsc_result { unsigned root_held, stage; uint32_t status; };
++int sweet_gpu_cx_enable(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_gdsc_result *);
+ int sweet_gpu_gx_enable(const struct sweet_gpu_gdsc_ops *, struct sweet_gpu_gdsc_result *);
+ /* Caller must serialize all root-clock clients and ensure the parent clock
+  * is running. Releases only a force-enable bit acquired by this helper. */

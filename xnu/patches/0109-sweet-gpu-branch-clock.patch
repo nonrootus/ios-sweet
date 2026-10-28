@@ -1,0 +1,57 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -119,6 +119,7 @@
+ bsd/dev/sweet_hfi_ring.c			standard
+ bsd/dev/sweet_hfi_transport.c		standard
+ bsd/dev/sweet_smmu_discover.c		standard
++bsd/dev/sweet_gpu_branch.c		standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+ bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_gpu_branch.c b/bsd/dev/sweet_gpu_branch.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_branch.c
+@@ -0,0 +1,27 @@
++#include "sweet_gpu_branch.h"
++#define VOTE 1u
++#define OFF (1u<<31)
++int sweet_gpu_branch_acquire(const struct sweet_gpu_branch_ops *o, struct sweet_gpu_branch_state *s) {
++    uint32_t v;
++    if (!o || !s || !o->read || !o->write || !o->delay_us || s->acquired || s->poisoned) return -1;
++    if(o->read(o->ctx,&v)) return -1;
++    s->last=v;
++    if(v==0xffffffffu) return -1;
++    if (!(v & VOTE)) {
++        s->poisoned=1;
++        if(o->write(o->ctx,v|VOTE)) return -1;
++        s->owned=1;
++    } else {
++        /* An existing vote is shared and must never be released by us. */
++        s->poisoned=1;
++    }
++    o->delay_us(o->ctx,5);
++    for(unsigned i=0;i<200;i++) {
++        if(o->read(o->ctx,&v)) return -1;
++        s->last=v;
++        if(v==0xffffffffu || !(v&VOTE)) return -1;
++        if(!(v&OFF)) {s->acquired=1; s->poisoned=0; return 0;}
++        o->delay_us(o->ctx,1);
++    }
++    return -2;
++}
+diff --git a/bsd/dev/sweet_gpu_branch.h b/bsd/dev/sweet_gpu_branch.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_branch.h
+@@ -0,0 +1,9 @@
++#ifndef SWEET_GPU_BRANCH_H
++#define SWEET_GPU_BRANCH_H
++#include <stdint.h>
++/* Caller owns serialization and must provide the parent power/clock.
++ * A failure after write leaves state uncertain: do not retry or release. */
++struct sweet_gpu_branch_ops { void *ctx; int (*read)(void *,uint32_t *); int (*write)(void *,uint32_t); void (*delay_us)(void *,unsigned); };
++struct sweet_gpu_branch_state { unsigned acquired, owned, poisoned; uint32_t last; };
++int sweet_gpu_branch_acquire(const struct sweet_gpu_branch_ops *,struct sweet_gpu_branch_state *);
++#endif

@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -177,7 +177,7 @@
+                 __asm__ volatile ("dmb oshld" ::: "memory");
+                 printf("SWEET GPU: GPLL0 mode=%08x L=%08x frac=%08x gates=%08x\n", mode, l, frac, gates);
+                 if (mode == 0xffffffffu || gates == 0xffffffffu ||
+-                    !(mode & ((1u<<30)|(1u<<31))) || l != 31u || frac != 0x40000000u) {
++                    !(mode & ((1u<<30)|(1u<<31))) || l != 31u || frac != 0x00004000u) {
+                     printf("SWEET GPU: GMU clock skipped: GPLL0 prerequisites unconfirmed\n");
+                 } else {
+                     printf("SWEET GPU: about to vote parent and configure GMU clock; access may fault\n");

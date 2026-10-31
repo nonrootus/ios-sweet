@@ -1,6 +1,6 @@
 --- a/bsd/dev/sweet_gpu_probe.c
 +++ b/bsd/dev/sweet_gpu_probe.c
-@@ -91,7 +91,22 @@
+@@ -91,11 +91,31 @@
      *(volatile uint32_t *)(m->tcm + off - 0x3000u) = value;
      __asm__ volatile ("dsb osh" ::: "memory"); return 0;
  }
@@ -21,10 +21,11 @@
 +    return ok;
 +}
 +static void gmu_tcm_probe(vm_offset_t status, vm_offset_t gcc, vm_offset_t cc) {
-     static unsigned attempted;
++    static unsigned attempted;
      const void *fw = 0; size_t size = 0, written = 0, matched = 0;
-     if (__atomic_exchange_n(&attempted, 1, __ATOMIC_ACQ_REL)) {
-@@ -100,6 +115,7 @@
++    if (__atomic_exchange_n(&attempted, 1, __ATOMIC_ACQ_REL)) {
++        printf("SWEET GPU: GMU TCM already attempted; skipping\n"); return;
++    }
      if (sweet_gpu_firmware_get(0, &fw, &size) || !fw || size != 0x8000u) {
          printf("SWEET GPU: GMU TCM skipped: validated firmware unavailable\n"); return;
      }
@@ -32,7 +33,7 @@
      struct sweet_gmu_tcm_mapping m = {ml_io_map(0x0506d000ull, 0x8000u), status};
      if (!m.tcm) { printf("SWEET GPU: GMU TCM mapping failed\n"); return; }
      struct sweet_gpu_gmu_ops ops = {&m, gmu_tcm_read, gmu_tcm_write};
-@@ -116,6 +132,17 @@
+@@ -112,6 +132,17 @@
      if (first == 0xffffffffu && last == 0xffffffffu) {
          printf("SWEET GPU: GMU TCM skipped: sample is all ones\n"); return;
      }
@@ -50,7 +51,7 @@
      printf("SWEET GPU: about to write GMU TCM with CM3 held in reset; access may fault\n");
      delay(1000000);
      int rc = sweet_gpu_gmu_load_legacy(&ops, fw, size, &written);
-@@ -125,6 +152,7 @@
+@@ -121,6 +152,7 @@
      delay(1000000);
      rc = sweet_gpu_gmu_verify_legacy(&ops, fw, size, &matched);
      printf("SWEET GPU: GMU TCM verify rc=%d matched=%lu; CM3 not started\n", rc, (unsigned long)matched);
@@ -58,7 +59,7 @@
  }
  
  void
-@@ -285,7 +313,7 @@
+@@ -281,7 +313,7 @@
                                          if (!gmu_status_ok || gmu_reset != 1u || gmu_busy != 0u ||
                                              gmu_init != 0u || gmu_retention != 0u)
                                              printf("SWEET GPU: GMU TCM skipped: reset/busy/init/retention state unexpected\n");

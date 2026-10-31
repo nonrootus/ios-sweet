@@ -74,6 +74,14 @@ jobs:
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         run: bash build.sh
 
+      - name: Verify required SWEET GPU patch in source and kernel
+        if: env.MACHINE_CONFIG == 'SWEET' && env.KERNEL_CONFIG == 'DEVELOPMENT'
+        run: |
+          grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
+          grep -F 'GMU TCM already attempted' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'TCM prerequisites' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'GMU TCM already attempted' > /dev/null
+
       - name: Package build tree for local compiles
         if: always()
         run: |

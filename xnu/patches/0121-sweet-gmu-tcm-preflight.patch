@@ -1,0 +1,52 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -103,6 +103,19 @@
+     struct sweet_gmu_tcm_mapping m = {ml_io_map(0x0506d000ull, 0x8000u), status};
+     if (!m.tcm) { printf("SWEET GPU: GMU TCM mapping failed\n"); return; }
+     struct sweet_gpu_gmu_ops ops = {&m, gmu_tcm_read, gmu_tcm_write};
++    uint32_t first, last;
++    printf("SWEET GPU: about to sample GMU TCM; access may fault\n");
++    delay(1000000);
++    if (gmu_tcm_read(&m, 0x3000u, &first) || gmu_tcm_read(&m, 0xaffcu, &last)) {
++        printf("SWEET GPU: GMU TCM sample read failed\n"); return;
++    }
++    /* Avoid logging firmware data. Nonzero values do not prove ownership. */
++    printf("SWEET GPU: GMU TCM sample first=%s last=%s\n",
++        first == 0 ? "zero" : first == 0xffffffffu ? "ones" : "other",
++        last == 0 ? "zero" : last == 0xffffffffu ? "ones" : "other");
++    if (first == 0xffffffffu && last == 0xffffffffu) {
++        printf("SWEET GPU: GMU TCM skipped: sample is all ones\n"); return;
++    }
+     printf("SWEET GPU: about to write GMU TCM with CM3 held in reset; access may fault\n");
+     delay(1000000);
+     int rc = sweet_gpu_gmu_load_legacy(&ops, fw, size, &written);
+@@ -251,7 +264,9 @@
+                                 if (!gmu) printf("SWEET GPU: GMU status map failed\n");
+                                 else {
+                                     static const uint32_t off[] = {0x000u, 0x068u, 0x070u, 0x3b0u, 0x730u};
+-                                    int gmu_status_ok = 1; uint32_t gmu_reset = 0xffffffffu;
++                                    int gmu_status_ok = 1;
++                                    uint32_t gmu_reset = 0xffffffffu, gmu_busy = 0xffffffffu;
++                                    uint32_t gmu_init = 0xffffffffu, gmu_retention = 0xffffffffu;
+                                     for (unsigned i = 0; i < sizeof(off)/sizeof(off[0]); ++i) {
+                                         printf("SWEET GPU: about to read GMU +%05x; access may fault\n", 0x14000u + off[i]);
+                                         delay(1000000);
+@@ -260,12 +275,16 @@
+                                         printf("SWEET GPU: GMU +%05x = %08x%s\n", 0x14000u + off[i], val,
+                                             val == 0xffffffffu ? " (unavailable)" : "");
+                                         if (i == 0) gmu_reset = val;
++                                        if (i == 1) gmu_busy = val;
++                                        if (i == 2) gmu_init = val;
++                                        if (i == 4) gmu_retention = val;
+                                         if (val == 0xffffffffu) { gmu_status_ok = 0; break; }
+                                     }
+                                     int gmu_load = 0;
+                                     if (PE_parse_boot_argn("sweetgmuload", &gmu_load, sizeof(gmu_load)) && gmu_load == 1) {
+-                                        if (!gmu_status_ok || gmu_reset != 1u)
+-                                            printf("SWEET GPU: GMU TCM skipped: reset/status not confirmed\n");
++                                        if (!gmu_status_ok || gmu_reset != 1u || gmu_busy != 0u ||
++                                            gmu_init != 0u || gmu_retention != 0u)
++                                            printf("SWEET GPU: GMU TCM skipped: reset/busy/init/retention state unexpected\n");
+                                         else gmu_tcm_probe(gmu);
+                                     }
+                                 }

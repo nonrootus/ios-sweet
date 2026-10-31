@@ -78,10 +78,12 @@ jobs:
         if: env.MACHINE_CONFIG == 'SWEET' && env.KERNEL_CONFIG == 'DEVELOPMENT'
         run: |
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0122-sweet-gmu-tcm-power-recheck.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0124-sweet-smmu-snapshot-probe.patch"
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           grep -F 'GMU TCM already attempted' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'TCM prerequisites' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'GMU TCM already attempted' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SMMU snapshot rc=' > /dev/null
 
       - name: Package build tree for local compiles
         if: always()

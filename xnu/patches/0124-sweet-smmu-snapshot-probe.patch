@@ -1,0 +1,67 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -12,6 +12,7 @@
+ #include "sweet_gpu_branch.h"
+ #include "sweet_gpu_gdsc.h"
+ #include "sweet_smmu_discover.h"
++#include "sweet_smmu_snapshot.h"
+ #include "sweet_gmu_clock.h"
+ #include "sweet_gpu_gmu.h"
+ 
+@@ -54,6 +55,18 @@
+ 
+ static int smmu_read(void *ctx, uint32_t off, uint32_t *value) {
+     if (!value || off > 0xffcu || (off & 3u)) return -1;
++    *value = *(volatile uint32_t *)((vm_offset_t)ctx + off);
++    __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
++}
++
++/* Read-only, opt-in snapshot. MMIO callbacks cannot trap bus aborts. */
++static struct sweet_smmu_snapshot smmu_snapshot_data;
++static int smmu_snapshot_read(void *ctx, uint32_t off, uint32_t *value) {
++    if (!value || off > 0xfffcu || (off & 3u)) return -1;
++    if (off >= 0x8000u && !(off & 0xfffu)) {
++        printf("SWEET GPU: about to read SMMU context at +%04x; may fault\n", off);
++        delay(1000000);
++    }
+     *value = *(volatile uint32_t *)((vm_offset_t)ctx + off);
+     __asm__ volatile ("dmb oshld" ::: "memory"); return 0;
+ }
+@@ -238,6 +251,37 @@
+                     printf("SWEET GPU: SMMU sid=%u rc=%d id=%08x/%08x/%08x entry=%u type=%u cb=%u\n",
+                         sid[i], rc, m.id0, m.id1, m.id2, m.index, m.type, m.context_bank);
+                     if (rc < 0) break;
++                }
++            }
++        }
++    }
++    int smmu_inventory = 0;
++    if (PE_parse_boot_argn("sweetgpusmmusnapshot", &smmu_inventory, sizeof(smmu_inventory)) && smmu_inventory == 1) {
++        if (!cx_ok || !memnoc_state.acquired || memnoc_state.poisoned) {
++            printf("SWEET GPU: SMMU snapshot skipped: CX or memnoc unavailable\n");
++        } else {
++            printf("SWEET GPU: about to snapshot SMMU; reads may fault\n");
++            delay(1000000);
++            vm_offset_t base = ml_io_map(0x05040000ull, 0x10000u);
++            if (!base) printf("SWEET GPU: SMMU snapshot map failed\n");
++            else {
++                struct sweet_smmu_ops ops={(void *)base,smmu_snapshot_read};
++                struct sweet_smmu_snapshot *s=&smmu_snapshot_data;
++                int rc=sweet_smmu_snapshot(&ops,0x10000u,s);
++                printf("SWEET GPU: SMMU snapshot rc=%d\n",rc);
++                if (!rc) {
++                    printf("SWEET GPU: SMMU global CR0=%08x GFSR=%08x ID7=%08x groups=%u banks=%u S2only=%u shift=%u\n",
++                        s->scr0,s->gfsr,s->id7,s->groups,s->banks,s->stage2_banks,s->page_shift);
++                    for (unsigned i=0;i<s->groups;i++)
++                        printf("SWEET GPU: SMMU stream[%u] SMR=%08x S2CR=%08x\n",i,s->stream[i].smr,s->stream[i].s2cr);
++                    for (unsigned i=0;i<s->banks;i++) {
++                        struct sweet_smmu_snapshot_bank *c=&s->bank[i];
++                        printf("SWEET GPU: SMMU bank[%u] CBAR=%08x CBA2R=%08x SCTLR=%08x ACTLR=%08x FSR=%08x\n",
++                            i,c->cbar,c->cba2r,c->sctlr,c->actlr,c->fsr);
++                        printf("SWEET GPU: SMMU bank[%u] TCR2=%08x TTBR0=%08x%08x TCR=%08x MAIR=%08x/%08x\n",
++                            i,c->tcr2,c->ttbr0_hi,c->ttbr0_lo,c->tcr,c->mair0,c->mair1);
++                    }
++                    printf("SWEET GPU: SMMU snapshot is nonsecure view, not proof of ownership\n");
+                 }
+             }
+         }

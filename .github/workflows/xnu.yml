@@ -77,6 +77,7 @@ jobs:
       - name: Verify required SWEET GPU patch in source and kernel
         if: env.MACHINE_CONFIG == 'SWEET' && env.KERNEL_CONFIG == 'DEVELOPMENT'
         run: |
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0122-sweet-gmu-tcm-power-recheck.patch"
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           grep -F 'GMU TCM already attempted' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'TCM prerequisites' > /dev/null

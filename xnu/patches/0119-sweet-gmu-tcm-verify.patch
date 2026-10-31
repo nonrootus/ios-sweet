@@ -1,0 +1,37 @@
+--- a/bsd/dev/sweet_gpu_gmu.c
++++ b/bsd/dev/sweet_gpu_gmu.c
+@@ -19,3 +19,25 @@
+     }
+     return 0;
+ }
++
++/* Compare TCM against the validated immutable source, without exposing bytes.
++ * A matching readback is not evidence of execution or a successful boot. */
++int sweet_gpu_gmu_verify_legacy(const struct sweet_gpu_gmu_ops *o,
++    const void *firmware, size_t size, size_t *matched) {
++    const uint8_t *b=firmware;
++    uint32_t v, expected;
++    if (!o || !o->read32 || !b || !matched || !size ||
++        size>0x8000 || (size & 3u)) return -1;
++    *matched=0;
++    if (o->read32(o->ctx,0x14000,&v)) return -2;
++    if (v!=1) return -3;
++    for (size_t i=0; i<size; i+=4) {
++        expected=(uint32_t)b[i] | (uint32_t)b[i+1]<<8 |
++            (uint32_t)b[i+2]<<16 | (uint32_t)b[i+3]<<24;
++        if (o->read32(o->ctx,0x3000u+(uint32_t)i,&v)) return -2;
++        if (v!=expected) return -4;
++        *matched=i+4;
++    }
++    if (o->read32(o->ctx,0x14000,&v)) return -2;
++    return v==1 ? 0 : -3;
++}
+--- a/bsd/dev/sweet_gpu_gmu.h
++++ b/bsd/dev/sweet_gpu_gmu.h
+@@ -11,4 +11,6 @@
+ };
+ int sweet_gpu_gmu_load_legacy(const struct sweet_gpu_gmu_ops *,
+     const void *, size_t, size_t *written);
++int sweet_gpu_gmu_verify_legacy(const struct sweet_gpu_gmu_ops *,
++    const void *, size_t, size_t *matched);
+ #endif

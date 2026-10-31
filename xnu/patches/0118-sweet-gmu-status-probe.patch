@@ -1,0 +1,33 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -195,6 +195,30 @@
+                         struct sweet_gmu_clock_state st = {0};
+                         int rc = sweet_gmu_clock_enable_200(&ops, 1, &st);
+                         printf("SWEET GPU: GMU 200MHz clock rc=%d stage=%u last=%08x poisoned=%u\n", rc, st.stage, st.last, st.poisoned);
++                        int gmu_status = 0;
++                        if (PE_parse_boot_argn("sweetgmustatus", &gmu_status, sizeof(gmu_status)) && gmu_status == 1) {
++                            if (rc || st.poisoned || st.stage != 3 || state == 0xffffffffu || (state & SWEET_CLK_OFF)) {
++                                printf("SWEET GPU: GMU status skipped: required clocks not confirmed\n");
++                            } else {
++                                /* FDT GMU window 0x506a000+0x31000, these are
++                                 * read-only CM3/status offsets in its 0x14000 page.
++                                 * Availability and ownership remain unverified. */
++                                vm_offset_t gmu = ml_io_map(0x0507e000ull, 0x1000u);
++                                if (!gmu) printf("SWEET GPU: GMU status map failed\n");
++                                else {
++                                    static const uint32_t off[] = {0x000u, 0x068u, 0x070u, 0x3b0u, 0x730u};
++                                    for (unsigned i = 0; i < sizeof(off)/sizeof(off[0]); ++i) {
++                                        printf("SWEET GPU: about to read GMU +%05x; access may fault\n", 0x14000u + off[i]);
++                                        delay(1000000);
++                                        uint32_t val = *(volatile uint32_t *)(gmu + off[i]);
++                                        __asm__ volatile ("dmb oshld" ::: "memory");
++                                        printf("SWEET GPU: GMU +%05x = %08x%s\n", 0x14000u + off[i], val,
++                                            val == 0xffffffffu ? " (unavailable)" : "");
++                                        if (val == 0xffffffffu) break;
++                                    }
++                                }
++                            }
++                        }
+                     }
+                 }
+             }

@@ -1,0 +1,14 @@
+--- a/bsd/dev/sweet_gmu_clock.c
++++ b/bsd/dev/sweet_gmu_clock.c
+@@ -27,6 +27,11 @@
+         if (i==499) return -4;
+         o->delay_us(o->ctx,1);
+     }
++    /* A cleared UPDATE does not establish that the requested mux/divider
++     * survived: verify hardware readback before enabling the branch. */
++    if (o->read(o->ctx,CFG,&v)) return -2;
++    s->last=v;
++    if (v==0xffffffffu || (v & (SRC_MASK|DIV_MASK|MODE_MASK|HW_CTRL)) != ((6u<<8)|2u)) return -5;
+     if (o->write(o->ctx,BRANCH,branch|1u)) return -2;
+     s->stage=2;
+     for (unsigned i=0;i<500;i++) {

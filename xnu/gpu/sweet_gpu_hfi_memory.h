@@ -11,10 +11,11 @@ struct sweet_gpu_hfi_memory;
  * These objects must never be installed in a live context yet. Calls may sleep;
  * externally serialize access. No CPU mapping is exposed for later mutation.
  * Queue storage and table storage use distinct native-page-aligned allocations.
- * Both are still cached; separation alone does not establish DMA coherency.
+ * Queue data uses a validated Normal-NC canonical CPU mapping; tables remain
+ * cached. This does not establish device visibility or DMA coherency.
  * HFI headers share cache lines between CPU-written and GMU-written fields.
- * The current cached allocation is unsuitable for live non-coherent queues:
- * choose a verified uncached/shared-memory protocol before hardware use.
+ * Active queue access still needs ordered reads/writes and a DMA lifetime
+ * protocol before hardware use; this object currently only initializes HFI.
  * IOVA must eventually come from the firmware's permitted GMU window. */
 struct sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova);
 int sweet_gpu_hfi_memory_info(const struct sweet_gpu_hfi_memory *,

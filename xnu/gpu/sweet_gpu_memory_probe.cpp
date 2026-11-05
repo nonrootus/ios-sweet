@@ -121,11 +121,11 @@ void sweet_gpu_memory_probe(void)
     IOLog("SWEET GPU MEM: begin page=%lu MAIR=%llx CPU-only; no device DMA\n",
         (unsigned long)page_size, (unsigned long long)mair);
     if (page_size != 16384) { IOLog("SWEET GPU MEM: unexpected native page size\n"); return; }
-    /* Exercise the real HFI composition separately, still cached/inactive. */
+    /* Exercise the real HFI composition with NC queues, still inactive. */
     auto *hfi = sweet_gpu_hfi_memory_create(0x60010000u);
     uint64_t root = 0; uint32_t iova = 0;
     bool ok = hfi && !sweet_gpu_hfi_memory_info(hfi, &root, &iova);
-    IOLog("SWEET GPU MEM: inactive HFI=%s root=%llx iova=%x\n",
+    IOLog("SWEET GPU MEM: inactive HFI Normal-NC=%s root=%llx iova=%x\n",
         ok ? "pass" : "fail", (unsigned long long)root, iova);
     sweet_gpu_hfi_memory_destroy(hfi);
     for (unsigned cycle = 0; ok && cycle < 2; ++cycle) ok = allocation_cycle(cycle);

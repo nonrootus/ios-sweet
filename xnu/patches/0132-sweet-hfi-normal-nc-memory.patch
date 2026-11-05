@@ -1,0 +1,165 @@
+--- a/iokit/Kernel/arm/sweet_gpu_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_memory.cpp
+@@ -6,11 +6,33 @@
+ #include <libkern/libkern.h>
+ extern "C" {
+ #include <arm/caches_internal.h>
++#include <arm/machine_routines.h>
++#include <vm/memory_types.h>
++extern unsigned int pmap_cache_attributes(ppnum_t pn);
+ }
+ 
+ #if defined(__ARM_COHERENT_IO__) || defined(APPLE_ARM64_ARCH_FAMILY)
+ #error This adapter requires the SWEET non-coherent cache maintenance implementation
+ #endif
++
++static bool nc_mapping_valid(void *cpu, uint64_t pa)
++{
++    uint64_t saved, par;
++    uintptr_t va = reinterpret_cast<uintptr_t>(cpu);
++    boolean_t enabled = ml_set_interrupts_enabled(FALSE);
++    __asm__ volatile("mrs %0, par_el1" : "=r"(saved));
++    __asm__ volatile("at s1e1r, %0\nisb\nmrs %1, par_el1"
++        : "+r"(va), "=r"(par) :: "memory");
++    __asm__ volatile("msr par_el1, %0\nisb" :: "r"(saved) : "memory");
++    ml_set_interrupts_enabled(enabled);
++    unsigned wimg = pmap_cache_attributes(static_cast<ppnum_t>(pa >> PAGE_SHIFT));
++    bool ok = !(par & 1) && ((par ^ pa) & UINT64_C(0x0000fffffffff000)) == 0 &&
++        (par >> 56) == 0x44 &&
++        (wimg & VM_WIMG_MASK) == VM_WIMG_WCOMB;
++    if (!ok) IOLog("SWEET GPU MEM: NC validation failed pa=%llx par=%llx wimg=%x\n",
++        (unsigned long long)pa, (unsigned long long)par, wimg);
++    return ok;
++}
+ 
+ #define GPU_PAGE 4096u
+ #define GPU_MAX_PAGES 64u
+@@ -21,27 +43,39 @@
+     void *cpu;
+     size_t pages;
+     uint64_t pa[GPU_MAX_PAGES];
++    bool nc;
++    bool initialized;
+ };
+ 
+ void sweet_gpu_memory_destroy(struct sweet_gpu_memory *m)
+ {
+     if (!m) return;
++    if (m->nc && m->initialized) {
++        /* Never DMA-visible yet. The canonical NC VA is the only data access.
++         * Remove cached alias lines before the pages return to the allocator. */
++        __asm__ volatile ("dsb sy" ::: "memory");
++        for (size_t i = 0; i < m->pages; i += page_size / GPU_PAGE)
++            flush_dcache(static_cast<vm_offset_t>(m->pa[i]), (unsigned)page_size, TRUE);
++        __asm__ volatile ("dsb sy" ::: "memory");
++    }
+     if (m->buffer) m->buffer->release();
+     IOFree(m, sizeof(*m));
+ }
+ 
+-struct sweet_gpu_memory *sweet_gpu_memory_create(size_t pages)
++static sweet_gpu_memory *create_memory(size_t pages, bool nc)
+ {
+-    if (!pages || pages > GPU_MAX_PAGES) return nullptr;
++    if (!pages || pages > GPU_MAX_PAGES || page_size != 16384) return nullptr;
+     auto *m = static_cast<sweet_gpu_memory *>(IOMallocZero(sizeof(sweet_gpu_memory)));
+     if (!m) return nullptr;
++    m->nc = nc;
+     /* No pageable/purgeable or implicit IOMMU mapping. Kernel default is wired.
+      * Contiguous CPU storage does not imply contiguous physical pages. */
+     m->buffer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+-        kIODirectionInOut | kIOMemoryMapperNone, pages * GPU_PAGE, page_size);
++        kIODirectionInOut | kIOMemoryMapperNone | (nc ? kIOMapWriteCombineCache : 0),
++        pages * GPU_PAGE, page_size);
+     if (!m->buffer) { sweet_gpu_memory_destroy(m); return nullptr; }
+     m->cpu = m->buffer->getBytesNoCopy();
+-    if (!m->cpu || (reinterpret_cast<uintptr_t>(m->cpu) & (GPU_PAGE - 1))) {
++    if (!m->cpu || (reinterpret_cast<uintptr_t>(m->cpu) & (page_size - 1))) {
+         sweet_gpu_memory_destroy(m); return nullptr;
+     }
+     m->pages = pages;
+@@ -55,10 +89,18 @@
+             if (m->pa[j] == pa) { sweet_gpu_memory_destroy(m); return nullptr; }
+         }
+         m->pa[i] = pa;
++        if (nc && ((i % (page_size / GPU_PAGE) == 0 && (pa & (page_size - 1))) ||
++            !nc_mapping_valid(static_cast<unsigned char *>(m->cpu) + i * GPU_PAGE, pa))) {
++            sweet_gpu_memory_destroy(m); return nullptr;
++        }
+     }
+     bzero(m->cpu, pages * GPU_PAGE);
++    m->initialized = true;
+     return m;
+ }
++
++struct sweet_gpu_memory *sweet_gpu_memory_create(size_t pages) { return create_memory(pages, false); }
++struct sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) { return create_memory(pages, true); }
+ 
+ int sweet_gpu_memory_page(struct sweet_gpu_memory *m, size_t index, void **cpu, uint64_t *pa)
+ {
+@@ -74,7 +116,7 @@
+ {
+     if (!m || index >= m->pages) return -1;
+     auto va = reinterpret_cast<vm_offset_t>(m->cpu) + index * GPU_PAGE;
+-    clean_dcache(va, GPU_PAGE, FALSE);
++    if (!m->nc) clean_dcache(va, GPU_PAGE, FALSE);
+     __asm__ volatile ("dsb sy" ::: "memory");
+     return 0;
+ }
+--- a/iokit/Kernel/arm/sweet_gpu_memory.h
++++ b/iokit/Kernel/arm/sweet_gpu_memory.h
+@@ -12,6 +12,10 @@
+  * A future active-DMA owner needs a separate quiesce/lifetime protocol. */
+ struct sweet_gpu_memory;
+ struct sweet_gpu_memory *sweet_gpu_memory_create(size_t pages);
++/* Normal-NC via the canonical CPU pointer only. Validates effective PA/cache
++ * attributes; requires highmem cache-sync fix0131. No access through physmap
++ * or any other alias is permitted. Still preparation-only: no DMA lifetime. */
++struct sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages);
+ void sweet_gpu_memory_destroy(struct sweet_gpu_memory *memory);
+ int sweet_gpu_memory_page(struct sweet_gpu_memory *memory, size_t index,
+     void **cpu, uint64_t *pa);
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
+@@ -85,7 +85,7 @@
+     auto *s = static_cast<sweet_gpu_hfi_memory *>(IOMallocZero(sizeof(sweet_gpu_hfi_memory)));
+     if (!s) return nullptr;
+     s->iova = iova;
+-    s->data_memory = sweet_gpu_memory_create(DATA_PAGES);
++    s->data_memory = sweet_gpu_memory_create_nc(DATA_PAGES);
+     if (!s->data_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
+     s->table_memory = sweet_gpu_memory_create(POOL_PAGES - ROOT_PAGE);
+     if (!s->table_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
+@@ -11,10 +11,11 @@
+  * These objects must never be installed in a live context yet. Calls may sleep;
+  * externally serialize access. No CPU mapping is exposed for later mutation.
+  * Queue storage and table storage use distinct native-page-aligned allocations.
+- * Both are still cached; separation alone does not establish DMA coherency.
++ * Queue data uses a validated Normal-NC canonical CPU mapping; tables remain
++ * cached. This does not establish device visibility or DMA coherency.
+  * HFI headers share cache lines between CPU-written and GMU-written fields.
+- * The current cached allocation is unsuitable for live non-coherent queues:
+- * choose a verified uncached/shared-memory protocol before hardware use.
++ * Active queue access still needs ordered reads/writes and a DMA lifetime
++ * protocol before hardware use; this object currently only initializes HFI.
+  * IOVA must eventually come from the firmware's permitted GMU window. */
+ struct sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova);
+ int sweet_gpu_hfi_memory_info(const struct sweet_gpu_hfi_memory *,
+--- a/iokit/Kernel/arm/sweet_gpu_memory_probe.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_memory_probe.cpp
+@@ -121,11 +121,11 @@
+     IOLog("SWEET GPU MEM: begin page=%lu MAIR=%llx CPU-only; no device DMA\n",
+         (unsigned long)page_size, (unsigned long long)mair);
+     if (page_size != 16384) { IOLog("SWEET GPU MEM: unexpected native page size\n"); return; }
+-    /* Exercise the real HFI composition separately, still cached/inactive. */
++    /* Exercise the real HFI composition with NC queues, still inactive. */
+     auto *hfi = sweet_gpu_hfi_memory_create(0x60010000u);
+     uint64_t root = 0; uint32_t iova = 0;
+     bool ok = hfi && !sweet_gpu_hfi_memory_info(hfi, &root, &iova);
+-    IOLog("SWEET GPU MEM: inactive HFI=%s root=%llx iova=%x\n",
++    IOLog("SWEET GPU MEM: inactive HFI Normal-NC=%s root=%llx iova=%x\n",
+         ok ? "pass" : "fail", (unsigned long long)root, iova);
+     sweet_gpu_hfi_memory_destroy(hfi);
+     for (unsigned cycle = 0; ok && cycle < 2; ++cycle) ok = allocation_cycle(cycle);

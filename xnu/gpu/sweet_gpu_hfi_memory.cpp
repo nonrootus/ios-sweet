@@ -85,7 +85,7 @@ sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova)
     auto *s = static_cast<sweet_gpu_hfi_memory *>(IOMallocZero(sizeof(sweet_gpu_hfi_memory)));
     if (!s) return nullptr;
     s->iova = iova;
-    s->data_memory = sweet_gpu_memory_create(DATA_PAGES);
+    s->data_memory = sweet_gpu_memory_create_nc(DATA_PAGES);
     if (!s->data_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
     s->table_memory = sweet_gpu_memory_create(POOL_PAGES - ROOT_PAGE);
     if (!s->table_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }

@@ -1,0 +1,78 @@
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
+@@ -14,7 +14,10 @@
+ enum { DATA_PAGES = 5, ROOT_PAGE = 5, POOL_PAGES = 8, BYTES_PER_PAGE = 4096 };
+ static_assert(SWEET_HFI_V1_BYTES <= DATA_PAGES * BYTES_PER_PAGE, "HFI storage");
+ struct sweet_gpu_hfi_memory {
+-    sweet_gpu_memory *memory;
++    /* Separate native-page-aligned descriptors: queue cache attributes must
++     * never change the mapping of a page that also contains a table. */
++    sweet_gpu_memory *data_memory;
++    sweet_gpu_memory *table_memory;
+     sweet_gpu_table_page pages[POOL_PAGES];
+     uint64_t scratch[SWEET_GPU_TABLE_MAX_PAGES]; /* heap, never kernel stack */
+     uint32_t iova;
+@@ -61,7 +64,7 @@
+     if (bytes != BYTES_PER_PAGE) return -1;
+     for (unsigned i = ROOT_PAGE; i < POOL_PAGES; ++i)
+         if ((s->used & (1u << i)) && s->pages[i].cpu == cpu)
+-            return sweet_gpu_memory_clean(s->memory, i);
++            return sweet_gpu_memory_clean(s->table_memory, i - ROOT_PAGE);
+     return -1;
+ }
+ 
+@@ -71,7 +74,8 @@
+ void sweet_gpu_hfi_memory_destroy(sweet_gpu_hfi_memory *s)
+ {
+     if (!s) return;
+-    sweet_gpu_memory_destroy(s->memory);
++    sweet_gpu_memory_destroy(s->table_memory);
++    sweet_gpu_memory_destroy(s->data_memory);
+     IOFree(s, sizeof(*s));
+ }
+ 
+@@ -81,15 +85,20 @@
+     auto *s = static_cast<sweet_gpu_hfi_memory *>(IOMallocZero(sizeof(sweet_gpu_hfi_memory)));
+     if (!s) return nullptr;
+     s->iova = iova;
+-    s->memory = sweet_gpu_memory_create(POOL_PAGES);
+-    if (!s->memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
++    s->data_memory = sweet_gpu_memory_create(DATA_PAGES);
++    if (!s->data_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
++    s->table_memory = sweet_gpu_memory_create(POOL_PAGES - ROOT_PAGE);
++    if (!s->table_memory) { sweet_gpu_hfi_memory_destroy(s); return nullptr; }
+     for (unsigned i = 0; i < POOL_PAGES; ++i) {
+         void *cpu = nullptr;
+-        if (sweet_gpu_memory_page(s->memory, i, &cpu, &s->pages[i].pa)) {
++        auto *memory = i < ROOT_PAGE ? s->data_memory : s->table_memory;
++        unsigned index = i < ROOT_PAGE ? i : i - ROOT_PAGE;
++        if (sweet_gpu_memory_page(memory, index, &cpu, &s->pages[i].pa)) {
+             sweet_gpu_hfi_memory_destroy(s); return nullptr;
+         }
+         s->pages[i].cpu = static_cast<uint64_t *>(cpu);
+-        if (reinterpret_cast<uintptr_t>(cpu) != reinterpret_cast<uintptr_t>(s->pages[0].cpu) + i * BYTES_PER_PAGE) {
++        if (i < DATA_PAGES && reinterpret_cast<uintptr_t>(cpu) !=
++            reinterpret_cast<uintptr_t>(s->pages[0].cpu) + i * BYTES_PER_PAGE) {
+             sweet_gpu_hfi_memory_destroy(s); return nullptr;
+         }
+     }
+@@ -102,7 +111,7 @@
+     for (unsigned i = 0; i < DATA_PAGES; ++i) {
+         if (sweet_gpu_table_map(s->pages[ROOT_PAGE], &ops,
+             static_cast<uint64_t>(iova) + i * BYTES_PER_PAGE, s->pages[i].pa, 0) ||
+-            sweet_gpu_memory_clean(s->memory, i)) {
++            sweet_gpu_memory_clean(s->data_memory, i)) {
+             sweet_gpu_hfi_memory_destroy(s); return nullptr;
+         }
+     }
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
+@@ -10,6 +10,8 @@
+  * No SMMU programming, TLB operations or DMA lifetime management is provided.
+  * These objects must never be installed in a live context yet. Calls may sleep;
+  * externally serialize access. No CPU mapping is exposed for later mutation.
++ * Queue storage and table storage use distinct native-page-aligned allocations.
++ * Both are still cached; separation alone does not establish DMA coherency.
+  * HFI headers share cache lines between CPU-written and GMU-written fields.
+  * The current cached allocation is unsuitable for live non-coherent queues:
+  * choose a verified uncached/shared-memory protocol before hardware use.

@@ -81,7 +81,9 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0124-sweet-smmu-snapshot-probe.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0125-sweet-hfi-v1-queue-watermarks.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0126-sweet-gpu-table-helpers.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0127-sweet-gpu-wired-memory.patch"
+          # 0128 appends to files.arm64, changing the EOF context of 0127.
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/conf/files.arm64 "$GITHUB_WORKSPACE/xnu/patches/0127-sweet-gpu-wired-memory.patch"
+          grep -Fx 'iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0128-sweet-hfi-owned-memory.patch"
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           grep -F 'GMU TCM already attempted' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null

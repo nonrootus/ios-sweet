@@ -25,7 +25,7 @@
 +iokit/Kernel/arm/sweet_gpu_memory_probe.cpp                      optional iokitcpp
 --- /dev/null
 +++ b/iokit/Kernel/arm/sweet_gpu_memory_probe.cpp
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,133 @@
 +/* Opt-in CPU-side allocation diagnostic; never hands an address to a device. */
 +#include "sweet_gpu_memory.h"
 +#include "sweet_gpu_hfi_memory.h"
@@ -35,6 +35,7 @@
 +#include <mach/vm_param.h>
 +extern "C" {
 +#include <arm/machine_routines.h>
++#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/memory_types.h>
 +#include <pexpert/pexpert.h>
@@ -69,9 +70,10 @@
 +    bool ok = !(par & 1) && (par & mask) == (pa & mask) &&
 +        static_cast<uint8_t>(par >> 56) == attribute &&
 +        (wimg & VM_WIMG_MASK) == (attribute == 0x44 ? VM_WIMG_WCOMB : VM_WIMG_DEFAULT);
-+    IOLog("SWEET GPU MEM: %s[%u] pa=%llx par=%llx alias=%llx wimg=%x ok=%u\n",
++    IOLog("SWEET GPU MEM: %s[%u] pa=%llx par=%llx alias=%llx attr=%x/%x wimg=%x ok=%u\n",
 +        kind, index, (unsigned long long)pa, (unsigned long long)par,
-+        (unsigned long long)alias, wimg, ok ? 1u : 0u);
++        (unsigned long long)alias, (unsigned)(par >> 56), (unsigned)(alias >> 56),
++        wimg, ok ? 1u : 0u);
 +    return ok;
 +}
 +
@@ -83,8 +85,10 @@
 +        kIODirectionInOut | kIOMemoryMapperNone | kIOMapWriteCombineCache,
 +        5 * 4096, page_size);
 +    bool ok = queues != nullptr;
++    if (!ok) IOLog("SWEET GPU MEM: NC descriptor allocation failed\n");
 +    void *cpu = queues ? queues->getBytesNoCopy() : nullptr;
 +    ok = ok && cpu && !(reinterpret_cast<uintptr_t>(cpu) & (page_size - 1));
++    if (queues && !ok) IOLog("SWEET GPU MEM: NC CPU mapping/alignment failed\n");
 +    uint64_t table_pa[3] = {}, queue_pa[5] = {};
 +    for (unsigned i = 0; ok && i < 3; ++i) {
 +        void *table_cpu = nullptr;
@@ -96,12 +100,18 @@
 +        queue_pa[i] = queues->getPhysicalSegment(i * 4096, &length, kIOMemoryMapperNone);
 +        ok = queue_pa[i] && !(queue_pa[i] & 4095) &&
 +            queue_pa[i] < (UINT64_C(1) << 36) && length >= 4096;
++        if (!ok) IOLog("SWEET GPU MEM: NC physical segment failed index=%u\n", i);
 +        for (unsigned j = 0; ok && j < 3; ++j)
 +            ok = (queue_pa[i] & ~(uint64_t)(page_size - 1)) !=
 +                (table_pa[j] & ~(uint64_t)(page_size - 1));
 +        for (unsigned j = 0; ok && j < i; ++j) ok = queue_pa[i] != queue_pa[j];
++        if (!ok) IOLog("SWEET GPU MEM: NC physical layout failed index=%u\n", i);
 +        if (ok) ok = mapping_ok("normal-nc", i,
 +            static_cast<unsigned char *>(cpu) + i * 4096, queue_pa[i], 0x44);
++    }
++    if (ok && ((queue_pa[0] | queue_pa[4]) & (page_size - 1))) {
++        IOLog("SWEET GPU MEM: NC native physical alignment failed\n");
++        ok = false;
 +    }
 +    if (ok) {
 +        /* Canonical NC VA only. This tests CPU access, never DMA coherency. */
@@ -109,8 +119,16 @@
 +        for (unsigned i = 0; i < 5 * 1024; ++i) words[i] = 0x6d750000u ^ i ^ cycle;
 +        __asm__ volatile("dsb sy" ::: "memory");
 +        for (unsigned i = 0; i < 5 * 1024; ++i)
-+            if (words[i] != (0x6d750000u ^ i ^ cycle)) { ok = false; break; }
++            if (words[i] != (0x6d750000u ^ i ^ cycle)) {
++                IOLog("SWEET GPU MEM: NC readback failed word=%u\n", i);
++                ok = false; break;
++            }
 +        for (unsigned i = 0; i < 5 * 1024; ++i) words[i] = 0;
++        __asm__ volatile("dsb sy" ::: "memory");
++        /* No WB data accesses or DMA occurred. Remove any clean cached alias
++         * lines before these owned pages return to the general allocator. */
++        flush_dcache(static_cast<vm_offset_t>(queue_pa[0]), (unsigned)page_size, TRUE);
++        flush_dcache(static_cast<vm_offset_t>(queue_pa[4]), (unsigned)page_size, TRUE);
 +        __asm__ volatile("dsb sy" ::: "memory");
 +    }
 +    /* These allocations have never been published for DMA. */

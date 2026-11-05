@@ -96,6 +96,7 @@ jobs:
           cmp xnu/gpu/sweet_gpu_hfi_memory.cpp dxb/xnu/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
           cmp xnu/gpu/sweet_gpu_hfi_memory.h dxb/xnu/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0130-sweet-gpu-memory-probe.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0131-sweet-pmap-highmem-cache-sync.patch"
           cmp xnu/gpu/sweet_gpu_memory_probe.cpp dxb/xnu/iokit/Kernel/arm/sweet_gpu_memory_probe.cpp
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU MEM: begin' > /dev/null
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null

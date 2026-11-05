@@ -87,15 +87,21 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0124-sweet-smmu-snapshot-probe.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0125-sweet-hfi-v1-queue-watermarks.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0126-sweet-gpu-table-helpers.patch"
-          # 0132 supersedes the memory/HFI sources; verify their final contents.
+          # Later patches supersede memory/HFI sources; verify final contents.
           grep -Fx 'iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           grep -Fx 'iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp                        optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_memory_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0130-sweet-gpu-memory-probe.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0131-sweet-pmap-highmem-cache-sync.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.h "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0133-sweet-smmu-context-lifetime.patch"
           for name in sweet_gpu_memory.cpp sweet_gpu_memory.h sweet_gpu_hfi_memory.cpp sweet_gpu_hfi_memory.h sweet_gpu_memory_probe.cpp; do
             cmp "xnu/gpu/$name" "dxb/xnu/iokit/Kernel/arm/$name"
           done
+          for name in sweet_smmu_context.c sweet_smmu_context.h; do
+            cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
+          done
+          grep -Fx $'bsd/dev/sweet_smmu_context.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          find dxb/build/xnu.obj -name sweet_smmu_context.o -print | grep -F 'sweet_smmu_context.o' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU MEM: inactive HFI Normal-NC=' > /dev/null
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null
           grep -F 'GMU TCM already attempted' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null

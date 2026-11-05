@@ -22,7 +22,9 @@ struct sweet_gpu_hfi_memory {
     uint64_t scratch[SWEET_GPU_TABLE_MAX_PAGES]; /* heap, never kernel stack */
     uint32_t iova;
     unsigned used;
+    unsigned mapping_refs;
     bool ready;
+    bool destroy_requested;
 };
 
 static int allocate_table(void *ctx, sweet_gpu_table_page *out)
@@ -74,9 +76,28 @@ static int cleaned_barrier(void *) { return 0; }
 void sweet_gpu_hfi_memory_destroy(sweet_gpu_hfi_memory *s)
 {
     if (!s) return;
+    if (s->mapping_refs) { s->destroy_requested = true; return; }
     sweet_gpu_memory_destroy(s->table_memory);
     sweet_gpu_memory_destroy(s->data_memory);
     IOFree(s, sizeof(*s));
+}
+
+int sweet_gpu_hfi_memory_retain_mapping(sweet_gpu_hfi_memory *s, uint64_t *root_pa)
+{
+    if (root_pa) *root_pa = 0;
+    if (!s || !root_pa || !s->ready || s->destroy_requested ||
+        s->mapping_refs == UINT32_MAX) return -1;
+    ++s->mapping_refs;
+    *root_pa = s->pages[ROOT_PAGE].pa;
+    return 0;
+}
+
+int sweet_gpu_hfi_memory_release_mapping(sweet_gpu_hfi_memory *s)
+{
+    if (!s || !s->mapping_refs) return -1;
+    --s->mapping_refs;
+    if (!s->mapping_refs && s->destroy_requested) sweet_gpu_hfi_memory_destroy(s);
+    return 0;
 }
 
 sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova)
@@ -127,7 +148,7 @@ int sweet_gpu_hfi_memory_info(const sweet_gpu_hfi_memory *s, uint64_t *root_pa, 
 {
     if (root_pa) *root_pa = 0;
     if (iova) *iova = 0;
-    if (!s || !s->ready || !root_pa || !iova) return -1;
+    if (!s || !s->ready || s->destroy_requested || !root_pa || !iova) return -1;
     *root_pa = s->pages[ROOT_PAGE].pa;
     *iova = s->iova;
     return 0;

@@ -1,0 +1,309 @@
+--- /dev/null
++++ b/bsd/dev/sweet_smmu_context.c
+@@ -0,0 +1,156 @@
++#include "sweet_smmu_context.h"
++
++/* Register fields cross-checked against Qualcomm msm b6410c3f arm-smmu.c,
++ * arm-smmu-regs.h and io-pgtable-arm.c. See docs/sweet-k6a-gpu.md.
++ * Fixed geometry: 5 banks/slots, 4 KiB register pages, 64 KiB aperture. */
++#define CB(c) (0x8000u + ((c)->bank << 12))
++#define SMR(c) (0x800u + 4u * (c)->slot)
++#define S2CR(c) (0xc00u + 4u * (c)->slot)
++#define SMR_VALID (1u << 31)
++#define S2CR_NSH (3u << 8)
++#define S2CR_FAULT ((2u << 16) | S2CR_NSH)
++#define TCR_VALUE 0x00802020u /* EPD1, outer-shareable NC walker, 32-bit IOVA */
++#define TCR2_VALUE 0x00038011u /* upstream SEP, 16-bit ASID format, 36-bit PA */
++#define SCTLR_VALUE 0x00c01027u /* NSH bypass, ASIDPNE, CFRE, AFE/TRE/M; no IRQ/stall */
++
++static int read32(struct sweet_smmu_context *c, uint32_t off, uint32_t *v)
++{
++    return c->ops.read32(c->ops.ctx, off, v) ? SWEET_SMMU_CONTEXT_IO : 0;
++}
++static int expect(struct sweet_smmu_context *c, uint32_t off, uint32_t value)
++{
++    uint32_t actual;
++    int rc = read32(c, off, &actual);
++    return rc ? rc : (actual == value ? 0 : SWEET_SMMU_CONTEXT_MISMATCH);
++}
++static int write32(struct sweet_smmu_context *c, uint32_t off, uint32_t value)
++{
++    if (c->ops.write32(c->ops.ctx, off, value) || c->ops.barrier(c->ops.ctx))
++        return SWEET_SMMU_CONTEXT_IO;
++    return expect(c, off, value);
++}
++static int write64(struct sweet_smmu_context *c, uint32_t off, uint64_t value)
++{
++    int rc;
++    if (c->ops.write64(c->ops.ctx, off, value) || c->ops.barrier(c->ops.ctx))
++        return SWEET_SMMU_CONTEXT_IO;
++    /* The context is disabled while TTBRs change, so halves are stable. */
++    rc = expect(c, off, (uint32_t)value);
++    return rc ? rc : expect(c, off + 4, (uint32_t)(value >> 32));
++}
++static int invalidate(struct sweet_smmu_context *c)
++{
++    uint32_t status;
++    if (c->ops.write32(c->ops.ctx, CB(c) + 0x610, c->asid) ||
++        c->ops.barrier(c->ops.ctx) ||
++        c->ops.write32(c->ops.ctx, CB(c) + 0x7f0, UINT32_MAX) ||
++        c->ops.barrier(c->ops.ctx)) return SWEET_SMMU_CONTEXT_IO;
++    /* Command registers are not ordinary readback registers. Bounded wait;
++     * a timeout never proves an outstanding walk/invalidation is complete. */
++    for (unsigned waited = 0, delay = 1;;) {
++        int rc = read32(c, CB(c) + 0x7f4, &status);
++        if (rc) return rc;
++        if (status == UINT32_MAX) return SWEET_SMMU_CONTEXT_IO;
++        if (!(status & 1))
++            return c->ops.barrier(c->ops.ctx) ? SWEET_SMMU_CONTEXT_IO : 0;
++        if (waited == 500000) return SWEET_SMMU_CONTEXT_TIMEOUT;
++        unsigned step = delay < 500000 - waited ? delay : 500000 - waited;
++        if (c->ops.delay_us(c->ops.ctx, step)) return SWEET_SMMU_CONTEXT_IO;
++        waited += step;
++        delay = delay < 500 ? delay * 2 : 1000;
++    }
++}
++static int preflight(struct sweet_smmu_context *c)
++{
++    uint32_t v;
++    int rc;
++    if ((rc = expect(c, 0x20, 0x48016605)) ||
++        (rc = expect(c, 0x24, 0x20008005)) ||
++        (rc = expect(c, 0x28, 0x00007511))) return rc;
++    if ((rc = read32(c, 0, &v))) return rc;
++    /* Unmatched streams must fault, client interface must be enabled. */
++    if (v == UINT32_MAX || (v & 0x409) != 0x400) return SWEET_SMMU_CONTEXT_BUSY;
++    if ((rc = expect(c, 0x48, 0)) || (rc = expect(c, CB(c), 0)) ||
++        (rc = expect(c, CB(c) + 0x58, 0))) return rc;
++    for (unsigned off = 0x20; off <= 0x2c; off += 4)
++        if ((rc = expect(c, CB(c) + off, 0))) return rc;
++    if ((rc = read32(c, S2CR(c), &v))) return rc;
++    if (((v >> 16) & 3) != 2) return SWEET_SMMU_CONTEXT_BUSY;
++    for (unsigned i = 0; i < 5; ++i) {
++        uint32_t smr, s2cr;
++        if ((rc = read32(c, 0x800 + 4*i, &smr)) ||
++            (rc = read32(c, 0xc00 + 4*i, &s2cr))) return rc;
++        if (smr == UINT32_MAX || s2cr == UINT32_MAX) return SWEET_SMMU_CONTEXT_IO;
++        if (!(smr & SMR_VALID)) continue;
++        unsigned mask = (smr >> 16) & 0x7fff;
++        if (i == c->slot || (((smr ^ c->sid) & ~mask & 0x7fff) == 0) ||
++            (((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) == c->bank))
++            return SWEET_SMMU_CONTEXT_BUSY;
++    }
++    return 0;
++}
++
++int sweet_smmu_context_install(struct sweet_smmu_context *c,
++    const struct sweet_smmu_context_ops *ops, unsigned bank, unsigned slot,
++    unsigned sid, unsigned asid)
++{
++    int rc;
++    if (!c || !ops || !ops->read32 || !ops->write32 || !ops->write64 ||
++        !ops->barrier || !ops->delay_us || !ops->quiescent || !ops->pin ||
++        !ops->unpin || c->state != SWEET_SMMU_CONTEXT_EMPTY || c->retained ||
++        bank >= 5 || slot >= 5 || (sid != 4 && sid != 5) || !asid || asid > 255)
++        return SWEET_SMMU_CONTEXT_INVALID;
++    c->ops = *ops;
++    c->bank = bank; c->slot = slot; c->sid = sid; c->asid = asid;
++    if (ops->quiescent(ops->ctx)) return SWEET_SMMU_CONTEXT_BUSY;
++    if ((rc = preflight(c))) return rc;
++    c->root_pa = 0;
++    if (ops->pin(ops->ctx, &c->root_pa)) return SWEET_SMMU_CONTEXT_IO;
++    c->retained = 1;
++    if (!c->root_pa || (c->root_pa & 4095) || c->root_pa >= (UINT64_C(1) << 36)) {
++        ops->unpin(ops->ctx); c->retained = 0;
++        return SWEET_SMMU_CONTEXT_INVALID;
++    }
++    if (ops->quiescent(ops->ctx)) {
++        ops->unpin(ops->ctx); c->retained = 0;
++        return SWEET_SMMU_CONTEXT_BUSY;
++    }
++    /* After the first attempted write, failure keeps every page pinned.
++     * The caller must not infer rollback from an error return. */
++    c->state = SWEET_SMMU_CONTEXT_POISONED;
++    if ((rc = write32(c, 0x1800 + 4*bank, 1)) ||
++        (rc = write32(c, 0x1000 + 4*bank, 0x1f300)) ||
++        (rc = write32(c, CB(c) + 4, 0x70000000)) ||
++        (rc = write32(c, CB(c) + 0x10, TCR2_VALUE)) ||
++        (rc = write32(c, CB(c) + 0x30, TCR_VALUE)) ||
++        (rc = write64(c, CB(c) + 0x20, c->root_pa | ((uint64_t)asid << 48))) ||
++        (rc = write64(c, CB(c) + 0x28, (uint64_t)asid << 48)) ||
++        (rc = write32(c, CB(c) + 0x38, 0x44)) ||
++        (rc = write32(c, CB(c) + 0x3c, 0)) ||
++        (rc = invalidate(c)) ||
++        (rc = write32(c, CB(c), SCTLR_VALUE)) ||
++        (rc = write32(c, S2CR(c), S2CR_NSH | bank)) ||
++        (rc = write32(c, SMR(c), SMR_VALID | sid))) return rc;
++    c->state = SWEET_SMMU_CONTEXT_ACTIVE;
++    return 0;
++}
++
++int sweet_smmu_context_remove(struct sweet_smmu_context *c)
++{
++    int rc;
++    if (!c || c->state != SWEET_SMMU_CONTEXT_ACTIVE || !c->retained)
++        return SWEET_SMMU_CONTEXT_INVALID;
++    if (c->ops.quiescent(c->ops.ctx)) return SWEET_SMMU_CONTEXT_BUSY;
++    c->state = SWEET_SMMU_CONTEXT_POISONED;
++    if ((rc = write32(c, S2CR(c), S2CR_FAULT)) ||
++        (rc = write32(c, SMR(c), 0)) ||
++        (rc = write32(c, CB(c), 0)) ||
++        (rc = invalidate(c)) ||
++        (rc = write64(c, CB(c) + 0x20, 0)) ||
++        (rc = write64(c, CB(c) + 0x28, 0))) return rc;
++    if (c->ops.quiescent(c->ops.ctx)) return SWEET_SMMU_CONTEXT_BUSY;
++    c->state = SWEET_SMMU_CONTEXT_RETIRED;
++    c->retained = 0;
++    c->ops.unpin(c->ops.ctx);
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_smmu_context.h
+@@ -0,0 +1,55 @@
++#ifndef SWEET_SMMU_CONTEXT_H
++#define SWEET_SMMU_CONTEXT_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* One externally reserved context bank, stream slot and ASID. This helper is
++ * not a device initializer. The caller must own the GPU SMMU, complete the
++ * board's attach-impl-defs/power/clock setup, serialize all callers, and keep
++ * producers stopped/drained throughout install/remove. No ATS operations.
++ * Requires the captured board's absent qcom,no-asid-retention property; this
++ * implementation invalidates a caller-reserved ASID, not every context ASID.
++ * Callback errors may occur after a write reached hardware: never retry a
++ * poisoned instance or release its retained memory without a proven reset. */
++enum sweet_smmu_context_state {
++    SWEET_SMMU_CONTEXT_EMPTY, SWEET_SMMU_CONTEXT_ACTIVE,
++    SWEET_SMMU_CONTEXT_RETIRED, SWEET_SMMU_CONTEXT_POISONED
++};
++enum sweet_smmu_context_result {
++    SWEET_SMMU_CONTEXT_OK = 0, SWEET_SMMU_CONTEXT_INVALID = -1,
++    SWEET_SMMU_CONTEXT_BUSY = -2, SWEET_SMMU_CONTEXT_IO = -3,
++    SWEET_SMMU_CONTEXT_TIMEOUT = -4, SWEET_SMMU_CONTEXT_MISMATCH = -5
++};
++struct sweet_smmu_context_ops {
++    void *ctx;
++    int (*read32)(void *, uint32_t offset, uint32_t *);
++    int (*write32)(void *, uint32_t offset, uint32_t);
++    int (*write64)(void *, uint32_t offset, uint64_t); /* one atomic MMIO store */
++    int (*barrier)(void *); /* complete prior MMIO and memory writes */
++    int (*delay_us)(void *, unsigned);
++    int (*quiescent)(void *); /* 0 only with powered, owned, stopped/drained device */
++    /* Pin all table/leaf pages and return the already-published root PA.
++     * Failure must retain nothing. unpin is called only before any MMIO write,
++     * or after successful removal. These callbacks may sleep. */
++    int (*pin)(void *, uint64_t *root_pa);
++    void (*unpin)(void *);
++};
++struct sweet_smmu_context {
++    struct sweet_smmu_context_ops ops;
++    enum sweet_smmu_context_state state;
++    uint64_t root_pa;
++    unsigned bank, slot, sid, asid, retained;
++};
++/* Zero-initialize storage; keep its address and callback context alive until
++ * RETIRED, or indefinitely if POISONED. Exact observed k6a ID registers are
++ * required. Readback proves register acceptance, not working device DMA. */
++int sweet_smmu_context_install(struct sweet_smmu_context *,
++    const struct sweet_smmu_context_ops *, unsigned bank, unsigned slot,
++    unsigned sid, unsigned asid);
++int sweet_smmu_context_remove(struct sweet_smmu_context *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp
+@@ -22,7 +22,9 @@
+     uint64_t scratch[SWEET_GPU_TABLE_MAX_PAGES]; /* heap, never kernel stack */
+     uint32_t iova;
+     unsigned used;
++    unsigned mapping_refs;
+     bool ready;
++    bool destroy_requested;
+ };
+ 
+ static int allocate_table(void *ctx, sweet_gpu_table_page *out)
+@@ -74,9 +76,28 @@
+ void sweet_gpu_hfi_memory_destroy(sweet_gpu_hfi_memory *s)
+ {
+     if (!s) return;
++    if (s->mapping_refs) { s->destroy_requested = true; return; }
+     sweet_gpu_memory_destroy(s->table_memory);
+     sweet_gpu_memory_destroy(s->data_memory);
+     IOFree(s, sizeof(*s));
++}
++
++int sweet_gpu_hfi_memory_retain_mapping(sweet_gpu_hfi_memory *s, uint64_t *root_pa)
++{
++    if (root_pa) *root_pa = 0;
++    if (!s || !root_pa || !s->ready || s->destroy_requested ||
++        s->mapping_refs == UINT32_MAX) return -1;
++    ++s->mapping_refs;
++    *root_pa = s->pages[ROOT_PAGE].pa;
++    return 0;
++}
++
++int sweet_gpu_hfi_memory_release_mapping(sweet_gpu_hfi_memory *s)
++{
++    if (!s || !s->mapping_refs) return -1;
++    --s->mapping_refs;
++    if (!s->mapping_refs && s->destroy_requested) sweet_gpu_hfi_memory_destroy(s);
++    return 0;
+ }
+ 
+ sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova)
+@@ -127,7 +148,7 @@
+ {
+     if (root_pa) *root_pa = 0;
+     if (iova) *iova = 0;
+-    if (!s || !s->ready || !root_pa || !iova) return -1;
++    if (!s || !s->ready || s->destroy_requested || !root_pa || !iova) return -1;
+     *root_pa = s->pages[ROOT_PAGE].pa;
+     *iova = s->iova;
+     return 0;
+--- a/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
++++ b/iokit/Kernel/arm/sweet_gpu_hfi_memory.h
+@@ -7,20 +7,28 @@
+ struct sweet_gpu_hfi_memory;
+ /* Build an inactive HFI v1 image and translation tree in owned wired memory.
+  * 64KiB-aligned IOVA is supplied by a caller that reserves that range.
+- * No SMMU programming, TLB operations or DMA lifetime management is provided.
+- * These objects must never be installed in a live context yet. Calls may sleep;
++ * No SMMU programming or TLB operations are provided. Calls may sleep;
+  * externally serialize access. No CPU mapping is exposed for later mutation.
+  * Queue storage and table storage use distinct native-page-aligned allocations.
+  * Queue data uses a validated Normal-NC canonical CPU mapping; tables remain
+  * cached. This does not establish device visibility or DMA coherency.
+  * HFI headers share cache lines between CPU-written and GMU-written fields.
+- * Active queue access still needs ordered reads/writes and a DMA lifetime
+- * protocol before hardware use; this object currently only initializes HFI.
++ * Active queue access still needs ordered reads/writes and verified SMMU/device
++ * lifetime integration before hardware use; this object only initializes HFI.
+  * IOVA must eventually come from the firmware's permitted GMU window. */
+ struct sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t iova);
+ int sweet_gpu_hfi_memory_info(const struct sweet_gpu_hfi_memory *,
+     uint64_t *root_pa, uint32_t *iova);
+ void sweet_gpu_hfi_memory_destroy(struct sweet_gpu_hfi_memory *);
++/* Retain before exposing any table PA to hardware; release only before the
++ * first hardware write, or after a proven successful stop/detach/TLB sync.
++ * A timeout or ambiguous hardware error must keep the reference indefinitely.
++ * These operations enforce allocation lifetime, not hardware quiescence.
++ * destroy relinquishes caller ownership: when retained it defers freeing until
++ * the last release. After destroy, only matching release calls may use s.
++ * All operations, including destroy, require external serialization. */
++int sweet_gpu_hfi_memory_retain_mapping(struct sweet_gpu_hfi_memory *, uint64_t *root_pa);
++int sweet_gpu_hfi_memory_release_mapping(struct sweet_gpu_hfi_memory *);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -663,3 +663,4 @@
+ bsd/skywalk/packet/pbufpool.c			optional skywalk
+ bsd/skywalk/packet/pbufpool_kern.c		optional skywalk
+ bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk
++bsd/dev/sweet_smmu_context.c		standard

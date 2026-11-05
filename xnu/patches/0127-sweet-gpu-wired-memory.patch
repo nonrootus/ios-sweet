@@ -1,0 +1,115 @@
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -20,3 +20,4 @@
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
++iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gpu_memory.cpp
+@@ -0,0 +1,80 @@
++#include "sweet_gpu_memory.h"
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOLib.h>
++#include <kern/task.h>
++#include <mach/vm_param.h>
++#include <libkern/libkern.h>
++extern "C" {
++#include <arm/caches_internal.h>
++}
++
++#if defined(__ARM_COHERENT_IO__) || defined(APPLE_ARM64_ARCH_FAMILY)
++#error This adapter requires the SWEET non-coherent cache maintenance implementation
++#endif
++
++#define GPU_PAGE 4096u
++#define GPU_MAX_PAGES 64u
++#define GPU_PA_LIMIT (UINT64_C(1) << 36)
++
++struct sweet_gpu_memory {
++    IOBufferMemoryDescriptor *buffer;
++    void *cpu;
++    size_t pages;
++    uint64_t pa[GPU_MAX_PAGES];
++};
++
++void sweet_gpu_memory_destroy(struct sweet_gpu_memory *m)
++{
++    if (!m) return;
++    if (m->buffer) m->buffer->release();
++    IOFree(m, sizeof(*m));
++}
++
++struct sweet_gpu_memory *sweet_gpu_memory_create(size_t pages)
++{
++    if (!pages || pages > GPU_MAX_PAGES) return nullptr;
++    auto *m = static_cast<sweet_gpu_memory *>(IOMallocZero(sizeof(sweet_gpu_memory)));
++    if (!m) return nullptr;
++    /* No pageable/purgeable or implicit IOMMU mapping. Kernel default is wired.
++     * Contiguous CPU storage does not imply contiguous physical pages. */
++    m->buffer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++        kIODirectionInOut | kIOMemoryMapperNone, pages * GPU_PAGE, page_size);
++    if (!m->buffer) { sweet_gpu_memory_destroy(m); return nullptr; }
++    m->cpu = m->buffer->getBytesNoCopy();
++    if (!m->cpu || (reinterpret_cast<uintptr_t>(m->cpu) & (GPU_PAGE - 1))) {
++        sweet_gpu_memory_destroy(m); return nullptr;
++    }
++    m->pages = pages;
++    for (size_t i = 0; i < pages; ++i) {
++        IOByteCount length = 0;
++        uint64_t pa = m->buffer->getPhysicalSegment(i * GPU_PAGE, &length, kIOMemoryMapperNone);
++        if (!pa || (pa & (GPU_PAGE - 1)) || pa > GPU_PA_LIMIT - GPU_PAGE || length < GPU_PAGE) {
++            sweet_gpu_memory_destroy(m); return nullptr;
++        }
++        for (size_t j = 0; j < i; ++j) {
++            if (m->pa[j] == pa) { sweet_gpu_memory_destroy(m); return nullptr; }
++        }
++        m->pa[i] = pa;
++    }
++    bzero(m->cpu, pages * GPU_PAGE);
++    return m;
++}
++
++int sweet_gpu_memory_page(struct sweet_gpu_memory *m, size_t index, void **cpu, uint64_t *pa)
++{
++    if (cpu) *cpu = nullptr;
++    if (pa) *pa = 0;
++    if (!m || !cpu || !pa || index >= m->pages) return -1;
++    *cpu = static_cast<unsigned char *>(m->cpu) + index * GPU_PAGE;
++    *pa = m->pa[index];
++    return 0;
++}
++
++int sweet_gpu_memory_clean(struct sweet_gpu_memory *m, size_t index)
++{
++    if (!m || index >= m->pages) return -1;
++    auto va = reinterpret_cast<vm_offset_t>(m->cpu) + index * GPU_PAGE;
++    clean_dcache(va, GPU_PAGE, FALSE);
++    __asm__ volatile ("dsb sy" ::: "memory");
++    return 0;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gpu_memory.h
+@@ -0,0 +1,22 @@
++#ifndef SWEET_GPU_MEMORY_H
++#define SWEET_GPU_MEMORY_H
++#include <stddef.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Preparation-only wired storage. No device mapping or DMA may reference it.
++ * Externally serialize all calls; create/destroy may sleep. PA is a host
++ * physical address, not proof of device visibility through the platform.
++ * create zeroes CPU memory; call clean explicitly after the final CPU writes.
++ * A future active-DMA owner needs a separate quiesce/lifetime protocol. */
++struct sweet_gpu_memory;
++struct sweet_gpu_memory *sweet_gpu_memory_create(size_t pages);
++void sweet_gpu_memory_destroy(struct sweet_gpu_memory *memory);
++int sweet_gpu_memory_page(struct sweet_gpu_memory *memory, size_t index,
++    void **cpu, uint64_t *pa);
++int sweet_gpu_memory_clean(struct sweet_gpu_memory *memory, size_t index);
++#ifdef __cplusplus
++}
++#endif
++#endif

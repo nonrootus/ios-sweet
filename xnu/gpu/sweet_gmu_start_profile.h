@@ -37,6 +37,8 @@ enum { SWEET_GMU_REG, SWEET_GMU_PDC_CFG, SWEET_GMU_PDC_SEQ };
 #define A6XX_RSCC_SEQ_BUSY_DRV0 0x23404u
 #define A6XX_GMU_RSCC_CONTROL_REQ 0x24c1cu
 #define SWEET_GMU_RPMH_ENABLE 0x00000f11u
+/* kgsl_gmu.c GMU_CM3_CFG_NONMASKINTR_SHIFT. */
+#define SWEET_GMU_CM3_NMI (1u << 9)
 #define SWEET_GMU_PDC_ENABLE 0x4500u
 struct sweet_gmu_boot_write { unsigned region; uint32_t offset, value; };
 static const struct sweet_gmu_boot_write sweet_gmu_pdc_program[] = {

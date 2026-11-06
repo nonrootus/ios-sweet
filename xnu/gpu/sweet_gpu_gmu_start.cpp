@@ -117,10 +117,18 @@ static int power_check(void *opaque, unsigned phase)
     uint32_t gx_status = mmio_read(s->cc + 0x010);
     if (!s->checked_power) IOLog("SWEET GMU BOOT: GX completion=%08x\n", gx_status);
     if (gx_status == UINT32_MAX || (gx_status & 0x18000u) != 0x8000u) return -1;
-    if (mmio_read(s->gmu) != (phase == 2 ? 0u : 1u) ||
-        mmio_read(s->gmu + 0x730) != (phase ? 1u : 0u)) return -1;
-    if (phase != 2 && (mmio_read(s->gmu + 0x068) != 0 ||
-        mmio_read(s->gmu + 0x070) != 0)) return -1;
+    uint32_t reset=mmio_read(s->gmu),retention=mmio_read(s->gmu+0x730);
+    if (reset!=(phase==2 ? 0u : 1u) || retention!=(phase ? 1u : 0u)) {
+        IOLog("SWEET GMU BOOT: reset guard phase=%u reset=%08x retention=%08x\n",phase,reset,retention);
+        return -1;
+    }
+    if (phase!=2) {
+        uint32_t busy=mmio_read(s->gmu+0x068),init=mmio_read(s->gmu+0x070);
+        if (busy || init) {
+            IOLog("SWEET GMU BOOT: inactive guard busy=%08x init=%08x\n",busy,init);
+            return -1;
+        }
+    }
     s->checked_power = true;
     return complete(s);
 }
@@ -194,8 +202,11 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
     auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
     const void *firmware=nullptr;size_t bytes=0;
     IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
-    if (idle_enable || stopped(s) || sweet_gpu_firmware_get(0,&firmware,&bytes) ||
-        !firmware || bytes!=0x8000) return -3;
+    if (idle_enable) { IOLog("SWEET GMU BOOT: CPU idle still enabled\n");return -3; }
+    if (stopped(s)) return -3;
+    int firmware_rc=sweet_gpu_firmware_get(0,&firmware,&bytes);
+    IOLog("SWEET GMU BOOT: firmware getter rc=%d bytes=%lu\n",firmware_rc,static_cast<unsigned long>(bytes));
+    if (firmware_rc || !firmware || bytes!=0x8000) return -3;
     s->smmu=ml_io_map(0x05040000ull,0x10000);
     s->region[0]=ml_io_map(SWEET_GMU_REG_BASE,SWEET_GMU_REG_SIZE);
     s->region[1]=ml_io_map(SWEET_GMU_PDC_CFG_BASE,SWEET_GMU_PDC_SIZE);
@@ -218,6 +229,10 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
     sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
     rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
     report_faults(s);
+    IOLog("SWEET GMU BOOT: CM3_CFG valid=%u value=%08x; last_io=%u ok=%u value=%08x\n",
+        s->boot.cm3_cfg_valid,s->boot.cm3_cfg,s->boot.last_io,s->boot.last_ok,s->boot.last_value);
+    if (s->boot.mismatch_offset) IOLog("SWEET GMU BOOT: readback mismatch off=%x expected=%08x actual=%08x\n",
+        s->boot.mismatch_offset,s->boot.mismatch_expected,s->boot.mismatch_actual);
     IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",
         rc,static_cast<unsigned>(s->boot.stage),s->boot.held,s->boot.release_attempted,
         s->boot.fw_init,s->boot.host_irq,s->boot.ao_irq,s->boot.pdc_before,s->boot.last_region,s->boot.last_offset);

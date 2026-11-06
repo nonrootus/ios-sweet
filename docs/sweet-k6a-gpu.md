@@ -8,6 +8,22 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+0146b reached CONFIG after firmware copy/check, SMMU prepare/install and
+complete 32 KiB TCM load/readback. It stopped before CM3 release: rc=-2,
+last offset0x140b4 (`CM3_CFG`), SMMU global0/FSR0x400/FAR0/syndrome0.
+The callbacks and barrier return success for this valid access, so the code
+identifies a full-word comparison failure against0x4052. Its actual readback
+was not logged. This does not establish firmware execution or acceleration.
+
+0147 keeps the pinned stock write0x4052 and checks only NMI bit9 plus allones
+after the barrier. The bit comes from `kgsl_gmu.c`'s
+`GMU_CM3_CFG_NONMASKINTR_SHIFT` and its read/modify/write NMI path; semantics
+of the other readback bits are unspecified. All other register comparisons
+remain strict. New diagnostics retain the CFG value and exact mismatched
+offset/expected/actual values; rc=-7 means mismatch, rc=-8 means NMI set.
+The entry now requires `sweetgpucheck=1` and reports firmware-getter and
+reset/idle guard failures. Full kernel CI and device testing remain pending.
+
 0146 implements an opt-in first CM3 boot, ending at fresh BABEFACE before
 GX OOB, SPTPRAC or HFI initialization. `sweetgmustart=1` requires the existing
 power/clock/status flags, successful same-boot DDR handoff and `jtag=1 wfi=0`;
@@ -35,7 +51,7 @@ fastboot with Booting OKAY. The first device log stopped at entry rc=-3 before
 SMMU setup or CM3 release. Its payload omitted `sweetgpucheck=1`, which gates
 the only firmware-store call in IOFindBSDRoot. Without it, the getter cannot
 succeed even when the bundle is present. Repacking the same kernel with that
-flag and `sweetgpubundle=1` produced temporary test0146b; its result is pending.
+flag and `sweetgpubundle=1` produced temporary test0146b; its result is above.
 The boot script now checks the real payload's prerequisites and its inclusion
 in the image. BABEFACE would establish CM3 firmware initialization, not HFI, DMA
 translation, graphics command execution or acceleration.

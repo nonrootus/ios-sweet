@@ -180,7 +180,7 @@ sweet_gpu_probe(void)
 
     PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
     if (requested_start == 1) {
-        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus"};
+        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus", "sweetgpucheck"};
         const char *conflicting[] = {"sweetgmuload", "sweetgpusmmuinit"};
         unsigned long jtag = 0;
         unsigned wfi_mode = 1;

@@ -1,0 +1,199 @@
+--- a/bsd/dev/sweet_gmu_start.c
++++ b/bsd/dev/sweet_gmu_start.c
+@@ -14,22 +14,46 @@
+ static int rd(struct start_io *io,unsigned region,uint32_t off,uint32_t *value)
+ {
+     io->s->last_region=region;io->s->last_offset=off;
+-    return io->o->read32(io->o->ctx,region,off,value);
++    io->s->last_io=1;io->s->last_ok=0;io->s->last_value=0;
++    int rc=io->o->read32(io->o->ctx,region,off,value);
++    if (!rc) { io->s->last_ok=1;io->s->last_value=*value; }
++    return rc;
+ }
+ static int wr(struct start_io *io,unsigned region,uint32_t off,uint32_t value)
+ {
+     io->s->last_region=region;io->s->last_offset=off;
+-    return io->o->write32(io->o->ctx,region,off,value);
++    io->s->last_io=2;io->s->last_ok=0;io->s->last_value=value;
++    int rc=io->o->write32(io->o->ctx,region,off,value);
++    if (!rc) io->s->last_ok=1;
++    return rc;
+ }
+ static int sync_write(struct start_io *io,uint32_t off,uint32_t value)
+ {
+     uint32_t actual;
+-    return wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
+-        rd(io,SWEET_GMU_REG,off,&actual) || actual!=value;
++    if (wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
++        rd(io,SWEET_GMU_REG,off,&actual)) return -2;
++    if (actual!=value) {
++        io->s->mismatch_offset=off;io->s->mismatch_expected=value;io->s->mismatch_actual=actual;
++        return -7;
++    }
++    return 0;
+ }
+ static int tcm_read(void *p,uint32_t off,uint32_t *value)
+ {
+     return rd(p,SWEET_GMU_REG,off,value);
++}
++static int configure_cm3(struct start_io *io,uint32_t value)
++{
++    /* Pinned stock restores 0x4052 to clear NMI before boot, without requiring
++     * whole-register equality. kgsl_gmu.c names NONMASKINTR at bit9 and reads
++     * this register before setting it. Other readback bits are not specified.
++     * 0146b stopped on equality here, but did not record the actual value. */
++    if (wr(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,value) ||
++        io->o->barrier(io->o->ctx) ||
++        rd(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,&io->s->cm3_cfg)) return -2;
++    io->s->cm3_cfg_valid=1;
++    if (io->s->cm3_cfg==UINT32_MAX) return -2;
++    return io->s->cm3_cfg&SWEET_GMU_CM3_NMI ? -8 : 0;
+ }
+ static int tcm_write(void *p,uint32_t off,uint32_t value)
+ {
+@@ -75,7 +99,9 @@
+         wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_MASK,UINT32_MAX) ||
+         wr(&io,SWEET_GMU_REG,A6XX_GMU_AO_HOST_INTERRUPT_CLR,UINT32_MAX) ||
+         wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_CLR,UINT32_MAX) ||
+-        o->barrier(o->ctx) || sync_write(&io,A6XX_GMU_GENERAL_7,1)) return -2;
++        o->barrier(o->ctx)) return -2;
++    int error=sync_write(&io,A6XX_GMU_GENERAL_7,1);
++    if (error) return error;
+     stage(&io,SWEET_GMU_START_PDC);
+     for (size_t i=0;i<sizeof(sweet_gmu_pdc_program)/sizeof(sweet_gmu_pdc_program[0]);++i) {
+         const struct sweet_gmu_boot_write *w=&sweet_gmu_pdc_program[i];
+@@ -89,22 +115,29 @@
+         o->barrier(o->ctx)) return -2;
+     if (sweet_gpu_gmu_verify_legacy(&tcm,firmware,bytes,&done) || done!=bytes) return -5;
+     stage(&io,SWEET_GMU_START_CONFIG);
+-    if (sync_write(&io,A6XX_GMU_CM3_FW_INIT_RESULT,0) ||
+-        sync_write(&io,A6XX_GMU_CM3_BOOT_CONFIG,2) ||
+-        sync_write(&io,A6XX_GMU_HFI_QTBL_ADDR,0x60100000) ||
+-        sync_write(&io,A6XX_GMU_HFI_QTBL_INFO,1) ||
+-        sync_write(&io,A6XX_GMU_AHB_FENCE_RANGE_0,0x80a008a0) ||
+-        sync_write(&io,A6XX_GMU_CM3_CFG,0x4052) ||
+-        sync_write(&io,A6XX_GMU_HFI_SFR_ADDR,0x06018000) ||
+-        sync_write(&io,A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000) ||
+-        sync_write(&io,A6XX_GMU_SYS_BUS_CONFIG,1) ||
+-        sync_write(&io,A6XX_GMU_ICACHE_CONFIG,1) ||
+-        sync_write(&io,A6XX_GMU_DCACHE_CONFIG,1) ||
+-        sync_write(&io,A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400) ||
+-        sync_write(&io,A6XX_GMU_RPMH_CTRL,rpmh|SWEET_GMU_RPMH_ENABLE) ||
+-        sync_write(&io,A6XX_GMU_CX_GMU_WFI_CONFIG,0)) return -2;
++    const struct { uint32_t offset,value; } config[]={
++        {A6XX_GMU_CM3_FW_INIT_RESULT,0},
++        {A6XX_GMU_CM3_BOOT_CONFIG,2},
++        {A6XX_GMU_HFI_QTBL_ADDR,0x60100000},
++        {A6XX_GMU_HFI_QTBL_INFO,1},
++        {A6XX_GMU_AHB_FENCE_RANGE_0,0x80a008a0},
++        {A6XX_GMU_CM3_CFG,0x4052},
++        {A6XX_GMU_HFI_SFR_ADDR,0x06018000},
++        {A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000},
++        {A6XX_GMU_SYS_BUS_CONFIG,1},
++        {A6XX_GMU_ICACHE_CONFIG,1},
++        {A6XX_GMU_DCACHE_CONFIG,1},
++        {A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400},
++        {A6XX_GMU_RPMH_CTRL,rpmh|SWEET_GMU_RPMH_ENABLE},
++        {A6XX_GMU_CX_GMU_WFI_CONFIG,0}
++    };
++    for (size_t i=0;i<sizeof(config)/sizeof(config[0]);i++) {
++        error=config[i].offset==A6XX_GMU_CM3_CFG ? configure_cm3(&io,config[i].value) :
++            sync_write(&io,config[i].offset,config[i].value);
++        if (error) return error;
++    }
+     if (o->check(o->ctx,1)) return -3;
+-    int error=irq_status(&io);
++    error=irq_status(&io);
+     if (error) return error;
+     /* Fresh completion required; stale BABEFACE must never pass. */
+     if (rd(&io,SWEET_GMU_REG,A6XX_GMU_CM3_FW_INIT_RESULT,&value)) return -2;
+--- a/bsd/dev/sweet_gmu_start.h
++++ b/bsd/dev/sweet_gmu_start.h
+@@ -33,10 +33,15 @@
+     unsigned attempted, held, release_attempted;
+     enum sweet_gmu_start_stage stage;
+     uint32_t fw_init, host_irq, ao_irq, pdc_before, last_region, last_offset;
++    /* Last callback: io=1 read, io=2 attempted write; ok is callback success.
++     * A successful write callback alone does not establish register state. */
++    uint32_t last_io, last_ok, last_value, cm3_cfg, cm3_cfg_valid;
++    uint32_t mismatch_offset, mismatch_expected, mismatch_actual;
+ };
+ /* 0: fresh BABEFACE + postcheck. -1 invalid/repeated, -2 callback/I/O error,
+  * -3 precondition/profile mismatch, -4 deadline, -5 TCM verification failure,
+  * -6 CM3/watchdog/fence/AHB error reported with IRQs masked.
++ * -7 exact readback mismatch (recorded), -8 CM3 NMI still asserted.
+  * No result establishes HFI exchange, translated DMA or GPU rendering. */
+ int sweet_gmu_cold_start(struct sweet_gmu_start_state *,
+     const struct sweet_gmu_start_ops *, const void *firmware, size_t bytes);
+--- a/bsd/dev/sweet_gmu_start_profile.h
++++ b/bsd/dev/sweet_gmu_start_profile.h
+@@ -37,6 +37,8 @@
+ #define A6XX_RSCC_SEQ_BUSY_DRV0 0x23404u
+ #define A6XX_GMU_RSCC_CONTROL_REQ 0x24c1cu
+ #define SWEET_GMU_RPMH_ENABLE 0x00000f11u
++/* kgsl_gmu.c GMU_CM3_CFG_NONMASKINTR_SHIFT. */
++#define SWEET_GMU_CM3_NMI (1u << 9)
+ #define SWEET_GMU_PDC_ENABLE 0x4500u
+ struct sweet_gmu_boot_write { unsigned region; uint32_t offset, value; };
+ static const struct sweet_gmu_boot_write sweet_gmu_pdc_program[] = {
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -180,7 +180,7 @@
+ 
+     PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
+     if (requested_start == 1) {
+-        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus"};
++        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus", "sweetgpucheck"};
+         const char *conflicting[] = {"sweetgmuload", "sweetgpusmmuinit"};
+         unsigned long jtag = 0;
+         unsigned wfi_mode = 1;
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -117,10 +117,18 @@
+     uint32_t gx_status = mmio_read(s->cc + 0x010);
+     if (!s->checked_power) IOLog("SWEET GMU BOOT: GX completion=%08x\n", gx_status);
+     if (gx_status == UINT32_MAX || (gx_status & 0x18000u) != 0x8000u) return -1;
+-    if (mmio_read(s->gmu) != (phase == 2 ? 0u : 1u) ||
+-        mmio_read(s->gmu + 0x730) != (phase ? 1u : 0u)) return -1;
+-    if (phase != 2 && (mmio_read(s->gmu + 0x068) != 0 ||
+-        mmio_read(s->gmu + 0x070) != 0)) return -1;
++    uint32_t reset=mmio_read(s->gmu),retention=mmio_read(s->gmu+0x730);
++    if (reset!=(phase==2 ? 0u : 1u) || retention!=(phase ? 1u : 0u)) {
++        IOLog("SWEET GMU BOOT: reset guard phase=%u reset=%08x retention=%08x\n",phase,reset,retention);
++        return -1;
++    }
++    if (phase!=2) {
++        uint32_t busy=mmio_read(s->gmu+0x068),init=mmio_read(s->gmu+0x070);
++        if (busy || init) {
++            IOLog("SWEET GMU BOOT: inactive guard busy=%08x init=%08x\n",busy,init);
++            return -1;
++        }
++    }
+     s->checked_power = true;
+     return complete(s);
+ }
+@@ -194,8 +202,11 @@
+     auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
+     const void *firmware=nullptr;size_t bytes=0;
+     IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
+-    if (idle_enable || stopped(s) || sweet_gpu_firmware_get(0,&firmware,&bytes) ||
+-        !firmware || bytes!=0x8000) return -3;
++    if (idle_enable) { IOLog("SWEET GMU BOOT: CPU idle still enabled\n");return -3; }
++    if (stopped(s)) return -3;
++    int firmware_rc=sweet_gpu_firmware_get(0,&firmware,&bytes);
++    IOLog("SWEET GMU BOOT: firmware getter rc=%d bytes=%lu\n",firmware_rc,static_cast<unsigned long>(bytes));
++    if (firmware_rc || !firmware || bytes!=0x8000) return -3;
+     s->smmu=ml_io_map(0x05040000ull,0x10000);
+     s->region[0]=ml_io_map(SWEET_GMU_REG_BASE,SWEET_GMU_REG_SIZE);
+     s->region[1]=ml_io_map(SWEET_GMU_PDC_CFG_BASE,SWEET_GMU_PDC_SIZE);
+@@ -218,6 +229,10 @@
+     sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
+     rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
+     report_faults(s);
++    IOLog("SWEET GMU BOOT: CM3_CFG valid=%u value=%08x; last_io=%u ok=%u value=%08x\n",
++        s->boot.cm3_cfg_valid,s->boot.cm3_cfg,s->boot.last_io,s->boot.last_ok,s->boot.last_value);
++    if (s->boot.mismatch_offset) IOLog("SWEET GMU BOOT: readback mismatch off=%x expected=%08x actual=%08x\n",
++        s->boot.mismatch_offset,s->boot.mismatch_expected,s->boot.mismatch_actual);
+     IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",
+         rc,static_cast<unsigned>(s->boot.stage),s->boot.held,s->boot.release_attempted,
+         s->boot.fw_init,s->boot.host_irq,s->boot.ao_irq,s->boot.pdc_before,s->boot.last_region,s->boot.last_offset);

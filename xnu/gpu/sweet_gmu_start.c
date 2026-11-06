@@ -14,22 +14,46 @@ static void stage(struct start_io *io, enum sweet_gmu_start_stage value)
 static int rd(struct start_io *io,unsigned region,uint32_t off,uint32_t *value)
 {
     io->s->last_region=region;io->s->last_offset=off;
-    return io->o->read32(io->o->ctx,region,off,value);
+    io->s->last_io=1;io->s->last_ok=0;io->s->last_value=0;
+    int rc=io->o->read32(io->o->ctx,region,off,value);
+    if (!rc) { io->s->last_ok=1;io->s->last_value=*value; }
+    return rc;
 }
 static int wr(struct start_io *io,unsigned region,uint32_t off,uint32_t value)
 {
     io->s->last_region=region;io->s->last_offset=off;
-    return io->o->write32(io->o->ctx,region,off,value);
+    io->s->last_io=2;io->s->last_ok=0;io->s->last_value=value;
+    int rc=io->o->write32(io->o->ctx,region,off,value);
+    if (!rc) io->s->last_ok=1;
+    return rc;
 }
 static int sync_write(struct start_io *io,uint32_t off,uint32_t value)
 {
     uint32_t actual;
-    return wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
-        rd(io,SWEET_GMU_REG,off,&actual) || actual!=value;
+    if (wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
+        rd(io,SWEET_GMU_REG,off,&actual)) return -2;
+    if (actual!=value) {
+        io->s->mismatch_offset=off;io->s->mismatch_expected=value;io->s->mismatch_actual=actual;
+        return -7;
+    }
+    return 0;
 }
 static int tcm_read(void *p,uint32_t off,uint32_t *value)
 {
     return rd(p,SWEET_GMU_REG,off,value);
+}
+static int configure_cm3(struct start_io *io,uint32_t value)
+{
+    /* Pinned stock restores 0x4052 to clear NMI before boot, without requiring
+     * whole-register equality. kgsl_gmu.c names NONMASKINTR at bit9 and reads
+     * this register before setting it. Other readback bits are not specified.
+     * 0146b stopped on equality here, but did not record the actual value. */
+    if (wr(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,value) ||
+        io->o->barrier(io->o->ctx) ||
+        rd(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,&io->s->cm3_cfg)) return -2;
+    io->s->cm3_cfg_valid=1;
+    if (io->s->cm3_cfg==UINT32_MAX) return -2;
+    return io->s->cm3_cfg&SWEET_GMU_CM3_NMI ? -8 : 0;
 }
 static int tcm_write(void *p,uint32_t off,uint32_t value)
 {
@@ -75,7 +99,9 @@ int sweet_gmu_cold_start(struct sweet_gmu_start_state *s,
         wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_MASK,UINT32_MAX) ||
         wr(&io,SWEET_GMU_REG,A6XX_GMU_AO_HOST_INTERRUPT_CLR,UINT32_MAX) ||
         wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_CLR,UINT32_MAX) ||
-        o->barrier(o->ctx) || sync_write(&io,A6XX_GMU_GENERAL_7,1)) return -2;
+        o->barrier(o->ctx)) return -2;
+    int error=sync_write(&io,A6XX_GMU_GENERAL_7,1);
+    if (error) return error;
     stage(&io,SWEET_GMU_START_PDC);
     for (size_t i=0;i<sizeof(sweet_gmu_pdc_program)/sizeof(sweet_gmu_pdc_program[0]);++i) {
         const struct sweet_gmu_boot_write *w=&sweet_gmu_pdc_program[i];
@@ -89,22 +115,29 @@ int sweet_gmu_cold_start(struct sweet_gmu_start_state *s,
         o->barrier(o->ctx)) return -2;
     if (sweet_gpu_gmu_verify_legacy(&tcm,firmware,bytes,&done) || done!=bytes) return -5;
     stage(&io,SWEET_GMU_START_CONFIG);
-    if (sync_write(&io,A6XX_GMU_CM3_FW_INIT_RESULT,0) ||
-        sync_write(&io,A6XX_GMU_CM3_BOOT_CONFIG,2) ||
-        sync_write(&io,A6XX_GMU_HFI_QTBL_ADDR,0x60100000) ||
-        sync_write(&io,A6XX_GMU_HFI_QTBL_INFO,1) ||
-        sync_write(&io,A6XX_GMU_AHB_FENCE_RANGE_0,0x80a008a0) ||
-        sync_write(&io,A6XX_GMU_CM3_CFG,0x4052) ||
-        sync_write(&io,A6XX_GMU_HFI_SFR_ADDR,0x06018000) ||
-        sync_write(&io,A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000) ||
-        sync_write(&io,A6XX_GMU_SYS_BUS_CONFIG,1) ||
-        sync_write(&io,A6XX_GMU_ICACHE_CONFIG,1) ||
-        sync_write(&io,A6XX_GMU_DCACHE_CONFIG,1) ||
-        sync_write(&io,A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400) ||
-        sync_write(&io,A6XX_GMU_RPMH_CTRL,rpmh|SWEET_GMU_RPMH_ENABLE) ||
-        sync_write(&io,A6XX_GMU_CX_GMU_WFI_CONFIG,0)) return -2;
+    const struct { uint32_t offset,value; } config[]={
+        {A6XX_GMU_CM3_FW_INIT_RESULT,0},
+        {A6XX_GMU_CM3_BOOT_CONFIG,2},
+        {A6XX_GMU_HFI_QTBL_ADDR,0x60100000},
+        {A6XX_GMU_HFI_QTBL_INFO,1},
+        {A6XX_GMU_AHB_FENCE_RANGE_0,0x80a008a0},
+        {A6XX_GMU_CM3_CFG,0x4052},
+        {A6XX_GMU_HFI_SFR_ADDR,0x06018000},
+        {A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000},
+        {A6XX_GMU_SYS_BUS_CONFIG,1},
+        {A6XX_GMU_ICACHE_CONFIG,1},
+        {A6XX_GMU_DCACHE_CONFIG,1},
+        {A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400},
+        {A6XX_GMU_RPMH_CTRL,rpmh|SWEET_GMU_RPMH_ENABLE},
+        {A6XX_GMU_CX_GMU_WFI_CONFIG,0}
+    };
+    for (size_t i=0;i<sizeof(config)/sizeof(config[0]);i++) {
+        error=config[i].offset==A6XX_GMU_CM3_CFG ? configure_cm3(&io,config[i].value) :
+            sync_write(&io,config[i].offset,config[i].value);
+        if (error) return error;
+    }
     if (o->check(o->ctx,1)) return -3;
-    int error=irq_status(&io);
+    error=irq_status(&io);
     if (error) return error;
     /* Fresh completion required; stale BABEFACE must never pass. */
     if (rd(&io,SWEET_GMU_REG,A6XX_GMU_CM3_FW_INIT_RESULT,&value)) return -2;

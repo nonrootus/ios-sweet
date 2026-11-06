@@ -19,7 +19,7 @@ tree=ast.parse((src/'sweet_gpu_smmu_probe_test.py').read_text())
 model=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n#include <cassert>'))
 model=model[:model.index('static void run()')]
 model=model.replace('gmu[1024];','gmu_full[0x31000/4], pdc_cfg[0x10000/4], pdc_seq[0x10000/4];\nstatic uint32_t *gmu=gmu_full+0x14000/4;\nstatic uint8_t firmware[0x8000];\nstatic uint32_t hfi_words[0x5000/4];\nstatic bool released,fw_timeout,fw_missing,hold_fail,fw_corrupt,stale_init;\nstatic unsigned boot_writes;\nstatic uint32_t host_irq_fault;\nextern "C" {int idle_enable=0;}')
-model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };')
+model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };\nstatic uint32_t cfg_override_value;\nstatic bool cfg_override;')
 model=model.replace('assert(p==allocated && p->refs);++unpins;','assert(p==allocated && p->refs && !p->latched);++unpins;')
 start=model.index('extern "C" uintptr_t ml_io_map(');end=model.index('\nstatic bool is_smmu',start)
 model=model[:start]+r'''
@@ -46,7 +46,8 @@ static bool in_range(uintptr_t a,uint32_t *p,size_t n){return a>=uintptr_t(p)&&a
 model=model.replace('    assert(!(a&3));','''    assert(!(a&3));
     if(released && a==uintptr_t(gmu_full)+0x14070 && !fw_timeout)gmu_full[0x14070/4]=0xbabeface;
     if(a==uintptr_t(gmu_full)+0x7000 && fw_corrupt)return gmu_full[0x7000/4]^1;
-    if(released && a==uintptr_t(gmu_full)+0x14648)return host_irq_fault;''',1)
+    if(released && a==uintptr_t(gmu_full)+0x14648)return host_irq_fault;
+    if(cfg_override && a==uintptr_t(gmu_full)+0x140b4)return cfg_override_value;''',1)
 model=model.replace('    assert(is_smmu(a)&&!(a&3));++writes;','''    assert(!(a&3));++writes;
     if(!is_smmu(a)) {
         assert(in_range(a,gmu_full,sizeof(gmu_full)) || in_range(a,pdc_cfg,sizeof(pdc_cfg)) || in_range(a,pdc_seq,sizeof(pdc_seq)));
@@ -57,7 +58,8 @@ model=model.replace('    assert(is_smmu(a)&&!(a&3));++writes;','''    assert(!(a
     }''',1)
 model=model.replace('    assert(!live&&!allocated);','''    // Test harness only: simulate a complete device reset between cases.
     if(allocated){delete allocated;allocated=nullptr;live=0;}
-    released=fw_timeout=fw_missing=hold_fail=fw_corrupt=stale_init=false;
+    released=fw_timeout=fw_missing=hold_fail=fw_corrupt=stale_init=cfg_override=false;
+    cfg_override_value=0;
     boot_writes=host_irq_fault=0;idle_enable=0;
     memset(pdc_cfg,0,sizeof(pdc_cfg));memset(pdc_seq,0,sizeof(pdc_seq));
     for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*3+1);''',1)
@@ -86,9 +88,13 @@ int main(){
  reset();fw_missing=true;assert(run()!=0&&!maps&&!writes);
  reset();alloc_fail=true;assert(run()!=0&&!writes&&!live);
  reset();hold_fail=true;assert(run()!=0&&!boot_writes&&!released);retained();
+ reset();cfg_override=true;cfg_override_value=0x4050;assert(run()==0 && probe.boot.cm3_cfg_valid && probe.boot.cm3_cfg==0x4050);retained();
+ reset();cfg_override=true;cfg_override_value=0x4252;assert(run()==-8 && !released && allocated->latched);retained();
+ assert(probe.boot.last_io==1 && probe.boot.last_ok && probe.boot.last_value==0x4252);
+ reset();cfg_override=true;cfg_override_value=UINT32_MAX;assert(run()==-2&&!released);retained();
  reset();fw_timeout=true;assert(run()==-4&&released&&allocated->latched);retained();
  reset();fw_corrupt=true;assert(run()==-5&&!released&&allocated->latched);retained();
- reset();stale_init=true;assert(run()==-2&&!released&&allocated->latched);retained();
+ reset();stale_init=true;assert(run()==-7&&!released&&allocated->latched);retained();
  reset();host_irq_fault=1u<<15;assert(run()==-6&&released&&allocated->latched);retained();
  for(unsigned bit=0;bit<32;bit++)if(bit!=10){
   reset();inject_fault=1u<<bit;assert(run()!=0&&!boot_writes&&!released);retained();

@@ -33,10 +33,15 @@ struct sweet_gmu_start_state {
     unsigned attempted, held, release_attempted;
     enum sweet_gmu_start_stage stage;
     uint32_t fw_init, host_irq, ao_irq, pdc_before, last_region, last_offset;
+    /* Last callback: io=1 read, io=2 attempted write; ok is callback success.
+     * A successful write callback alone does not establish register state. */
+    uint32_t last_io, last_ok, last_value, cm3_cfg, cm3_cfg_valid;
+    uint32_t mismatch_offset, mismatch_expected, mismatch_actual;
 };
 /* 0: fresh BABEFACE + postcheck. -1 invalid/repeated, -2 callback/I/O error,
  * -3 precondition/profile mismatch, -4 deadline, -5 TCM verification failure,
  * -6 CM3/watchdog/fence/AHB error reported with IRQs masked.
+ * -7 exact readback mismatch (recorded), -8 CM3 NMI still asserted.
  * No result establishes HFI exchange, translated DMA or GPU rendering. */
 int sweet_gmu_cold_start(struct sweet_gmu_start_state *,
     const struct sweet_gmu_start_ops *, const void *firmware, size_t bytes);

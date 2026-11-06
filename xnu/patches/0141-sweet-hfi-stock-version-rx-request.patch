@@ -1,34 +1,22 @@
 --- a/bsd/dev/sweet_hfi_codec.c
 +++ b/bsd/dev/sweet_hfi_codec.c
-@@ -20,3 +20,18 @@
-     *payload_words = words - 3;
-     return msg[2] ? 2 : 0;
- }
-+
-+int sweet_hfi_v1_init(uint32_t *out, size_t cap, uint16_t sequence,
-+    uint32_t debug_iova, uint32_t debug_size, uint32_t boot_state) {
-+    uint32_t hdr;
-+    if (!out || cap<5 || sweet_hfi_command_header(0,sequence,5,&hdr)) return -1;
-+    out[0]=hdr;out[1]=0;out[2]=debug_iova;out[3]=debug_size;out[4]=boot_state;
-+    return 0;
-+}
-+int sweet_hfi_v1_version(uint32_t *out, size_t cap, uint16_t sequence) {
-+    uint32_t hdr;
-+    if (!out || cap<2 || sweet_hfi_command_header(1,sequence,2,&hdr)) return -1;
+@@ -31,5 +31,7 @@
+ int sweet_hfi_v1_version(uint32_t *out, size_t cap, uint16_t sequence) {
+     uint32_t hdr;
+     if (!out || cap<2 || sweet_hfi_command_header(1,sequence,2,&hdr)) return -1;
+-    out[0]=hdr;out[1]=(1u<<28)|(1u<<19)|(1u<<17);return 0;
 +    /* Xiaomi sweet_k6a-r-oss 10c33d40: A618 gpmu_major=1, minor=8.
 +     * This is the supported GMU firmware version, not the HFI wire version. */
 +    out[0]=hdr;out[1]=(1u<<28)|(8u<<16);return 0;
-+}
+ }
 --- a/bsd/dev/sweet_hfi_codec.h
 +++ b/bsd/dev/sweet_hfi_codec.h
-@@ -7,4 +7,8 @@
- /* 0: matching success, 1: different command, 2: firmware error, -1: malformed. */
- int sweet_hfi_response(const uint32_t *msg, size_t available, uint8_t command,
+@@ -9,5 +9,6 @@
      uint16_t sequence, uint32_t *firmware_error, const uint32_t **payload, size_t *payload_words);
-+/* Build HFI v1 startup messages; caller sends only after GMU is ready. */
-+int sweet_hfi_v1_init(uint32_t *, size_t, uint16_t, uint32_t, uint32_t, uint32_t);
+ /* Build HFI v1 startup messages; caller sends only after GMU is ready. */
+ int sweet_hfi_v1_init(uint32_t *, size_t, uint16_t, uint32_t, uint32_t, uint32_t);
 +/* A618 stock supported GMU version 1.8, encoded in an HFI v1 request. */
-+int sweet_hfi_v1_version(uint32_t *, size_t, uint16_t);
+ int sweet_hfi_v1_version(uint32_t *, size_t, uint16_t);
  #endif
 --- a/bsd/dev/sweet_hfi_transport.c
 +++ b/bsd/dev/sweet_hfi_transport.c

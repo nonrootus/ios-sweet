@@ -83,6 +83,7 @@ jobs:
       - name: Verify required SWEET GPU patch in source and kernel
         if: env.MACHINE_CONFIG == 'SWEET' && env.KERNEL_CONFIG == 'DEVELOPMENT'
         run: |
+          set -x
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0122-sweet-gmu-tcm-power-recheck.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0124-sweet-smmu-snapshot-probe.patch"
           # 0139 supersedes 0125 HFI bytes and 0126 table helpers; exact cmp below.

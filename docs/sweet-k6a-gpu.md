@@ -8,6 +8,12 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+Offline `sweet_hfi_perf` encodes the pinned legacy 43-word frequency table
+and two-word TEST terminator for HFI_USE_REG. Input frequencies are kHz and
+votes come from the separately validated ARC calculation. Tests compare the
+wire layout against the stock structures. These helpers have no hardware
+caller and are not included in the 0145 kernel yet.
+
 0144 inventory completed on the device: all eight normal banks were stable,
 idle and disabled. Historical payloads are not current vote values.
 

@@ -46,6 +46,21 @@ Captured ARC tables start at level0; all five captured GPU frequency bins end
 at0Hz and the GMU table begins with0Hz. This supports the codec's off-entry
 contract for this device, without choosing a speed bin or active OPPs.
 
+`sweet_hfi_codec_stock_test.py` additionally compiles the unchanged stock
+INIT/version builders and ACK receiver with a host-only transport stub.
+It extracts the message IDs, header/sequence macros and A618 firmware version
+from the pinned KGSL sources, then compares all 4096 sequence values and checks
+ACK error, mismatch and truncated-message handling under ASan/UBSan. The local
+decoder's extra ACK-ID check is explicitly distinguished from stock's type-only
+dispatch. This establishes packet layout, not a live HFI exchange or the actual
+firmware's HFI wire version. Reproduce in the D-backed Ubuntu environment:
+
+```sh
+python3 xnu/gpu/sweet_hfi_codec_stock_test.py \
+  /mnt/d/ios-sweet/research/sweet-k6a-stock-gmu-10c33d40 \
+  /mnt/d/ios-sweet/build/hfi-codec-stock-test
+```
+
 0144 inventory completed on the device: all eight normal banks were stable,
 idle and disabled. Historical payloads are not current vote values.
 

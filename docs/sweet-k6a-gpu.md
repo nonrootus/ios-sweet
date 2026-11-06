@@ -24,6 +24,13 @@ offset/expected/actual values; rc=-7 means mismatch, rc=-8 means NMI set.
 The entry now requires `sweetgpucheck=1` and reports firmware-getter and
 reset/idle guard failures. Full kernel CI and device testing remain pending.
 
+`sweet_gmu_stock_config_test.py STOCK_CACHE BUILD_DIRECTORY` compiles the
+unchanged pinned stock firmware-start, power-config and CM3-start functions
+against a trace-only host shim. All16 retention/configuration/WFI/reset writes
+match the actual sequencer in order and value, including preservation of
+three initial RPMH_CTRL variants. This complements the48-write PDC reference
+test; it does not validate register readback or actual firmware execution.
+
 0146 implements an opt-in first CM3 boot, ending at fresh BABEFACE before
 GX OOB, SPTPRAC or HFI initialization. `sweetgmustart=1` requires the existing
 power/clock/status flags, successful same-boot DDR handoff and `jtag=1 wfi=0`;

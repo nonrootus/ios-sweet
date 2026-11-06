@@ -1,0 +1,180 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -157,6 +157,81 @@
+ 		return EINVAL;
+ 	}
+ 	return 0;
++}
++
++/* Included by sweet_rpmh.c. Read-only inventory, not a resource vote readback:
++ * completed votes may persist in hardware after a TCS slot is cleared.
++ * The lock excludes local writers, not firmware/other execution environments.
++ * A stable sample is not proof that XNU owns a BCM or may replace its vote. */
++int sweet_rpmh_tcs_snapshot(void);
++int sweet_rpmh_tcs_snapshot(void)
++{
++    static unsigned attempted;
++    static struct {
++        uint32_t control, status, enable, wait;
++        uint32_t command[16][3]; /* message ID, address, data */
++    } bank[8];
++    uint32_t irq_enable, irq_status;
++    bool stable = true;
++    int error;
++    if (__atomic_exchange_n(&attempted, 1, __ATOMIC_ACQ_REL)) return EALREADY;
++    if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) return EBUSY;
++    if (rh_poisoned) { error = EIO; goto out; }
++    error = rh_map();
++    if (error) goto out;
++    if (rh_ncpt != 16 || ((rh_read(rh_rsc, 0x0c) >> (6u * RH_DRV)) & 0x3fu) != 8) {
++        error = ENODEV; goto out;
++    }
++    irq_enable = rh_read(rh_tcs, RH_IRQ_EN);
++    irq_status = rh_read(rh_tcs, RH_IRQ_STATUS);
++    for (unsigned t = 0; t < 8; ++t) {
++        uint32_t b = t * RH_TCS_STRIDE;
++        bank[t].control = rh_read(rh_tcs, b + RH_CONTROL);
++        bank[t].status = rh_read(rh_tcs, b + RH_STATUS);
++        bank[t].enable = rh_read(rh_tcs, b + RH_ENABLE);
++        bank[t].wait = rh_read(rh_tcs, b + RH_WAIT);
++        for (unsigned c = 0; c < 16; ++c) {
++            uint32_t off = b + c * RH_CMD_STRIDE;
++            bank[t].command[c][0] = rh_read(rh_tcs, off + RH_MSGID);
++            bank[t].command[c][1] = rh_read(rh_tcs, off + RH_ADDR);
++            bank[t].command[c][2] = rh_read(rh_tcs, off + RH_DATA);
++        }
++        if (bank[t].control == 0xffffffffu || bank[t].status == 0xffffffffu ||
++            (bank[t].enable & ~0xffffu) || (bank[t].wait & ~0xffffu)) stable = false;
++    }
++    /* Compare every sampled field again before logging; no command slot,
++     * status, IRQ enable or W1C register is written. */
++    for (unsigned t = 0; t < 8; ++t) {
++        uint32_t b = t * RH_TCS_STRIDE;
++        if (bank[t].control != rh_read(rh_tcs, b + RH_CONTROL) ||
++            bank[t].status != rh_read(rh_tcs, b + RH_STATUS) ||
++            bank[t].enable != rh_read(rh_tcs, b + RH_ENABLE) ||
++            bank[t].wait != rh_read(rh_tcs, b + RH_WAIT)) stable = false;
++        for (unsigned c = 0; c < 16; ++c) {
++            uint32_t off = b + c * RH_CMD_STRIDE;
++            if (bank[t].command[c][0] != rh_read(rh_tcs, off + RH_MSGID) ||
++                bank[t].command[c][1] != rh_read(rh_tcs, off + RH_ADDR) ||
++                bank[t].command[c][2] != rh_read(rh_tcs, off + RH_DATA)) stable = false;
++        }
++    }
++    if (irq_enable == 0xffffffffu || irq_status == 0xffffffffu ||
++        irq_enable != rh_read(rh_tcs, RH_IRQ_EN) ||
++        irq_status != rh_read(rh_tcs, RH_IRQ_STATUS)) stable = false;
++    printf("SWEET TCS: begin banks=8 slots=16 irq-enable=%08x irq-status=%08x\n", irq_enable, irq_status);
++    for (unsigned t = 0; t < 8; ++t) {
++        printf("SWEET TCS: bank=%u kind=%s control=%08x status=%08x enable=%08x wait=%08x\n",
++            t, t < 2 ? "active" : t < 5 ? "sleep" : "wake",
++            bank[t].control, bank[t].status, bank[t].enable, bank[t].wait);
++        for (unsigned c = 0; c < 16; ++c)
++            printf("SWEET TCS: slot=%u:%u msg=%08x addr=%08x data=%08x enabled=%u\n",
++                t, c, bank[t].command[c][0], bank[t].command[c][1], bank[t].command[c][2],
++                (bank[t].enable >> c) & 1u);
++    }
++    printf("SWEET TCS: end stable=%u; slots do not prove current votes or ownership\n", stable ? 1u : 0u);
++    error = stable ? 0 : EBUSY;
++out:
++    __atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
++    return error;
+ }
+ 
+ static int
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -189,6 +189,10 @@
+         printf("SWEET GPU: GCC mapping failed\n");
+         return;
+     }
++    extern int sweet_rpmh_tcs_snapshot(void);
++    int tcs_snapshot = 0;
++    if (PE_parse_boot_argn("sweettcssnapshot", &tcs_snapshot, sizeof(tcs_snapshot)) && tcs_snapshot == 1)
++        printf("SWEET GPU: TCS inventory rc=%d\n", sweet_rpmh_tcs_snapshot());
+     state = *(volatile uint32_t *)(gcc + SWEET_GPU_CFG_AHB);
+     __asm__ volatile ("dmb oshld" ::: "memory");
+     printf("SWEET GPU: cfg AHB CBCR 0x%08x (%s); no GPU registers accessed\n",
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_bw.c
+@@ -0,0 +1,51 @@
++#include "sweet_hfi_bw.h"
++#include "sweet_hfi_codec.h"
++
++static int addresses_valid(const uint32_t *a, unsigned count)
++{
++    for (unsigned i = 0; i < count; ++i) {
++        if ((a[i] >> 16) != 5 || (a[i] & 3)) return 0;
++        for (unsigned j = 0; j < i; ++j) if (a[i] == a[j]) return 0;
++    }
++    return 1;
++}
++static int data_valid(uint32_t v)
++{
++    /* BCM command: commit30, valid29, X[27:14], Y[13:0]. */
++    return !(v & 0x90000000u) && (!!(v & 0x20000000u) == !!(v & 0x0fffffffu));
++}
++int sweet_hfi_bw_encode(uint32_t *out, size_t capacity, uint16_t sequence,
++    const struct sweet_hfi_bw_table *t)
++{
++    uint32_t header;
++    if (!out || !t || capacity < SWEET_HFI_BW_WORDS ||
++        sweet_hfi_command_header(3, sequence, SWEET_HFI_BW_WORDS, &header)) return -1;
++    const uintptr_t dst = (uintptr_t)out, src = (uintptr_t)t;
++    const size_t bytes = SWEET_HFI_BW_WORDS * sizeof(*out);
++    if (dst > UINTPTR_MAX - bytes || src > UINTPTR_MAX - sizeof(*t) ||
++        (dst < src + sizeof(*t) && src < dst + bytes)) return -1;
++    if (!t->levels || t->levels > 16 || !t->cnoc_count || t->cnoc_count > 6 ||
++        !t->ddr_count || t->ddr_count > 8 ||
++        (t->cnoc_wait >> t->cnoc_count) || (t->ddr_wait >> t->ddr_count) ||
++        !addresses_valid(t->cnoc_addr, t->cnoc_count) ||
++        !addresses_valid(t->ddr_addr, t->ddr_count)) return -1;
++    for (unsigned i = 0; i < 2; ++i)
++        for (unsigned j = 0; j < t->cnoc_count; ++j)
++            if (!data_valid(t->cnoc_data[i][j])) return -1;
++    for (unsigned i = 0; i < t->levels; ++i)
++        for (unsigned j = 0; j < t->ddr_count; ++j)
++            if (!data_valid(t->ddr_data[i][j])) return -1;
++    for (unsigned i = 0; i < SWEET_HFI_BW_WORDS; ++i) out[i] = 0;
++    out[0] = header; out[1] = t->levels;
++    out[2] = t->cnoc_count; out[3] = t->ddr_count;
++    out[4] = t->cnoc_wait; out[5] = t->ddr_wait;
++    for (unsigned j = 0; j < t->cnoc_count; ++j) {
++        out[6+j] = t->cnoc_addr[j];
++        for (unsigned i = 0; i < 2; ++i) out[12+6*i+j] = t->cnoc_data[i][j];
++    }
++    for (unsigned j = 0; j < t->ddr_count; ++j) {
++        out[24+j] = t->ddr_addr[j];
++        for (unsigned i = 0; i < t->levels; ++i) out[32+8*i+j] = t->ddr_data[i][j];
++    }
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_bw.h
+@@ -0,0 +1,19 @@
++#ifndef SWEET_HFI_BW_H
++#define SWEET_HFI_BW_H
++#include <stddef.h>
++#include <stdint.h>
++/* Xiaomi 10c33d40 legacy hfi_bwtable_cmd: always 160 words, including unused
++ * rows/columns. This codec neither calculates nor submits a bandwidth vote. */
++#define SWEET_HFI_BW_WORDS 160u
++struct sweet_hfi_bw_table {
++    uint32_t levels, cnoc_count, ddr_count, cnoc_wait, ddr_wait;
++    uint32_t cnoc_addr[6], cnoc_data[2][6];
++    uint32_t ddr_addr[8], ddr_data[16][8];
++};
++/* Requires nonoverlapping input/output. On error output is unchanged.
++ * Unused entries are ignored and encoded as zero. Active addresses must be
++ * distinct aligned BCM addresses. No inference of resource ownership, shared
++ * host votes, firmware readiness or correct hardware policy is made here. */
++int sweet_hfi_bw_encode(uint32_t *, size_t, uint16_t,
++    const struct sweet_hfi_bw_table *);
++#endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -1,3 +1,4 @@
++bsd/dev/sweet_hfi_bw.c		standard
+ #
+ # Mach Operating System
+ # Copyright (c) 1989 Carnegie-Mellon University

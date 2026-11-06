@@ -8,6 +8,16 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+0144 prepares a complete legacy HFI bandwidth-message encoder and an opt-in
+`sweettcssnapshot=1` inventory using the existing RPMh mapping and lock.
+The encoder preserves the pinned 160-word ABI and zeros unused slots; it has
+no sender or hardware caller yet. The inventory samples all eight normal TCS
+banks and their 16 payload slots twice, before the GPU probe's first vote.
+It performs no register writes and reports inconsistent samples. Cleared slots
+can still correspond to votes retained inside BCM, so even a stable inventory
+does not establish a current vote or ownership. No BCM readback protocol is
+assumed and no BCM request is sent by this patch. Device result pending.
+
 0141 corrects the requested GMU firmware version to1.8 and rearms `rx_req`
 when the polled receive queue is empty. This is not an interrupt-driven receiver.
 0142 adds `sweetcmdsnapshot=1`: a one-shot, read-only capture of the known

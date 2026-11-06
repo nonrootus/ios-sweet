@@ -29,8 +29,10 @@ records SMMU fault registers and retains mappings on every outcome.
 The source-derived sequence model passed 138 callback failure points, and the
 composed persistent adapter passed power/reset, SMMU fault, timeout, lifetime
 and one-shot checks under ASan/UBSan. ARM64 compilation with XNU headers and
-the full patch/source checks passed. Full kernel CI and device execution are
-pending. BABEFACE would establish CM3 firmware initialization, not HFI, DMA
+the full patch/source checks passed. Full kernel CI42259603028 and required
+source/kernel checks passed. The verified image was temporarily sent through
+fastboot with Booting OKAY; the device log is pending. BABEFACE would establish
+CM3 firmware initialization, not HFI, DMA
 translation, graphics command execution or acceleration.
 
 Offline `sweet_hfi_perf` encodes the pinned legacy 43-word frequency table

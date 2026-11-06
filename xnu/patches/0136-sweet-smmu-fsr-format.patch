@@ -1,0 +1,32 @@
+diff --git a/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp b/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp
+--- a/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp
+@@ -160,13 +160,25 @@
+             static_cast<unsigned long long>(s->context.root_pa), s->last_offset, s->last_value);
+         if (!rc) {
+             uint32_t global_fault = 0, context_fault = 0;
+-            if (read32(s, 0x48, &global_fault) || read32(s, 0x8058, &context_fault) ||
+-                global_fault || context_fault) {
++            int fault_read_error = read32(s, 0x48, &global_fault) ||
++                read32(s, 0x8058, &context_fault);
++            /* ARM IHI0062D.c 16.5.9: FORMAT[10:9] is read-only metadata,
++             * generated from CBA2R.VA64/TCR.EAE. AArch64 reads as 0x400
++             * even without a fault. Keep all actual fault/stall bits and
++             * conservatively reject unexpected reserved bits separately. */
++            constexpr uint32_t fsr_format_mask = 0x00000600u;
++            constexpr uint32_t fsr_fault_mask = 0xc00001feu;
++            uint32_t faults = context_fault & fsr_fault_mask;
++            uint32_t unknown = context_fault & ~(fsr_format_mask | fsr_fault_mask);
++            IOLog("SWEET GPU SMMU: status global=%08x context=%08x format=%u faults=%08x unknown=%08x\n",
++                global_fault, context_fault, (context_fault & fsr_format_mask) >> 9,
++                faults, unknown);
++            if (fault_read_error || global_fault || faults || unknown) {
+                 /* Unexpected traffic or fault means stop/drain assumptions
+                  * may be wrong. Keep the installed pages; no speculative undo. */
+                 s->context.state = SWEET_SMMU_CONTEXT_POISONED;
+                 rc = SWEET_SMMU_CONTEXT_IO;
+-                IOLog("SWEET GPU SMMU: unexpected faults global=%08x context=%08x\n",
++                IOLog("SWEET GPU SMMU: unexpected fault/status global=%08x context=%08x\n",
+                     global_fault, context_fault);
+             } else {
+                 rc = sweet_smmu_context_remove(&s->context);

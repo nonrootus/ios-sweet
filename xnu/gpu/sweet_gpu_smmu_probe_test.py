@@ -50,7 +50,8 @@ alignas(8) static uint32_t smmu[0x10000/4], gcc[1024], cc[1024], gmu[1024];
 static unsigned writes, maps, creates, destroys, pins, unpins, barriers;
 static uint64_t elapsed;
 static int live;
-static bool alloc_fail, pin_fail, global_timeout, context_timeout, inject_fault;
+static bool alloc_fail, pin_fail, global_timeout, context_timeout;
+static uint32_t inject_fault, inject_global;
 static uint32_t corrupt_offset;
 static bool corrupt_remove;
 static bool lose_reset_active, lose_reset_detach;
@@ -88,6 +89,10 @@ static uint32_t model_read(uintptr_t a) {
         if(off==0x74 && global_timeout)return 1;
         if(off==0x87f4 && context_timeout)return 1;
         if(off==0x6000)return smmu[off/4]|8; // read-only IDLE
+        // FSR FORMAT is generated metadata, not a latched fault. In particular
+        // CBA2R.VA64 makes it 0x400 after the real context helper selects AArch64.
+        if(off==0x8058)return smmu[off/4] |
+            ((smmu[0x1800/4]&1)?0x400u:((smmu[0x8030/4]&(1u<<31))?0x200u:0u));
     }
     return *reinterpret_cast<uint32_t*>(a);
 }
@@ -98,7 +103,10 @@ static void model_write32(uintptr_t a,uint32_t v) {
     if(off==corrupt_offset || (corrupt_remove&&off==0x800&&v==0))v^=1;
     if(off==0x6000)v|=8;
     *reinterpret_cast<uint32_t*>(a)=v;
-    if(inject_fault&&off==0x800&&(v&0x80000000u))smmu[0x8058/4]=1;
+    if(off==0x800&&(v&0x80000000u)) {
+        smmu[0x8058/4]|=inject_fault;
+        smmu[0x48/4]|=inject_global;
+    }
     if(lose_reset_active&&off==0x800&&(v&0x80000000u))gmu[0]=0;
 }
 static void model_write64(uintptr_t a,uint64_t v) {
@@ -113,7 +121,8 @@ static void reset() {
     assert(!live&&!allocated);
     memset(smmu,0,sizeof(smmu));memset(gcc,0,sizeof(gcc));memset(cc,0,sizeof(cc));memset(gmu,0,sizeof(gmu));
     probe={};attempted=0;writes=maps=creates=destroys=pins=unpins=barriers=0;elapsed=0;
-    alloc_fail=pin_fail=global_timeout=context_timeout=inject_fault=corrupt_remove=false;
+    alloc_fail=pin_fail=global_timeout=context_timeout=corrupt_remove=false;
+    inject_fault=inject_global=0;
     lose_reset_active=lose_reset_detach=false;
     ignore_fault_writes=false;
     corrupt_offset=UINT32_MAX;messages.clear();
@@ -139,6 +148,9 @@ int main() {
     reset();sweet_gpu_smmu_probe(0,uintptr_t(cc),uintptr_t(gmu));assert(!attempted&&!maps);
     reset();run();assert(!live&&pins==1&&unpins==1&&destroys==1);
     assert(probe.board.state==SWEET_SMMU_K6A_READY&&probe.context.state==SWEET_SMMU_CONTEXT_RETIRED);
+    assert(messages.find("context=00000400 format=2 faults=00000000 unknown=00000000")!=std::string::npos);
+    assert(messages.find("done rc=0;")!=std::string::npos);
+    assert(model_read(uintptr_t(smmu)+0x8058)==0x400); // FORMAT survives detach
     assert(smmu[0]==0xe01e12&&smmu[0x800/4]==0&&smmu[0xc00/4]==0x20300&&smmu[0x8000/4]==0);
     for(unsigned off=0x8020;off<0x8030;off+=4)assert(!smmu[off/4]);
     once();
@@ -160,7 +172,15 @@ int main() {
     reset();pin_fail=true;run();assert(!live&&!pins&&destroys==1);once();
     reset();corrupt_offset=0x1800;run();retained();
     reset();context_timeout=true;run();assert(elapsed==1500000);retained();
-    reset();inject_fault=true;run();retained();
+    // Every architected fault/stall bit, and every unexpected reserved bit,
+    // still stops before removal. FORMAT alone never poisons the context.
+    for(unsigned bit=0;bit<32;++bit) {
+        if(bit==9||bit==10)continue;
+        reset();inject_fault=1u<<bit;run();
+        assert(smmu[0xc00/4]==0x300&&smmu[0x800/4]==0x80000004);
+        retained();
+    }
+    reset();inject_global=1;run();retained();
     reset();corrupt_remove=true;run();retained();
     reset();lose_reset_active=true;run();retained();
     reset();lose_reset_detach=true;run();retained();
@@ -169,7 +189,7 @@ int main() {
     reset();ignore_fault_writes=true;run();
     assert(probe.board.state==SWEET_SMMU_K6A_READY&&smmu[0x800/4]==0x80000004);
     assert(smmu[0xc00/4]==0x300);retained();
-    puts("PASS: real adapter+board+context model: 27 power/reset gates, once-only execution, install/remove, pin/timeout/fault retention; no hardware proof");
+    puts("PASS: real adapter+board+context model: AArch64 FSR FORMAT accepted; 30 other FSR bits/global faults retain memory; 27 power/reset gates, install/remove and timeout retention; no hardware proof");
 }
 ''')
 common = ['-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', '-g', '-I', str(src)]

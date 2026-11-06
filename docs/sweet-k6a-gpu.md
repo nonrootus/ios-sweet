@@ -6,7 +6,14 @@ Metal support has been demonstrated. The user reports a working but laggy iOS
 interface on the 2026-10-27 nowait image. Preserve the currently running
 session and the working boot image while researching acceleration.
 
-## Verified status, 2026-11-05
+## Verified status, 2026-11-06
+
+The 0135 phone log confirms controller preparation and context installation
+both returned zero. Its apparent fault `FSR=0x400` is a diagnostic bug:
+FORMAT[10:9]=2 denotes AArch64 and is read-only, generated from the configured
+translation scheme. No architectural fault/stall bits were set in that sample.
+The adapter stopped and retained memory, so removal has not yet run on hardware.
+Patch 0136 corrects that classification; hardware DMA and rendering remain untested.
 
 Patch 0132 passed full XNU CI (run 42073509204) and a temporary phone boot.
 The fresh log reports `inactive HFI Normal-NC=pass` and `done result=pass`;
@@ -14,7 +21,7 @@ the user confirmed that iOS loaded. The real inactive HFI object now uses
 validated Normal-NC queue storage and separate cached page-table storage.
 Both independent allocation/read/write/release cycles also passed. This
 establishes CPU access and allocation lifetime only: GMU has not executed,
-SMMU translation is not configured, and GPU acceleration remains absent.
+this CPU test did not configure SMMU translation, and GPU acceleration remains absent.
 
 Earlier firmware and probe sections below describe historical milestones.
 The active implementation includes the firmware bundle reader, verified
@@ -99,8 +106,23 @@ use that generic quirk. The observation is not proof that this phone has it
 or that all register writes are blocked. No BYPASS request is introduced.
 Translation installation and removal keep strict verification; a model where
 FAULT writes are ignored during removal still retains all exposed pages.
-0135 passed host models, ARM64 compile and sequential patch checks; its full
-build and device outcome remain pending.
+0135 passed host models, ARM64 compile, sequential patch checks and full XNU
+CI run 42190567655. The user confirmed iOS loaded, and the fresh recovery log
+reports preparation rc=0 and installation rc=0. Global fault status was zero;
+context status was 0x400. The old adapter treated every nonzero context-status
+value as a fault and retained the allocation without attempting removal.
+
+Patch 0136 separates FORMAT metadata (mask 0x600) from architectural fault and
+stall bits (mask 0xc00001fe). Unexpected reserved bits still stop the test,
+as do any global fault or read failure. Raw status, decoded format, actual
+fault bits and unknown bits are logged separately. Nothing clears fault
+registers or changes the strict context-removal checks. The register layout
+and read-only FORMAT behavior are specified by
+[ARM IHI0062D.c, section 16.5.9, pages 299-301](https://documentation-service.arm.com/static/5f900d34f86e16515cdc08fb).
+The pinned Qualcomm driver's context-fault handler likewise tests FSR_FAULT
+instead of treating FORMAT as a fault. The model now derives FORMAT from
+CBA2R/TCR and exercises retention for all 30 non-FORMAT bits, including actual
+translation/permission faults; its old injected bit0 was reserved, not a TF.
 
 Before a subsequent firmware-start implementation, the
 [Linux v6.12 GMU initialization](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpu/drm/msm/adreno/a6xx_gmu.c)

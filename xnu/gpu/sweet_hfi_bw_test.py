@@ -28,9 +28,21 @@ test = r'''
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "sweet_hfi_bw.h"
+#include "sweet_hfi_transport.h"
+#include "sweet_gpu_hfi_table.h"
 ''' + limits + '\n' + struct + r'''
 static uint32_t output[162], saved[162];
+struct sim { uint32_t *memory; unsigned start, barriers, bells; };
+static void fence(void *ctx) { ((struct sim *)ctx)->barriers++; }
+static int bell(void *ctx) {
+    struct sim *s=ctx;
+    assert(s->barriers==3);
+    assert(s->memory[17]==(s->start+160)%1024);
+    for(unsigned i=0;i<160;i++)assert(s->memory[56+(s->start+i)%1024]==output[1+i]);
+    s->bells++;return 0;
+}
 static void fails(struct sweet_hfi_bw_table *t, size_t cap, uint16_t seq) {
     memset(output,0xa5,sizeof(output)); memcpy(saved,output,sizeof(output));
     assert(sweet_hfi_bw_encode(output+1,cap,seq,t)==-1);
@@ -76,16 +88,32 @@ int main(void) {
     bad=t;bad.ddr_addr[7]=0xffffffff;bad.ddr_data[15][7]=0xffffffff;
     assert(!sweet_hfi_bw_encode(output+1,160,4095,&bad));
     assert(!memcmp(output+1,&expected,sizeof(expected))); /* unused zeroed */
+    uint32_t *memory=calloc(1,SWEET_HFI_V1_BYTES);assert(memory);
+    struct sim sim={.memory=memory};
+    struct sweet_hfi_transport tx={memory,SWEET_HFI_V1_BYTES,&sim,fence,bell,0};
+    for(unsigned start=0;start<1024;start++) {
+        assert(!sweet_gpu_hfi_table_init(memory,SWEET_HFI_V1_BYTES,0x60100000));
+        memory[16]=start;memory[17]=start;
+        sim.start=start;sim.barriers=sim.bells=0;
+        assert(!sweet_hfi_send(&tx,output+1,160) && sim.bells==1);
+    }
+    memory[16]=160;memory[17]=0;sim.bells=sim.barriers=0;
+    uint32_t *backup=malloc(SWEET_HFI_V1_BYTES);assert(backup);
+    memcpy(backup,memory,SWEET_HFI_V1_BYTES);
+    assert(sweet_hfi_send(&tx,output+1,160)==1 && !sim.bells);
+    assert(!memcmp(backup,memory,SWEET_HFI_V1_BYTES));
+    free(backup);free(memory);
     struct {struct sweet_hfi_bw_table table;uint32_t tail[161];} overlap={0};
     overlap.table=t;
     assert(sweet_hfi_bw_encode((uint32_t *)&overlap,160,0,&overlap.table)==-1);
     assert(!memcmp(&overlap.table,&t,sizeof(t)));
-    puts("PASS full 160-word stock ABI, actual rows, 4096 sequences, bounds, no partial output, unused zeroes and overlap rejection");
+    puts("PASS full 160-word stock ABI, actual rows, 4096 sequences, bounds, no partial output, unused zeroes, overlap, 1024 TX ring positions and full-queue refusal");
 }
 '''
 (build/'test.c').write_text(test)
 subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g',
-    '-I',str(gpu),str(build/'test.c'),str(gpu/'sweet_hfi_codec.c'),str(gpu/'sweet_hfi_bw.c'),'-o',str(build/'test')],check=True)
+    '-I',str(gpu),str(build/'test.c'),str(gpu/'sweet_hfi_codec.c'),str(gpu/'sweet_hfi_bw.c'),
+    str(gpu/'sweet_hfi_transport.c'),str(gpu/'sweet_gpu_hfi_table.c'),'-o',str(build/'test')],check=True)
 subprocess.run([str(build/'test')],check=True)
 subprocess.run(['clang-18','--target=aarch64-none-elf','-ffreestanding','-std=c11','-Wall','-Wextra','-Werror',
     '-c',str(gpu/'sweet_hfi_bw.c'),'-o',str(build/'bw.arm64.o')],check=True)

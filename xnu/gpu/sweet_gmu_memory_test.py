@@ -24,6 +24,7 @@ inline void IOFree(void *p,size_t) {if(p){--contexts;free(p);}}
 int fail_context,contexts;
 struct sweet_gpu_memory {unsigned char *cpu;size_t n;unsigned slot;};
 static sweet_gpu_memory *active[7];
+static sweet_gmu_memory *latched; // Intentional resident lifetime, LSan-reachable.
 static const unsigned sizes[7]={60,60,1,5,4,1,6};
 static const uint32_t vas[6]={0x4000,0x44000,0x60000000,0x60100000,0x60200000,0x60300000};
 static int fail_alloc=-1, fail_page=-1, fail_clean=-1, corruption;
@@ -107,6 +108,38 @@ int main(){
  root=hfi=dump=log=1;assert(sweet_gmu_memory_info(nullptr,&root,&hfi,&dump,&log));assert(!root&&!hfi&&!dump&&!log);
  assert(sweet_gmu_memory_retain_mapping(nullptr,&root));assert(!root);assert(sweet_gmu_memory_release_mapping(nullptr));
  sweet_gmu_memory_destroy(nullptr);empty();
+ volatile uint32_t *view=reinterpret_cast<volatile uint32_t *>(1);uint32_t bytes=1;
+ assert(sweet_gmu_memory_begin_execution(nullptr,&view,&bytes)==-1&&!view&&!bytes);
+ s=sweet_gmu_memory_create_legacy();assert(s);
+ assert(sweet_gmu_memory_begin_execution(s,&view,&bytes)==-1&&!view&&!bytes);
+ sweet_gmu_memory_destroy(s);empty();
+ s=sweet_gmu_memory_create_legacy();assert(s);
+ assert(!sweet_gmu_memory_retain_mapping(s,&root));
+ sweet_gmu_memory_destroy(s);
+ assert(sweet_gmu_memory_begin_execution(s,&view,&bytes)==-1&&!view&&!bytes);
+ assert(!sweet_gmu_memory_release_mapping(s));empty();
+ latched=sweet_gmu_memory_create_legacy();assert(latched);
+ assert(!sweet_gmu_memory_retain_mapping(latched,&root));
+ assert(!sweet_gmu_memory_retain_mapping(latched,&root));
+ assert(sweet_gmu_memory_begin_execution(latched,nullptr,&bytes)==-1&&!bytes);
+ assert(sweet_gmu_memory_begin_execution(latched,&view,nullptr)==-1&&!view);
+ assert(!sweet_gmu_memory_begin_execution(latched,&view,&bytes));
+ assert(view==reinterpret_cast<volatile uint32_t *>(active[3]->cpu)&&bytes==0x5000);
+ assert(view[1]==54&&view[4]==4);
+ volatile uint32_t *saved_view=view;
+ assert(sweet_gmu_memory_begin_execution(latched,&view,&bytes)==-2&&!view&&!bytes);
+ root=1;assert(sweet_gmu_memory_retain_mapping(latched,&root)==-1&&!root);
+ assert(sweet_gmu_memory_release_mapping(latched)==-1);
+ sweet_gmu_memory_destroy(latched);sweet_gmu_memory_destroy(latched);
+ for(unsigned i=0;i<10;++i)assert(sweet_gmu_memory_release_mapping(latched)==-1);
+ assert(live==7&&contexts==1);
+ root=hfi=dump=log=1;
+ assert(sweet_gmu_memory_info(latched,&root,&hfi,&dump,&log)==-1&&!root&&!hfi&&!dump&&!log);
+ assert(sweet_gmu_memory_begin_execution(latched,&view,&bytes)==-1&&!view&&!bytes);
+ for(unsigned i=0;i<0x5000/4;++i){saved_view[i]=i;assert(saved_view[i]==i);}
+ for(unsigned i=0x5000;i<0x8000;++i)assert(active[3]->cpu[i]==0);
+ assert(live==7&&contexts==1); // Deliberate permanent pin, no production reset hook.
+
 }
 ''')
 flags=['-g','-fsanitize=address,undefined','-I',str(src),'-I',str(work)]
@@ -117,4 +150,4 @@ for name in ['sweet_gpu_pte','sweet_gpu_tables','sweet_gpu_hfi_table','sweet_gmu
 binary=work/'test'
 subprocess.run(['g++','-std=c++17',*flags,str(src/'sweet_gmu_memory.cpp'),str(work/'test.cpp'),*objects,'-o',str(binary)],check=True)
 subprocess.run([str(binary)],check=True)
-print('PASS: legacy GMU allocator, 7 allocation/137 page/137 clean failures, isolation, full address map and deferred lifetime')
+print('PASS: legacy GMU allocator, 7 allocation/137 page/137 clean failures, isolation, full address map, deferred lifetime and permanent execution latch')

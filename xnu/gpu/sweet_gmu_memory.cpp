@@ -20,7 +20,8 @@ struct sweet_gmu_memory {
     sweet_gpu_table_page data_page[DATA_PAGES], table_page[TABLE_PAGES];
     uint64_t scratch[SWEET_GPU_TABLE_MAX_PAGES];
     unsigned used, refs;
-    bool ready, destroy_requested;
+    bool ready, destroy_requested, execution_latched;
+    volatile uint32_t *hfi_cpu;
 };
 static int alloc_table(void *opaque, sweet_gpu_table_page *out)
 {
@@ -58,7 +59,7 @@ static int barrier(void *) {return 0;} /* memory_clean completes dsb sy */
 void sweet_gmu_memory_destroy(sweet_gmu_memory *s)
 {
     if(!s) return;
-    if(s->refs) {s->destroy_requested=true;return;}
+    if(s->execution_latched || s->refs) {s->destroy_requested=true;return;}
     sweet_gpu_memory_destroy(s->tables);
     for(unsigned i=0;i<SWEET_GMU_REGION_COUNT;i++) sweet_gpu_memory_destroy(s->data[i]);
     IOFree(s,sizeof(*s));
@@ -66,13 +67,27 @@ void sweet_gmu_memory_destroy(sweet_gmu_memory *s)
 int sweet_gmu_memory_retain_mapping(sweet_gmu_memory *s,uint64_t *root)
 {
     if(root) *root=0;
-    if(!s || !root || !s->ready || s->destroy_requested || s->refs==UINT32_MAX) return -1;
+    if(!s || !root || !s->ready || s->destroy_requested || s->execution_latched || s->refs==UINT32_MAX) return -1;
     s->refs++;*root=s->table_page[0].pa;return 0;
 }
 int sweet_gmu_memory_release_mapping(sweet_gmu_memory *s)
 {
-    if(!s || !s->refs) return -1;
+    if(!s || s->execution_latched || !s->refs) return -1;
     if(--s->refs==0 && s->destroy_requested) sweet_gmu_memory_destroy(s);
+    return 0;
+}
+int sweet_gmu_memory_begin_execution(sweet_gmu_memory *s,
+    volatile uint32_t **cpu, uint32_t *bytes)
+{
+    if(cpu) *cpu=nullptr;
+    if(bytes) *bytes=0;
+    if(!s || !cpu || !bytes || !s->ready || s->destroy_requested ||
+        !s->refs || !s->hfi_cpu || s->layout.region[SWEET_GMU_HFI].bytes!=0x5000u) return -1;
+    if(s->execution_latched) return -2;
+    /* Independent retention reason: no error or callback after this store.
+     * The first test deliberately pins everything even if start is aborted. */
+    s->execution_latched=true;
+    *cpu=s->hfi_cpu;*bytes=s->layout.region[SWEET_GMU_HFI].bytes;
     return 0;
 }
 static bool isolated(sweet_gmu_memory *s)
@@ -141,6 +156,8 @@ sweet_gmu_memory *sweet_gmu_memory_create_legacy(void)
         if(i==SWEET_GMU_HFI && sweet_gpu_hfi_table_init(s->data_page[at].cpu,r.bytes,r.iova)) {
             sweet_gmu_memory_destroy(s);return nullptr;
         }
+        if(i==SWEET_GMU_HFI)
+            s->hfi_cpu=reinterpret_cast<volatile uint32_t *>(s->data_page[at].cpu);
         for(unsigned j=0;j<r.bytes/GRANULE;j++,at++) {
             if(sweet_gpu_table_map_access(s->table_page[0],&ops,
                 r.iova+j*GRANULE,s->data_page[at].pa,0,r.privileged) ||

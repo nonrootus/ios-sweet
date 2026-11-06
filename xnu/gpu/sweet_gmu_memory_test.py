@@ -24,8 +24,8 @@ inline void IOFree(void *p,size_t) {if(p){--contexts;free(p);}}
 int fail_context,contexts;
 struct sweet_gpu_memory {unsigned char *cpu;size_t n;unsigned slot;};
 static sweet_gpu_memory *active[7];
-static const unsigned sizes[7]={60,60,1,5,4,1,5};
-static const uint32_t vas[6]={0x4000,0x44000,0x60000000,0x60001000,0x60006000,0x6000a000};
+static const unsigned sizes[7]={60,60,1,5,4,1,6};
+static const uint32_t vas[6]={0x4000,0x44000,0x60000000,0x60100000,0x60200000,0x60300000};
 static int fail_alloc=-1, fail_page=-1, fail_clean=-1, corruption;
 static unsigned alloc_calls,page_calls,clean_calls,live;
 static std::vector<unsigned> cleaned;
@@ -59,7 +59,7 @@ extern "C" int sweet_gpu_memory_clean(sweet_gpu_memory *m,size_t i) {
  cleaned.push_back(m->slot*100+unsigned(i));return int(index)==fail_clean?-1:0;
 }
 static void empty(){assert(!contexts&&!live);for(auto p:active)assert(!p);alloc_calls=page_calls=clean_calls=0;cleaned.clear();}
-static uint64_t *table(uint64_t pa) {for(unsigned i=0;i<5;i++)if(pa==physical(6,i))return reinterpret_cast<uint64_t*>(active[6]->cpu+i*4096);assert(0);return nullptr;}
+static uint64_t *table(uint64_t pa) {for(unsigned i=0;i<6;i++)if(pa==physical(6,i))return reinterpret_cast<uint64_t*>(active[6]->cpu+i*4096);assert(0);return nullptr;}
 static uint64_t leaf(uint32_t va) {
  uint64_t d=table(physical(6,0))[va>>30];if(!d)return 0;
  d=table(d&~4095ull)[(va>>21)&511];if(!d)return 0;
@@ -68,15 +68,15 @@ static uint64_t leaf(uint32_t va) {
 int main(){
  fail_context=1;assert(!sweet_gmu_memory_create_legacy());fail_context=0;empty();
  for(fail_alloc=0;fail_alloc<7;fail_alloc++){assert(!sweet_gmu_memory_create_legacy());empty();}fail_alloc=-1;
- for(fail_page=0;fail_page<136;fail_page++){assert(!sweet_gmu_memory_create_legacy());empty();}fail_page=-1;
- for(fail_clean=0;fail_clean<136;fail_clean++){assert(!sweet_gmu_memory_create_legacy());empty();}fail_clean=-1;
+ for(fail_page=0;fail_page<137;fail_page++){assert(!sweet_gmu_memory_create_legacy());empty();}fail_page=-1;
+ for(fail_clean=0;fail_clean<137;fail_clean++){assert(!sweet_gmu_memory_create_legacy());empty();}fail_clean=-1;
  for(corruption=1;corruption<=7;corruption++){assert(!sweet_gmu_memory_create_legacy());empty();}corruption=0;
  auto *s=sweet_gmu_memory_create_legacy();assert(s && live==7 && contexts==1);
  uint64_t root=0;uint32_t hfi=0,dump=0,log=0;
  assert(!sweet_gmu_memory_info(s,&root,&hfi,&dump,&log));
- assert(root==physical(6,0)&&hfi==0x60001000&&dump==0x60006000&&log==0x6000a000);
- assert(clean_calls==136 && cleaned.size()==136);
- assert(cleaned[131]==602 && cleaned[132]==601 && cleaned[133]==604 && cleaned[134]==603 && cleaned[135]==600);
+ assert(root==physical(6,0)&&hfi==0x60100000&&dump==0x60200000&&log==0x60300000);
+ assert(clean_calls==137 && cleaned.size()==137);
+ assert(cleaned[131]==602 && cleaned[132]==601 && cleaned[133]==604 && cleaned[134]==605 && cleaned[135]==603 && cleaned[136]==600);
  for(unsigned slot=0;slot<6;slot++) for(unsigned i=0;i<sizes[slot];i++) {
   uint64_t expected=physical(slot,i)|((slot==3||slot==4)?0xe43ull:0xe03ull);
   assert(leaf(vas[slot]+i*4096)==expected);
@@ -93,7 +93,7 @@ int main(){
  assert(words[0]==0&&words[1]==54&&words[4]==4&&words[5]==4);
  for(unsigned i=0;i<4;i++) {
   assert(words[7+12*i]==hfi+224+i*4096);
-  for(unsigned j=4;j<12;j++)assert(words[6+12*i+j]==0);
+  for(unsigned j=4;j<12;j++)assert(words[6+12*i+j]==(j>=6 && j<=8 ? 1u : 0u));
  }
  for(unsigned i=216;i<20480;i++)assert(active[3]->cpu[i]==0);
  assert(sweet_gmu_memory_release_mapping(s));
@@ -117,4 +117,4 @@ for name in ['sweet_gpu_pte','sweet_gpu_tables','sweet_gpu_hfi_table','sweet_gmu
 binary=work/'test'
 subprocess.run(['g++','-std=c++17',*flags,str(src/'sweet_gmu_memory.cpp'),str(work/'test.cpp'),*objects,'-o',str(binary)],check=True)
 subprocess.run([str(binary)],check=True)
-print('PASS: legacy GMU allocator, 7 allocation/136 page/136 clean failures, isolation, full address map and deferred lifetime')
+print('PASS: legacy GMU allocator, 7 allocation/137 page/137 clean failures, isolation, full address map and deferred lifetime')

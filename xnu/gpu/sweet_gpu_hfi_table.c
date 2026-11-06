@@ -15,8 +15,9 @@ int sweet_gpu_hfi_table_init(void *buffer, size_t capacity, uint32_t base) {
         uint8_t *h=b+24+i*48;
         put32(h, i!=3);put32(h+4,base+224+i*4096);
         put32(h+8,id[i] | (uint32_t)priority[i]<<8);put32(h+12,1024);
-        /* Pinned b6410c3f KGSL hfi_init leaves msg_size, unused0..4 and
-         * indices zero. Do not mix in the upstream two-queue watermarks. */
+        /* Xiaomi sweet_k6a-r-oss 10c33d40 hfi_init: these are real
+         * RX/TX watermarks and RX request, not newer KGSL's unused fields. */
+        put32(h+24,1);put32(h+28,1);put32(h+32,1);
     }
     return 0;
 }

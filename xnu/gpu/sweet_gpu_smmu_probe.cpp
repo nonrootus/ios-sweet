@@ -145,7 +145,7 @@ extern "C" void sweet_gpu_smmu_probe(uintptr_t gcc, uintptr_t cc, uintptr_t gmu)
      * No firmware execution; SID4 remains unmatched/faulting. */
     s->memory = sweet_gmu_memory_create_legacy();
     if (!s->memory) { IOLog("SWEET GPU SMMU: legacy GMU allocation failed\n"); return; }
-    IOLog("SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 5 tables\n");
+    IOLog("SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 6 tables\n");
     sweet_smmu_context_ops ops = {s, read32, write32, write64,
         complete, pause_us, stopped, pin, unpin};
     IOLog("SWEET GPU SMMU: preparing k6a controller; no ATS\n");

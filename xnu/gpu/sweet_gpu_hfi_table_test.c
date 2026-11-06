@@ -15,7 +15,7 @@ int main(void) {
  assert(rd(b+24+48+8)==0x0a04 && rd(b+24+96+8)==0x2805);
  assert(rd(b+24+144)==0 && rd(b+24+144+8)==0x1401);
  for(unsigned i=0;i<4;i++) { const unsigned char *h=b+24+i*48;
-  for(unsigned j=16;j<48;j+=4) assert(rd(h+j)==0);
+  for(unsigned j=16;j<48;j+=4) assert(rd(h+j)==(j>=24 && j<=32 ? 1u : 0u));
  }
  assert(b[SWEET_HFI_V1_BYTES-1]==0 && b[SWEET_HFI_V1_BYTES]==0xaa);free(b);return 0;
 }

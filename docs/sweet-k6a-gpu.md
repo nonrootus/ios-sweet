@@ -13,38 +13,40 @@ all zero, GFSR0, CB_FSR0x400 (FORMAT2, no faults), RETIRED with retained=0.
 The user confirmed iOS loaded. This is not evidence of translated DMA or GMU
 execution. The latest test log is recorded in local NOTES.md.
 
-0139 prepares a complete legacy GMU memory image instead of the diagnostic
+0139/0140 prepare a complete legacy GMU memory image instead of the diagnostic
 HFI-only image. The inactive test selects gmu_kernel SID5 from the captured DT;
 SID4 remains unmatched/faulting. Before actual GMU execution, reconcile that
 with downstream's attached empty user domain and implement a running-producer
 lifetime protocol. CM3 remains reset and GX remains off in this test.
 
-The profile follows pinned Qualcomm
-[kgsl_gmu.c](https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/gpu/msm/kgsl_gmu.c)
-with no firmware preallocations and no ECP. The pinned adreno-gpulist.h A618
-feature list has no ADRENO_ECP; the captured 32768-byte flat firmware has second
-dword9, so the metadata allocation loop stops immediately. These are profile
-checks, not firmware execution or authentication. Unknown/preallocated/ECP
-profiles are rejected by the offline layout helper.
+0140 follows Xiaomi's exact sweet_k6a-r-oss commit10c33d40a11ecdc75cc1dadb5bd07894bab05815
+[kgsl_gmu.c](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/10c33d40a11ecdc75cc1dadb5bd07894bab05815/drivers/gpu/msm/kgsl_gmu.c).
+Its allocator places each uncached allocation in a separate 1MiB slot.
+This supersedes 0139's packed layout from newer Qualcomm b6410c3f; that
+0139-only build was cancelled and never booted. The captured flat firmware
+is32768bytes; its contents are not distributed here. The offline layout helper
+rejects other preallocation/ECP profiles rather than silently applying this map.
 
 | Region | IOVA | Bytes | Access |
 | --- | --- | --- | --- |
 | ICACHE | 0x4000 | 0x3c000 | privileged RW |
 | DCACHE | 0x44000 | 0x3c000 | privileged RW |
 | Dummy | 0x60000000 | 0x1000 | privileged RW |
-| HFI | 0x60001000 | 0x5000 | unprivileged RW |
-| Dump | 0x60006000 | 0x4000 | unprivileged RW |
-| Log | 0x6000a000 | 0x1000 | privileged RW |
+| HFI | 0x60100000 | 0x5000 | unprivileged RW |
+| Dump | 0x60200000 | 0x4000 | unprivileged RW |
+| Log | 0x60300000 | 0x1000 | privileged RW |
 
 All 131 logical data pages use separate canonical Normal-NC allocations per
-region; five cached table pages form the two L2/L3 branches. Native 16KiB
+region; six cached table pages cover the low and two high L3 ranges. Native 16KiB
 rounding must not change the 4KiB IOVA layout. Allocation padding, TCM and all
 other addresses remain unmapped. Cross-allocation aliases, including shared
 native-page boundaries, are rejected before building tables. Deferred mapping
 references prevent destruction while hardware may still own the memory.
 
-0139 corrects the HFI unused words introduced by 0125: pinned kgsl_hfi.h calls
-them unused1/2/3 and hfi_init leaves them zero. Four queue IDs/priorities and
+0140 restores RX/TX watermarks and RX request to one, matching Xiaomi's
+[hfi_init](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/10c33d40a11ecdc75cc1dadb5bd07894bab05815/drivers/gpu/msm/kgsl_hfi.c).
+0139 incorrectly treated these as unused words based on a different KGSL
+revision; 0125's values were right for this target. Four queue IDs/priorities and
 54-dword table size remain unchanged; the helper requires a 4KiB-aligned base.
 The allocator zeroes the entire five-page HFI allocation, not just occupied
 bytes. Stage-1 AP now supports privileged RW/RO while the old API continues
@@ -53,7 +55,7 @@ follow the pinned reference. No live queue access API is supplied yet.
 
 Host ASan/UBSan tests cover the complete 32-bit address space, scattered
 physical pages above4GiB, all AP combinations, HFI bytes, seven allocation,
-136 page-query and136 clean failures, alias rejection and deferred destruction.
+137 page-query and137 clean failures, alias rejection and deferred destruction.
 ARM64 freestanding C and target-header C++ compiles passed; the composed
 power/reset/SMMU model passed with SID5. Full CI/device result is pending.
 

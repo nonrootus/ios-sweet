@@ -7,11 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct pool { struct sweet_gpu_table_page p[5]; unsigned count, cleans, barriers; };
+struct pool { struct sweet_gpu_table_page p[6]; unsigned count, cleans, barriers; };
 static int alloc(void *opaque, struct sweet_gpu_table_page *out)
 {
     struct pool *s=opaque;
-    if(s->count==5) return -1;
+    if(s->count==6) return -1;
     out->cpu=aligned_alloc(4096,4096); assert(out->cpu);
     memset(out->cpu,0,4096);
     out->pa=0x104000000ull+s->count*0x10000;
@@ -57,14 +57,14 @@ int main(void)
     assert(sweet_gmu_legacy_layout(&plan,0,1)); assert(!memcmp(&plan,&sentinel,sizeof(plan)));
     assert(sweet_gmu_legacy_layout(&plan,~0u,~0u)); assert(!memcmp(&plan,&sentinel,sizeof(plan)));
     assert(!sweet_gmu_legacy_layout(&plan,0,0));
-    assert(plan.stream_id==5 && plan.data_pages==131 && plan.table_pages==5);
+    assert(plan.stream_id==5 && plan.data_pages==131 && plan.table_pages==6);
     /* Source-derived boundary fixtures; explicitly independent of native 16K pages. */
     assert(plan.region[SWEET_GMU_ICACHE].iova==0x4000 && plan.region[SWEET_GMU_ICACHE].bytes==0x3c000);
     assert(plan.region[SWEET_GMU_DCACHE].iova==0x44000 && plan.region[SWEET_GMU_DCACHE].bytes==0x3c000);
     assert(plan.region[SWEET_GMU_DUMMY].iova==0x60000000 && plan.region[SWEET_GMU_DUMMY].bytes==4096);
-    assert(plan.region[SWEET_GMU_HFI].iova==0x60001000 && plan.region[SWEET_GMU_HFI].bytes==20480);
-    assert(plan.region[SWEET_GMU_DUMP].iova==0x60006000 && plan.region[SWEET_GMU_DUMP].bytes==16384);
-    assert(plan.region[SWEET_GMU_LOG].iova==0x6000a000 && plan.region[SWEET_GMU_LOG].bytes==4096);
+    assert(plan.region[SWEET_GMU_HFI].iova==0x60100000 && plan.region[SWEET_GMU_HFI].bytes==20480);
+    assert(plan.region[SWEET_GMU_DUMP].iova==0x60200000 && plan.region[SWEET_GMU_DUMP].bytes==16384);
+    assert(plan.region[SWEET_GMU_LOG].iova==0x60300000 && plan.region[SWEET_GMU_LOG].bytes==4096);
     struct pool pool={0}; struct sweet_gpu_table_page root;
     struct sweet_gpu_table_ops ops={&pool,alloc,release,resolve};
     assert(!alloc(&pool,&root)); unsigned pages=0;
@@ -95,7 +95,7 @@ int main(void)
     uint64_t *scratch=calloc(SWEET_GPU_TABLE_MAX_PAGES,sizeof(uint64_t)); assert(scratch);
     struct sweet_gpu_table_publish_ops pub={&pool,clean,barrier};
     assert(!sweet_gpu_table_publish_inactive(root,&ops,&pub,scratch,SWEET_GPU_TABLE_MAX_PAGES));
-    assert(pool.cleans==5 && pool.barriers==5);
+    assert(pool.cleans==6 && pool.barriers==6);
     unsigned char *hfi=calloc(1,plan.region[SWEET_GMU_HFI].bytes); assert(hfi);
     assert(!sweet_gpu_hfi_table_init(hfi,plan.region[SWEET_GMU_HFI].bytes,plan.region[SWEET_GMU_HFI].iova));
     /* Independent complete byte fixture including padding, unused fields and tail. */
@@ -104,12 +104,13 @@ int main(void)
     for(unsigned i=0;i<6;i++) for(unsigned b=0;b<4;b++) gold[4*i+b]=(unsigned char)(hdr[i]>>(8*b));
     const uint32_t types[4]={0xa00,0xa04,0x2805,0x1401};
     for(unsigned i=0;i<4;i++) {
-        uint32_t words[4]={i<3,0x600010e0+i*4096,types[i],1024};
+        uint32_t words[4]={i<3,0x601000e0+i*4096,types[i],1024};
         for(unsigned j=0;j<4;j++) for(unsigned b=0;b<4;b++) gold[24+48*i+4*j+b]=(unsigned char)(words[j]>>(8*b));
     }
+    for(unsigned i=0;i<4;i++) for(unsigned offset=24;offset<=32;offset+=4) gold[24+48*i+offset]=1;
     assert(!memcmp(gold,hfi,20480));
     free(gold);free(hfi);free(scratch);
     for(unsigned i=0;i<pool.count;i++) free(pool.p[i].cpu);
-    puts("PASS: A618 legacy layout, 131 scattered high-PA leaves, permissions, all 32-bit holes, 5-table publication and full HFI bytes");
+    puts("PASS: A618 legacy layout, 131 scattered high-PA leaves, permissions, all 32-bit holes, 6-table publication and full HFI bytes");
     return 0;
 }

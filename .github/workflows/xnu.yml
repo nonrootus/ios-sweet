@@ -99,7 +99,9 @@ jobs:
           # 0136 adapter is superseded by 0138; final source cmp below is exact.
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0137-sweet-smmu-fault-type-check.patch"
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0138-sweet-smmu-inactive-unmatched-teardown.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
+          # 0140 corrects the profile against Xiaomi's exact sweet_k6a tree.
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_hfi_table.c --exclude=bsd/dev/sweet_gpu_hfi_table.h --exclude=bsd/dev/sweet_gmu_layout.c --exclude=iokit/Kernel/arm/sweet_gmu_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0140-sweet-k6a-stock-gmu-profile.patch"
           for name in sweet_gpu_memory.cpp sweet_gpu_memory.h sweet_gpu_hfi_memory.cpp sweet_gpu_hfi_memory.h sweet_gpu_memory_probe.cpp sweet_gpu_smmu_probe.cpp sweet_gmu_memory.cpp sweet_gmu_memory.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/iokit/Kernel/arm/$name"
           done
@@ -112,7 +114,7 @@ jobs:
           grep -Fx 'iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp                        optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           find dxb/build/xnu.obj -name sweet_smmu_context.o -print | grep -F 'sweet_smmu_context.o' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU SMMU: begin register-only test' > /dev/null
-          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 5 tables' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 6 tables' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'memory retained until reboot; no retry' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU MEM: inactive HFI Normal-NC=' > /dev/null
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null

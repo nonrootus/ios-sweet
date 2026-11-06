@@ -13,7 +13,7 @@ extern "C" {
 #endif
 }
 
-enum { DATA_PAGES=131, TABLE_PAGES=5, GRANULE=4096 };
+enum { DATA_PAGES=131, TABLE_PAGES=6, GRANULE=4096 };
 struct sweet_gmu_memory {
     sweet_gmu_layout layout;
     sweet_gpu_memory *data[SWEET_GMU_REGION_COUNT], *tables;
@@ -149,7 +149,7 @@ sweet_gmu_memory *sweet_gmu_memory_create_legacy(void)
             }
         }
     }
-    if(s->used!=31 || sweet_gpu_table_publish_inactive(s->table_page[0],&ops,&pub,
+    if(s->used!=63 || sweet_gpu_table_publish_inactive(s->table_page[0],&ops,&pub,
         s->scratch,SWEET_GPU_TABLE_MAX_PAGES)) {sweet_gmu_memory_destroy(s);return nullptr;}
     s->ready=true;return s;
 }

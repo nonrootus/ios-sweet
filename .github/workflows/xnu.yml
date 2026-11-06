@@ -102,10 +102,13 @@ jobs:
           # 0140 corrects the profile against Xiaomi's exact sweet_k6a tree.
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_hfi_table.c --exclude=bsd/dev/sweet_gpu_hfi_table.h --exclude=bsd/dev/sweet_gmu_layout.c --exclude=iokit/Kernel/arm/sweet_gmu_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0140-sweet-k6a-stock-gmu-profile.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0141-sweet-hfi-stock-version-rx-request.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0142-sweet-command-db-snapshot.patch"
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CMDDB: end bytes=' > /dev/null
           for name in sweet_gpu_memory.cpp sweet_gpu_memory.h sweet_gpu_hfi_memory.cpp sweet_gpu_hfi_memory.h sweet_gpu_memory_probe.cpp sweet_gpu_smmu_probe.cpp sweet_gmu_memory.cpp sweet_gmu_memory.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/iokit/Kernel/arm/$name"
           done
-          for name in sweet_smmu_context.c sweet_smmu_context.h sweet_smmu_k6a.c sweet_smmu_k6a.h sweet_gpu_pte.c sweet_gpu_pte.h sweet_gpu_tables.c sweet_gpu_tables.h sweet_gpu_hfi_table.c sweet_gpu_hfi_table.h sweet_gmu_layout.c sweet_gmu_layout.h; do
+          for name in sweet_smmu_context.c sweet_smmu_context.h sweet_smmu_k6a.c sweet_smmu_k6a.h sweet_gpu_pte.c sweet_gpu_pte.h sweet_gpu_tables.c sweet_gpu_tables.h sweet_gpu_hfi_table.c sweet_gpu_hfi_table.h sweet_gmu_layout.c sweet_gmu_layout.h sweet_hfi_codec.c sweet_hfi_codec.h sweet_hfi_transport.c sweet_hfi_transport.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
           done
           grep -Fx $'bsd/dev/sweet_smmu_context.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null

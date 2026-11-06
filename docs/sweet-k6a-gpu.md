@@ -13,6 +13,13 @@ and two-word TEST terminator for HFI_USE_REG. Input frequencies are kHz and
 votes come from the separately validated ARC calculation. Tests compare the
 wire layout against the stock structures. These helpers have no hardware
 caller and are not included in the 0145 kernel yet.
+Independent review found that the first draft used opcode2 (LM_CFG) for PERF.
+The corrected encoder uses PERF opcode4; TEST remains opcode5. The test now
+extracts the IDs, message type enum and header macros from the pinned source,
+and was observed failing on the old encoder before passing on the correction.
+Captured ARC tables start at level0; all five captured GPU frequency bins end
+at0Hz and the GMU table begins with0Hz. This supports the codec's off-entry
+contract for this device, without choosing a speed bin or active OPPs.
 
 0144 inventory completed on the device: all eight normal banks were stable,
 idle and disabled. Historical payloads are not current vote values.
@@ -24,8 +31,10 @@ matching the stock pre-FW_START host path. CNOC remains in the future HFI table.
 The test requires `jtag=1 wfi=0`, disabled kernel idle, matching command-database
 bindings, empty TCS banks and a reset/inactive GMU. It retains the vote until
 reboot, quarantines uncertain transactions, and never releases CM3. A request
-ACK would not prove bandwidth, firmware execution or rendering. Device test
-pending; this is not a complete shared-client interconnect implementation.
+ACK would not prove bandwidth, firmware execution or rendering. Full XNU CI
+and mandatory source/kernel checks passed; the temporary image was sent with
+fastboot Booting OKAY. The device log is pending; this is not a complete
+shared-client interconnect implementation.
 
 0144 prepares a complete legacy HFI bandwidth-message encoder and an opt-in
 `sweettcssnapshot=1` inventory using the existing RPMh mapping and lock.
@@ -89,7 +98,15 @@ Cold-start ordering is pinned to Xiaomi10c33d40 `kgsl_gmu.c`,
    Poll the exact fresh BABEFACE result; timeout is not a safe teardown point.
    The inactive0140 teardown API must never be used after this step.
 6. For the observed HFI_USE_REG quirk, complete GX/MX OOB rail-on before
-   HFI_CTRL_INIT/status and subsequent INIT/version/DCVS/BW messages.
+   HFI_CTRL_INIT/status and subsequent INIT/version/DCVS/BW/TEST messages.
+
+The stock A618 feature list selects IFPC. A first-start implementation that
+instead selects GPU_HW_ACTIVE must also follow its different power path:
+`a6xx_gmu_fw_start` explicitly enables SPTPRAC after GX/MX OOB rail-on and
+before HFI init when idle_level is below GPU_HW_SPTP_PC. A618 belongs to the
+A615 family and satisfies `adreno_has_sptprac_gdsc`; this call is not a no-op
+for this chip. Do not merely omit IFPC bits and assume the two paths are equal.
+The policy and this runtime integration are still pending; 0145 keeps CM3 reset.
 
 This sequence is a source-derived integration plan, not an implemented or
 hardware-verified startup path. No rendering backend or IOAccelerator service

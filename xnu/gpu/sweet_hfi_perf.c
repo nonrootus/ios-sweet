@@ -14,7 +14,7 @@ int sweet_hfi_perf_encode(uint32_t *out, size_t cap, uint16_t seq,
 {
     uint32_t header;
     if (!out || !t || cap < SWEET_HFI_PERF_WORDS ||
-        sweet_hfi_command_header(2,seq,SWEET_HFI_PERF_WORDS,&header)) return -1;
+        sweet_hfi_command_header(SWEET_HFI_PERF_COMMAND,seq,SWEET_HFI_PERF_WORDS,&header)) return -1;
     const uintptr_t dst=(uintptr_t)out, src=(uintptr_t)t;
     const size_t bytes=SWEET_HFI_PERF_WORDS*sizeof(*out);
     if (dst>UINTPTR_MAX-bytes || src>UINTPTR_MAX-sizeof(*t) ||
@@ -34,6 +34,6 @@ int sweet_hfi_perf_encode(uint32_t *out, size_t cap, uint16_t seq,
 int sweet_hfi_v1_test(uint32_t *out, size_t cap, uint16_t seq)
 {
     uint32_t header;
-    if (!out || cap<2 || sweet_hfi_command_header(5,seq,2,&header)) return -1;
+    if (!out || cap<2 || sweet_hfi_command_header(SWEET_HFI_TEST_COMMAND,seq,2,&header)) return -1;
     out[0]=header;out[1]=0;return 0;
 }

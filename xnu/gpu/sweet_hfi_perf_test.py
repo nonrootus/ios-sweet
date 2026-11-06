@@ -10,6 +10,11 @@ stock, build=map(Path,sys.argv[1:])
 gpu=Path(__file__).resolve().parent
 build.mkdir(parents=True,exist_ok=True)
 text=(stock/'kgsl_hfi.h').read_text()
+stock_c=(stock/'kgsl_hfi.c').read_text()
+ids='\n'.join(re.search(r'^#define[ \t]+'+name+r'[ \t]+\d+[ \t]*$',text,re.M).group()
+ for name in ('H2F_MSG_PERF_TBL','H2F_MSG_TEST'))
+types=re.search(r'enum hfi_msg_type \{.*?\n\};',text,re.S).group()
+macros=stock_c[stock_c.index('#define CREATE_MSG_HDR('):stock_c.index('#define ACK_MSG_HDR(')]
 limits='\n'.join(re.findall(r'^#define\s+(?:MAX_GX_LEVELS|MAX_CX_LEVELS)\s+\d+\s*$',(stock/'kgsl_gmu_core.h').read_text(),re.M))
 structs='\n'.join(re.search(r'struct '+n+r' \{.*?\n\};',text,re.S).group() for n in ('opp_desc','hfi_dcvstable_v1_cmd','hfi_test_cmd'))
 code=r'''
@@ -17,7 +22,7 @@ code=r'''
 #include <stdio.h>
 #include <string.h>
 #include "sweet_hfi_perf.h"
-''' + limits+'\n'+structs+r'''
+''' + limits+'\n'+ids+'\n'+types+'\n'+macros+'\n'+structs+r'''
 static uint32_t output[45],saved[45];
 static void fails(struct sweet_hfi_perf_table *t,size_t cap,unsigned seq){
  memset(output,0xa5,sizeof(output));memcpy(saved,output,sizeof(output));
@@ -38,7 +43,7 @@ int main(void){
   for(unsigned i=0;i<gx;i++){expected.gx_votes[i].vote=t.gpu[i].vote;expected.gx_votes[i].freq=t.gpu[i].frequency_khz;}
   for(unsigned i=0;i<cx;i++){expected.cx_votes[i].vote=t.gmu[i].vote;expected.cx_votes[i].freq=t.gmu[i].frequency_khz;}
   for(unsigned seq=0;seq<=4095;seq+=1365){
-   expected.hdr=(seq<<20)|(sizeof(expected)/4<<8)|2;
+   expected.hdr=(seq<<20)|CMD_MSG_HDR(H2F_MSG_PERF_TBL,sizeof(expected));
    memset(output,0xa5,sizeof(output));
    assert(!sweet_hfi_perf_encode(output+1,43,(uint16_t)seq,&t));
    assert(!memcmp(output+1,&expected,sizeof(expected)));
@@ -63,7 +68,7 @@ int main(void){
  assert(sweet_hfi_perf_encode((uint32_t *)&overlap,43,0,&overlap.table)==-1);
  assert(!memcmp(&overlap.table,&t,sizeof(t)));
  for(unsigned seq=0;seq<4096;seq++){
-  struct hfi_test_cmd expected={(seq<<20)|(2u<<8)|5,0};
+  struct hfi_test_cmd expected={(seq<<20)|CMD_MSG_HDR(H2F_MSG_TEST,sizeof(expected)),0};
   memset(output,0xa5,sizeof(output));
   assert(!sweet_hfi_v1_test(output+1,2,(uint16_t)seq));
   assert(!memcmp(output+1,&expected,sizeof(expected)) && output[0]==0xa5a5a5a5 && output[3]==0xa5a5a5a5);

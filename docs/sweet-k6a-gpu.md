@@ -8,7 +8,44 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
-0138 passed the phone's full inactive register lifecycle: prepare/install/remove
+0141 corrects the requested GMU firmware version to1.8 and rearms `rx_req`
+when the polled receive queue is empty. This is not an interrupt-driven receiver.
+0142 adds `sweetcmdsnapshot=1`: a one-shot, read-only capture of the known
+4216-byte command database via the existing RPMh mapping/lock. It sends no
+TCS request and does not modify voltage votes. The offline decoder validates
+row continuity, length, checksum and all entry/aux bounds. Device result pending.
+
+The offline `sweet_gmu_arc_vote` helper encodes primary/MX indices and the raw
+level in the stock HFI format. It consumes level+1 OPP values, not microvolts.
+Unlike stock KGSL's fallback to the highest available MX entry, initial bring-up
+rejects an MX table unable to meet the primary level. Synthetic tests do not
+establish the real MX table; no hardware caller or power control is added.
+
+Cold-start ordering is pinned to Xiaomi10c33d40 `kgsl_gmu.c`,
+`adreno_a6xx_gmu.c`, `adreno.c` and `kgsl_hfi.h`:
+
+1. Establish actual CX/GMU clocks and a DDR bandwidth vote. The memnoc branch
+   bit alone does not establish bandwidth. Stock init requests the default
+   GPU power level's bus bandwidth before releasing CM3.
+2. Mask/clear GMU host and AO interrupts for the first polling implementation;
+   stock mask/clear ordering is in `adreno_gmu_mask_and_clear_irqs`.
+   Interrupt handler integration is separate; no unhandled source should be enabled.
+3. Establish exclusive ownership of GPU PDC/RSC before loading its sequences.
+   PDC cfg/sequence are distinct DT resources, not offsets guessed from GMU.
+4. Enable TCM retention, load/verify the flat image, install the full SID5
+   mapping, clear FW_INIT, select TCM_BOOT=2, supply HFI/log/chipid/config.
+5. Hold memory, context, power and clocks through every attempted CM3 release.
+   Poll the exact fresh BABEFACE result; timeout is not a safe teardown point.
+   The inactive0140 teardown API must never be used after this step.
+6. For the observed HFI_USE_REG quirk, complete GX/MX OOB rail-on before
+   HFI_CTRL_INIT/status and subsequent INIT/version/DCVS/BW messages.
+
+This sequence is a source-derived integration plan, not an implemented or
+hardware-verified startup path. No rendering backend or IOAccelerator service
+has been demonstrated. Local notes track exact CI/boot evidence.
+
+0140 passed the phone's full inactive register lifecycle with the complete
+stock GMU layout (SID5, 131 data pages, six table pages): prepare/install/remove
 all zero, GFSR0, CB_FSR0x400 (FORMAT2, no faults), RETIRED with retained=0.
 The user confirmed iOS loaded. This is not evidence of translated DMA or GMU
 execution. The latest test log is recorded in local NOTES.md.
@@ -57,7 +94,8 @@ Host ASan/UBSan tests cover the complete 32-bit address space, scattered
 physical pages above4GiB, all AP combinations, HFI bytes, seven allocation,
 137 page-query and137 clean failures, alias rejection and deferred destruction.
 ARM64 freestanding C and target-header C++ compiles passed; the composed
-power/reset/SMMU model passed with SID5. Full CI/device result is pending.
+power/reset/SMMU model passed with SID5. Full XNU CI and the0140 inactive
+phone test passed. No translated DMA or GMU execution was attempted.
 
 The 0137 phone log confirms preparation and installation returned zero, with
 FSR=0x400 correctly decoded as FORMAT2, faults0, unknown0. Removal returned
@@ -213,6 +251,32 @@ reserved at 0x60000000. The present object maps HFI pages only: it is not a
 complete firmware address space. Additional buffers must share the retained
 mapping lifetime and have distinct reserved ranges before any firmware start.
 Register-only success cannot replace validation of translated device access.
+
+The pinned Qualcomm b6410c3f source provides a more specific A618 reference:
+`adreno_is_a615_family` includes A618. Its `kgsl_gmu.c` maps HFI, dump, log,
+dummy and cache buffers in `GMU_CONTEXT_KERNEL`. The actual captured FDT maps
+`gmu_kernel` to SID5 and `gmu_user` to SID4. The current SID4-only diagnostic
+is deliberately not a firmware mapping and must not be reused as one.
+
+For the legacy fallback without firmware preallocation records, that driver
+reserves 240 KiB cache windows at 0x4000 and 0x44000, then a 4 KiB privileged
+dummy buffer in the uncached kernel range. HFI needs five 4 KiB pages, dump
+storage is 16 KiB, and its log is 4 KiB with IOMMU_PRIV. The current leaf encoder
+always permits unprivileged access, so it cannot yet represent this whole
+reference layout. These sizes/order come from
+[kgsl_gmu.c](https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/gpu/msm/kgsl_gmu.c)
+and `kgsl_gmu.h`, not from a device DMA test or proof of exact firmware needs.
+Linux v6.12 uses a different allocation/queue recipe; do not mix their ABI
+assumptions without validation.
+
+The current four-header HFI table matches the downstream legacy queue IDs,
+header sizes, dword size field and 224-byte first-queue offset. However,
+[the pinned kgsl_hfi.c initializer](https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/gpu/msm/kgsl_hfi.c)
+leaves watermarks/request fields zero after memset, while the local helper
+sets RX/TX watermarks and RX request to one. Its source comment is therefore
+not evidence of an exact match to this revision. Linux v6.12 sets those fields
+to one but uses two queues and a different table layout. Resolve that recipe
+choice before firmware execution; 0138 only allocates inactive storage.
 
 ## Device-specific SMMU constraints
 

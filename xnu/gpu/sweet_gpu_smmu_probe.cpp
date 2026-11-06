@@ -3,7 +3,7 @@
  * No IRQ, ATS request, firmware start or GPU command is issued here.
  * Register acceptance does not establish working translations or DMA.
  */
-#include "sweet_gpu_hfi_memory.h"
+#include "sweet_gmu_memory.h"
 #include <IOKit/IOLib.h>
 extern "C" {
 #include <arm/machine_routines.h>
@@ -18,7 +18,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 
 struct smmu_probe {
     uintptr_t gcc, cc, gmu, smmu;
-    sweet_gpu_hfi_memory *memory;
+    sweet_gmu_memory *memory;
     sweet_smmu_k6a board;
     sweet_smmu_context context;
     uint32_t last_offset, last_value;
@@ -119,12 +119,12 @@ static int stopped(void *opaque)
 static int pin(void *opaque, uint64_t *root)
 {
     auto *s = static_cast<smmu_probe *>(opaque);
-    return sweet_gpu_hfi_memory_retain_mapping(s->memory, root);
+    return sweet_gmu_memory_retain_mapping(s->memory, root);
 }
 static void unpin(void *opaque)
 {
     auto *s = static_cast<smmu_probe *>(opaque);
-    if (sweet_gpu_hfi_memory_release_mapping(s->memory))
+    if (sweet_gmu_memory_release_mapping(s->memory))
         IOLog("SWEET GPU SMMU: internal reference release error\n");
 }
 
@@ -141,9 +141,11 @@ extern "C" void sweet_gpu_smmu_probe(uintptr_t gcc, uintptr_t cc, uintptr_t gmu)
     }
     s->smmu = ml_io_map(0x05040000ull, 0x10000u);
     if (!s->smmu) { IOLog("SWEET GPU SMMU: mapping failed\n"); return; }
-    /* Reserved solely for this inactive test; never supplied to firmware. */
-    s->memory = sweet_gpu_hfi_memory_create(0x60010000u);
-    if (!s->memory) { IOLog("SWEET GPU SMMU: HFI allocation failed\n"); return; }
+    /* Full source-derived legacy layout, reserved for this inactive test.
+     * No firmware execution; SID4 remains unmatched/faulting. */
+    s->memory = sweet_gmu_memory_create_legacy();
+    if (!s->memory) { IOLog("SWEET GPU SMMU: legacy GMU allocation failed\n"); return; }
+    IOLog("SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 5 tables\n");
     sweet_smmu_context_ops ops = {s, read32, write32, write64,
         complete, pause_us, stopped, pin, unpin};
     IOLog("SWEET GPU SMMU: preparing k6a controller; no ATS\n");
@@ -153,8 +155,8 @@ extern "C" void sweet_gpu_smmu_probe(uintptr_t gcc, uintptr_t cc, uintptr_t gmu)
         s->board.last_offset, s->board.last_value);
     if (!rc) {
         /* All banks/slots must be empty in board preflight. This sole caller
-         * reserves bank0, slot0, ASID1 and SID4; DT group IDs are not CB IDs. */
-        rc = sweet_smmu_context_install(&s->context, &ops, 0, 0, 4, 1);
+         * reserves bank0, slot0, ASID1 and kernel SID5; DT group IDs are not CB IDs. */
+        rc = sweet_smmu_context_install(&s->context, &ops, 0, 0, 5, 1);
         IOLog("SWEET GPU SMMU: install rc=%d state=%u root=%llx off=%x value=%08x\n",
             rc, static_cast<unsigned>(s->context.state),
             static_cast<unsigned long long>(s->context.root_pa), s->last_offset, s->last_value);
@@ -192,7 +194,7 @@ extern "C" void sweet_gpu_smmu_probe(uintptr_t gcc, uintptr_t cc, uintptr_t gmu)
     if (s->context.retained) {
         IOLog("SWEET GPU SMMU: memory retained until reboot; no retry\n");
     } else {
-        sweet_gpu_hfi_memory_destroy(s->memory);
+        sweet_gmu_memory_destroy(s->memory);
         s->memory = nullptr;
     }
     IOLog("SWEET GPU SMMU: done rc=%d; register checks only, no DMA or acceleration\n", rc);

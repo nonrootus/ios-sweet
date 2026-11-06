@@ -1,0 +1,466 @@
+--- a/bsd/dev/sweet_gpu_pte.c
++++ b/bsd/dev/sweet_gpu_pte.c
+@@ -25,10 +25,15 @@
+     *out = pa | TYPE_TABLE;
+     return 0;
+ }
+-int sweet_gpu_pte_page(uint64_t pa, int read_only, uint64_t *out)
++int sweet_gpu_pte_page_access(uint64_t pa, int read_only, int privileged, uint64_t *out)
+ {
+-    if (!out || !good_pa(pa) || (read_only != 0 && read_only != 1)) return -1;
+-    *out = pa | TYPE_TABLE | PAGE_UNPRIV | PAGE_OUTER_SHAREABLE | PAGE_ACCESSED | PAGE_NONGLOBAL |
++    if (!out || !good_pa(pa) || (read_only != 0 && read_only != 1) ||
++        (privileged != 0 && privileged != 1)) return -1;
++    *out = pa | TYPE_TABLE | (privileged ? 0 : PAGE_UNPRIV) | PAGE_OUTER_SHAREABLE | PAGE_ACCESSED | PAGE_NONGLOBAL |
+         (read_only ? PAGE_READONLY : 0);
+     return 0;
+ }
++int sweet_gpu_pte_page(uint64_t pa, int read_only, uint64_t *out)
++{
++    return sweet_gpu_pte_page_access(pa, read_only, 0, out);
++}
+--- a/bsd/dev/sweet_gpu_pte.h
++++ b/bsd/dev/sweet_gpu_pte.h
+@@ -9,4 +9,8 @@
+ int sweet_gpu_pte_indices(uint64_t iova, struct sweet_gpu_pte_indices *out);
+ int sweet_gpu_pte_table(uint64_t page_pa, uint64_t *out);
+ int sweet_gpu_pte_page(uint64_t page_pa, int read_only, uint64_t *out);
++/* Explicit stage-1 AP permissions; privileged=1 denies unprivileged access.
++ * The existing encoder remains an unprivileged-access compatibility wrapper. */
++int sweet_gpu_pte_page_access(uint64_t page_pa, int read_only,
++    int privileged, uint64_t *out);
+ #endif
+--- a/bsd/dev/sweet_gpu_tables.c
++++ b/bsd/dev/sweet_gpu_tables.c
+@@ -21,12 +21,12 @@
+     uint64_t *ptr = ops->resolve(ops->ctx,d&DESC_ADDRESS);
+     return ptr && !((uintptr_t)ptr & 4095u) ? ptr : 0;
+ }
+-int sweet_gpu_table_map(struct sweet_gpu_table_page root,
+-    const struct sweet_gpu_table_ops *ops,uint64_t va,uint64_t pa,int ro) {
++int sweet_gpu_table_map_access(struct sweet_gpu_table_page root,
++    const struct sweet_gpu_table_ops *ops,uint64_t va,uint64_t pa,int ro,int privileged) {
+     struct sweet_gpu_pte_indices ix; struct sweet_gpu_table_page a={0},b={0};
+     uint64_t leaf,link; uint64_t *l2,*l3; int a_new=0,b_new=0;
+     if(!ops || !ops->alloc || !ops->release || !ops->resolve || !page_valid(root) ||
+-       sweet_gpu_pte_indices(va,&ix) || sweet_gpu_pte_page(pa,ro,&leaf)) return -1;
++       sweet_gpu_pte_indices(va,&ix) || sweet_gpu_pte_page_access(pa,ro,privileged,&leaf)) return -1;
+     if(!root.cpu[ix.l1]) {if(new_page(ops,&a)) return -1; a_new=1;l2=a.cpu;}
+     else {l2=existing(ops,root.cpu[ix.l1]);if(!l2)return -1;}
+     if(!l2[ix.l2]) {if(new_page(ops,&b))goto fail; b_new=1;l3=b.cpu;}
+@@ -41,6 +41,10 @@
+     if(a_new)ops->release(ops->ctx,a);
+     return -1;
+ }
++int sweet_gpu_table_map(struct sweet_gpu_table_page root,
++    const struct sweet_gpu_table_ops *ops,uint64_t va,uint64_t pa,int ro) {
++    return sweet_gpu_table_map_access(root,ops,va,pa,ro,0);
++}
+ int sweet_gpu_table_unmap(struct sweet_gpu_table_page root,
+     const struct sweet_gpu_table_ops *ops,uint64_t va) {
+     struct sweet_gpu_pte_indices ix;uint64_t *l2,*l3;
+@@ -52,7 +56,8 @@
+ 
+ /* The inactive tree is validated fully before any cache clean. */
+ #define LEAF_ALLOWED (DESC_ADDRESS|UINT64_C(0xec3))
+-#define LEAF_REQUIRED UINT64_C(0xe43)
++/* AP[1] (unprivileged access) and AP[2] (read-only) are both optional. */
++#define LEAF_REQUIRED UINT64_C(0xe03)
+ static size_t lower_bound_pa(const uint64_t *pages,size_t count,uint64_t pa) {
+     size_t lo=0,hi=count;
+     while(lo<hi) {size_t mid=lo+(hi-lo)/2; if(pages[mid]<pa) lo=mid+1; else hi=mid;}
+--- a/bsd/dev/sweet_gpu_tables.h
++++ b/bsd/dev/sweet_gpu_tables.h
+@@ -14,6 +14,9 @@
+  * caches, invalidate a TLB, set an SMMU context, or enforce page ownership. */
+ int sweet_gpu_table_map(struct sweet_gpu_table_page root,
+     const struct sweet_gpu_table_ops *ops, uint64_t iova, uint64_t pa, int read_only);
++int sweet_gpu_table_map_access(struct sweet_gpu_table_page root,
++    const struct sweet_gpu_table_ops *ops, uint64_t iova, uint64_t pa,
++    int read_only, int privileged);
+ int sweet_gpu_table_unmap(struct sweet_gpu_table_page root,
+     const struct sweet_gpu_table_ops *ops, uint64_t iova);
+ /* Publish a newly built, inactive 32-bit IOVA tree to a non-coherent walker.
+--- a/bsd/dev/sweet_gpu_hfi_table.c
++++ b/bsd/dev/sweet_gpu_hfi_table.c
+@@ -7,7 +7,7 @@
+ int sweet_gpu_hfi_table_init(void *buffer, size_t capacity, uint32_t base) {
+     uint8_t *b=buffer;
+     static const uint8_t id[4]={0,4,5,1}, priority[4]={10,10,40,20};
+-    if (!b || capacity<SWEET_HFI_V1_BYTES || (base&15u) ||
++    if (!b || capacity<SWEET_HFI_V1_BYTES || (base&4095u) ||
+         (uint64_t)base+SWEET_HFI_V1_BYTES>UINT64_C(0x100000000)) return -1;
+     for (size_t i=0;i<SWEET_HFI_V1_BYTES;i++) b[i]=0;
+     put32(b+4,54);put32(b+8,6);put32(b+12,12);put32(b+16,4);put32(b+20,4);
+@@ -15,8 +15,8 @@
+         uint8_t *h=b+24+i*48;
+         put32(h, i!=3);put32(h+4,base+224+i*4096);
+         put32(h+8,id[i] | (uint32_t)priority[i]<<8);put32(h+12,1024);
+-        /* Downstream KGSL initializes RX/TX watermarks and RX request to 1. */
+-        put32(h+24,1);put32(h+28,1);put32(h+32,1);
++        /* Pinned b6410c3f KGSL hfi_init leaves msg_size, unused0..4 and
++         * indices zero. Do not mix in the upstream two-queue watermarks. */
+     }
+     return 0;
+ }
+--- a/bsd/dev/sweet_gpu_hfi_table.h
++++ b/bsd/dev/sweet_gpu_hfi_table.h
+@@ -3,7 +3,8 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #define SWEET_HFI_V1_BYTES 16608u
+-/* Downstream four-header legacy layout. Caller owns aligned GPU-visible memory,
+- * cache maintenance, mapping, synchronization and hardware protocol. */
++/* Pinned KGSL b6410c3f four-header legacy layout, 4KiB-aligned GMU base.
++ * Initializes only the occupied bytes. Caller must zero the entire allocation
++ * (five pages), and owns mapping, cache maintenance and hardware protocol. */
+ int sweet_gpu_hfi_table_init(void *, size_t, uint32_t gmu_iova);
+ #endif
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_layout.c
+@@ -0,0 +1,25 @@
++#include "sweet_gmu_layout.h"
++
++int sweet_gmu_legacy_layout(struct sweet_gmu_layout *out,
++    unsigned firmware_preallocations, unsigned ecp)
++{
++    /* kernel/msm b6410c3f75259c0ca2df45a01838d2e46272723e:
++     * kgsl_gmu.c gmu_vma_legacy, gmu_cache_finalize, gmu_memory_probe.
++     * load_firmware/cache_finalize precedes memory_probe in gmu_init.
++     * HFIMEM_SIZE=16616 rounds to five pages (occupied queue bytes=16608).
++     * Tables: L1 plus L2/L3 pairs for the low and 0x60000000 ranges. */
++    static const struct sweet_gmu_layout profile = {
++        {
++            {0x00004000u, 0x0003c000u, 1},
++            {0x00044000u, 0x0003c000u, 1},
++            {0x60000000u, 0x00001000u, 1},
++            {0x60001000u, 0x00005000u, 0},
++            {0x60006000u, 0x00004000u, 0},
++            {0x6000a000u, 0x00001000u, 1},
++        },
++        5, 131, 5
++    };
++    if (!out || firmware_preallocations || ecp) return -1;
++    *out = profile;
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_layout.h
+@@ -0,0 +1,27 @@
++#ifndef SWEET_GMU_LAYOUT_H
++#define SWEET_GMU_LAYOUT_H
++#include <stdint.h>
++
++enum sweet_gmu_region_id {
++    SWEET_GMU_ICACHE, SWEET_GMU_DCACHE, SWEET_GMU_DUMMY,
++    SWEET_GMU_HFI, SWEET_GMU_DUMP, SWEET_GMU_LOG, SWEET_GMU_REGION_COUNT
++};
++struct sweet_gmu_region {
++    uint32_t iova, bytes;
++    unsigned privileged;
++};
++struct sweet_gmu_layout {
++    struct sweet_gmu_region region[SWEET_GMU_REGION_COUNT];
++    unsigned stream_id, data_pages, table_pages;
++};
++/* Source-derived A618 legacy flat-firmware profile, 4KiB SMMU granules.
++ * Requires no metadata preallocations, no ECP allocations and a fresh address
++ * space. Reject unsupported profiles; do not silently reuse these addresses.
++ * All six regions are read/write, stage-1 Normal-NC. privileged describes
++ * IOMMU_PRIV access, NOT CPU mapping attributes or the choice of context bank.
++ * SID5 comes from this phone's gmu_kernel DT node. Neither TCM nor the user
++ * window is mapped by this profile. This helper allocates/touches no memory
++ * or hardware; actual firmware requirements and DMA remain unvalidated. */
++int sweet_gmu_legacy_layout(struct sweet_gmu_layout *out,
++    unsigned firmware_preallocations, unsigned ecp);
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gmu_memory.cpp
+@@ -0,0 +1,169 @@
++#include "sweet_gmu_memory.h"
++#include "sweet_gpu_memory.h"
++#include <IOKit/IOLib.h>
++extern "C" {
++#ifdef KERNEL
++#include "../../../bsd/dev/sweet_gmu_layout.h"
++#include "../../../bsd/dev/sweet_gpu_tables.h"
++#include "../../../bsd/dev/sweet_gpu_hfi_table.h"
++#else
++#include "sweet_gmu_layout.h"
++#include "sweet_gpu_tables.h"
++#include "sweet_gpu_hfi_table.h"
++#endif
++}
++
++enum { DATA_PAGES=131, TABLE_PAGES=5, GRANULE=4096 };
++struct sweet_gmu_memory {
++    sweet_gmu_layout layout;
++    sweet_gpu_memory *data[SWEET_GMU_REGION_COUNT], *tables;
++    sweet_gpu_table_page data_page[DATA_PAGES], table_page[TABLE_PAGES];
++    uint64_t scratch[SWEET_GPU_TABLE_MAX_PAGES];
++    unsigned used, refs;
++    bool ready, destroy_requested;
++};
++static int alloc_table(void *opaque, sweet_gpu_table_page *out)
++{
++    auto *s=static_cast<sweet_gmu_memory *>(opaque);
++    for(unsigned i=1;i<TABLE_PAGES;i++) if(!(s->used&(1u<<i))) {
++        s->used|=1u<<i; *out=s->table_page[i];return 0;
++    }
++    return -1;
++}
++static void release_table(void *opaque, sweet_gpu_table_page page)
++{
++    auto *s=static_cast<sweet_gmu_memory *>(opaque);
++    for(unsigned i=1;i<TABLE_PAGES;i++)
++        if(s->table_page[i].pa==page.pa && s->table_page[i].cpu==page.cpu) {
++            bzero(page.cpu,GRANULE);s->used&=~(1u<<i);return;
++        }
++}
++static uint64_t *resolve_table(void *opaque, uint64_t pa)
++{
++    auto *s=static_cast<sweet_gmu_memory *>(opaque);
++    for(unsigned i=0;i<TABLE_PAGES;i++)
++        if((s->used&(1u<<i)) && s->table_page[i].pa==pa) return s->table_page[i].cpu;
++    return nullptr;
++}
++static int clean_table(void *opaque, uint64_t *cpu, size_t bytes)
++{
++    auto *s=static_cast<sweet_gmu_memory *>(opaque);
++    if(bytes!=GRANULE) return -1;
++    for(unsigned i=0;i<TABLE_PAGES;i++)
++        if((s->used&(1u<<i)) && s->table_page[i].cpu==cpu)
++            return sweet_gpu_memory_clean(s->tables,i);
++    return -1;
++}
++static int barrier(void *) {return 0;} /* memory_clean completes dsb sy */
++void sweet_gmu_memory_destroy(sweet_gmu_memory *s)
++{
++    if(!s) return;
++    if(s->refs) {s->destroy_requested=true;return;}
++    sweet_gpu_memory_destroy(s->tables);
++    for(unsigned i=0;i<SWEET_GMU_REGION_COUNT;i++) sweet_gpu_memory_destroy(s->data[i]);
++    IOFree(s,sizeof(*s));
++}
++int sweet_gmu_memory_retain_mapping(sweet_gmu_memory *s,uint64_t *root)
++{
++    if(root) *root=0;
++    if(!s || !root || !s->ready || s->destroy_requested || s->refs==UINT32_MAX) return -1;
++    s->refs++;*root=s->table_page[0].pa;return 0;
++}
++int sweet_gmu_memory_release_mapping(sweet_gmu_memory *s)
++{
++    if(!s || !s->refs) return -1;
++    if(--s->refs==0 && s->destroy_requested) sweet_gmu_memory_destroy(s);
++    return 0;
++}
++static bool isolated(sweet_gmu_memory *s)
++{
++    /* Canonical allocations must never alias data/table physical pages, even
++     * at the native 16K boundary; padded allocation tails remain unmapped. */
++    unsigned region[DATA_PAGES+TABLE_PAGES], at=0;
++    for(unsigned i=0;i<SWEET_GMU_REGION_COUNT;i++)
++        for(unsigned j=0;j<s->layout.region[i].bytes/GRANULE;j++) region[at++]=i;
++    for(unsigned j=0;j<TABLE_PAGES;j++) region[at++]=SWEET_GMU_REGION_COUNT;
++    if(at!=DATA_PAGES+TABLE_PAGES) return false;
++    for(unsigned i=0;i<at;i++) {
++        auto a=i<DATA_PAGES?s->data_page[i]:s->table_page[i-DATA_PAGES];
++        if(!a.cpu || !a.pa || (a.pa&4095) || a.pa>=(1ull<<36) ||
++            (reinterpret_cast<uintptr_t>(a.cpu)&4095)) return false;
++        for(unsigned j=0;j<i;j++) {
++            auto b=j<DATA_PAGES?s->data_page[j]:s->table_page[j-DATA_PAGES];
++            if(a.pa==b.pa || a.cpu==b.cpu) return false;
++            if(region[i]!=region[j] && ((a.pa>>14)==(b.pa>>14) ||
++                (reinterpret_cast<uintptr_t>(a.cpu)>>14)==(reinterpret_cast<uintptr_t>(b.cpu)>>14))) return false;
++        }
++    }
++    return true;
++}
++sweet_gmu_memory *sweet_gmu_memory_create_legacy(void)
++{
++    auto *s=static_cast<sweet_gmu_memory *>(IOMallocZero(sizeof(sweet_gmu_memory)));
++    if(!s) return nullptr;
++    if(sweet_gmu_legacy_layout(&s->layout,0,0) || s->layout.data_pages!=DATA_PAGES ||
++        s->layout.table_pages!=TABLE_PAGES) {sweet_gmu_memory_destroy(s);return nullptr;}
++    unsigned at=0;
++    for(unsigned i=0;i<SWEET_GMU_REGION_COUNT;i++) {
++        unsigned count=s->layout.region[i].bytes/GRANULE;
++        s->data[i]=sweet_gpu_memory_create_nc(count);
++        if(!s->data[i]) {sweet_gmu_memory_destroy(s);return nullptr;}
++        for(unsigned j=0;j<count;j++) {
++            void *cpu=nullptr;
++            if(at>=DATA_PAGES || sweet_gpu_memory_page(s->data[i],j,&cpu,&s->data_page[at].pa)) {
++                sweet_gmu_memory_destroy(s);return nullptr;
++            }
++            s->data_page[at].cpu=static_cast<uint64_t *>(cpu);
++            if(j && reinterpret_cast<uintptr_t>(cpu)!=
++                reinterpret_cast<uintptr_t>(s->data_page[at-j].cpu)+j*GRANULE) {
++                sweet_gmu_memory_destroy(s);return nullptr;
++            }
++            at++;
++        }
++    }
++    if(at!=DATA_PAGES) {sweet_gmu_memory_destroy(s);return nullptr;}
++    s->tables=sweet_gpu_memory_create(TABLE_PAGES);
++    if(!s->tables) {sweet_gmu_memory_destroy(s);return nullptr;}
++    for(unsigned i=0;i<TABLE_PAGES;i++) {
++        void *cpu=nullptr;
++        if(sweet_gpu_memory_page(s->tables,i,&cpu,&s->table_page[i].pa)) {
++            sweet_gmu_memory_destroy(s);return nullptr;
++        }
++        s->table_page[i].cpu=static_cast<uint64_t *>(cpu);
++    }
++    if(!isolated(s)) {sweet_gmu_memory_destroy(s);return nullptr;}
++    s->used=1;
++    sweet_gpu_table_ops ops={s,alloc_table,release_table,resolve_table};
++    sweet_gpu_table_publish_ops pub={s,clean_table,barrier};
++    at=0;
++    for(unsigned i=0;i<SWEET_GMU_REGION_COUNT;i++) {
++        auto r=s->layout.region[i];
++        if(i==SWEET_GMU_HFI && sweet_gpu_hfi_table_init(s->data_page[at].cpu,r.bytes,r.iova)) {
++            sweet_gmu_memory_destroy(s);return nullptr;
++        }
++        for(unsigned j=0;j<r.bytes/GRANULE;j++,at++) {
++            if(sweet_gpu_table_map_access(s->table_page[0],&ops,
++                r.iova+j*GRANULE,s->data_page[at].pa,0,r.privileged) ||
++                sweet_gpu_memory_clean(s->data[i],j)) {
++                sweet_gmu_memory_destroy(s);return nullptr;
++            }
++        }
++    }
++    if(s->used!=31 || sweet_gpu_table_publish_inactive(s->table_page[0],&ops,&pub,
++        s->scratch,SWEET_GPU_TABLE_MAX_PAGES)) {sweet_gmu_memory_destroy(s);return nullptr;}
++    s->ready=true;return s;
++}
++int sweet_gmu_memory_info(const sweet_gmu_memory *s,uint64_t *root,
++    uint32_t *hfi,uint32_t *dump,uint32_t *log)
++{
++    if(root) *root=0;
++    if(hfi) *hfi=0;
++    if(dump) *dump=0;
++    if(log) *log=0;
++    if(!s || !s->ready || s->destroy_requested || !root || !hfi || !dump || !log) return -1;
++    *root=s->table_page[0].pa;
++    *hfi=s->layout.region[SWEET_GMU_HFI].iova;
++    *dump=s->layout.region[SWEET_GMU_DUMP].iova;
++    *log=s->layout.region[SWEET_GMU_LOG].iova;
++    return 0;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gmu_memory.h
+@@ -0,0 +1,26 @@
++#ifndef SWEET_GMU_MEMORY_H
++#define SWEET_GMU_MEMORY_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++struct sweet_gmu_memory;
++/* Inactive A618 legacy/no-preallocation/no-ECP memory image. Caller must first
++ * validate that firmware/target profile; this function does not inspect a blob.
++ * Six isolated canonical Normal-NC allocations, separate cached page tables.
++ * No MMIO, firmware execution or CPU queue mutation interface is provided.
++ * Mapping refs must be held before publishing root PA, retained indefinitely
++ * on ambiguous hardware failure, released only after proven detach/drain.
++ * All calls require external serialization; create/destroy may sleep. */
++struct sweet_gmu_memory *sweet_gmu_memory_create_legacy(void);
++int sweet_gmu_memory_info(const struct sweet_gmu_memory *, uint64_t *root,
++    uint32_t *hfi, uint32_t *dump, uint32_t *log);
++int sweet_gmu_memory_retain_mapping(struct sweet_gmu_memory *, uint64_t *root);
++int sweet_gmu_memory_release_mapping(struct sweet_gmu_memory *);
++/* Relinquishes caller ownership. If retained, only matching release calls
++ * are permitted afterwards; the last release completes deferred destruction. */
++void sweet_gmu_memory_destroy(struct sweet_gmu_memory *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp
+@@ -3,7 +3,7 @@
+  * No IRQ, ATS request, firmware start or GPU command is issued here.
+  * Register acceptance does not establish working translations or DMA.
+  */
+-#include "sweet_gpu_hfi_memory.h"
++#include "sweet_gmu_memory.h"
+ #include <IOKit/IOLib.h>
+ extern "C" {
+ #include <arm/machine_routines.h>
+@@ -18,7 +18,7 @@
+ 
+ struct smmu_probe {
+     uintptr_t gcc, cc, gmu, smmu;
+-    sweet_gpu_hfi_memory *memory;
++    sweet_gmu_memory *memory;
+     sweet_smmu_k6a board;
+     sweet_smmu_context context;
+     uint32_t last_offset, last_value;
+@@ -119,12 +119,12 @@
+ static int pin(void *opaque, uint64_t *root)
+ {
+     auto *s = static_cast<smmu_probe *>(opaque);
+-    return sweet_gpu_hfi_memory_retain_mapping(s->memory, root);
++    return sweet_gmu_memory_retain_mapping(s->memory, root);
+ }
+ static void unpin(void *opaque)
+ {
+     auto *s = static_cast<smmu_probe *>(opaque);
+-    if (sweet_gpu_hfi_memory_release_mapping(s->memory))
++    if (sweet_gmu_memory_release_mapping(s->memory))
+         IOLog("SWEET GPU SMMU: internal reference release error\n");
+ }
+ 
+@@ -141,9 +141,11 @@
+     }
+     s->smmu = ml_io_map(0x05040000ull, 0x10000u);
+     if (!s->smmu) { IOLog("SWEET GPU SMMU: mapping failed\n"); return; }
+-    /* Reserved solely for this inactive test; never supplied to firmware. */
+-    s->memory = sweet_gpu_hfi_memory_create(0x60010000u);
+-    if (!s->memory) { IOLog("SWEET GPU SMMU: HFI allocation failed\n"); return; }
++    /* Full source-derived legacy layout, reserved for this inactive test.
++     * No firmware execution; SID4 remains unmatched/faulting. */
++    s->memory = sweet_gmu_memory_create_legacy();
++    if (!s->memory) { IOLog("SWEET GPU SMMU: legacy GMU allocation failed\n"); return; }
++    IOLog("SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 5 tables\n");
+     sweet_smmu_context_ops ops = {s, read32, write32, write64,
+         complete, pause_us, stopped, pin, unpin};
+     IOLog("SWEET GPU SMMU: preparing k6a controller; no ATS\n");
+@@ -153,8 +155,8 @@
+         s->board.last_offset, s->board.last_value);
+     if (!rc) {
+         /* All banks/slots must be empty in board preflight. This sole caller
+-         * reserves bank0, slot0, ASID1 and SID4; DT group IDs are not CB IDs. */
+-        rc = sweet_smmu_context_install(&s->context, &ops, 0, 0, 4, 1);
++         * reserves bank0, slot0, ASID1 and kernel SID5; DT group IDs are not CB IDs. */
++        rc = sweet_smmu_context_install(&s->context, &ops, 0, 0, 5, 1);
+         IOLog("SWEET GPU SMMU: install rc=%d state=%u root=%llx off=%x value=%08x\n",
+             rc, static_cast<unsigned>(s->context.state),
+             static_cast<unsigned long long>(s->context.root_pa), s->last_offset, s->last_value);
+@@ -192,7 +194,7 @@
+     if (s->context.retained) {
+         IOLog("SWEET GPU SMMU: memory retained until reboot; no retry\n");
+     } else {
+-        sweet_gpu_hfi_memory_destroy(s->memory);
++        sweet_gmu_memory_destroy(s->memory);
+         s->memory = nullptr;
+     }
+     IOLog("SWEET GPU SMMU: done rc=%d; register checks only, no DMA or acceleration\n", rc);
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -122,6 +122,7 @@
+ bsd/dev/sweet_smmu_snapshot.c		standard
+ bsd/dev/sweet_gpu_pte.c		standard
+ bsd/dev/sweet_gpu_tables.c		standard
++bsd/dev/sweet_gmu_layout.c		standard
+ bsd/dev/sweet_gpu_branch.c		standard
+ bsd/dev/sweet_gmu_clock.c		standard
+ bsd/dev/sweet_gpu_k6a_power.c		standard
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,5 +22,6 @@
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp                        optional iokitcpp
++iokit/Kernel/arm/sweet_gmu_memory.cpp                            optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_memory_probe.cpp                      optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp                        optional iokitcpp

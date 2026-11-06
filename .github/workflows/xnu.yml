@@ -85,8 +85,7 @@ jobs:
         run: |
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0122-sweet-gmu-tcm-power-recheck.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0124-sweet-smmu-snapshot-probe.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0125-sweet-hfi-v1-queue-watermarks.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0126-sweet-gpu-table-helpers.patch"
+          # 0139 supersedes 0125 HFI bytes and 0126 table helpers; exact cmp below.
           # Later patches supersede memory/HFI sources; verify final contents.
           grep -Fx 'iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           grep -Fx 'iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp                        optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
@@ -95,20 +94,25 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0131-sweet-pmap-highmem-cache-sync.patch"
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.h "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=bsd/dev/sweet_smmu_context.c --exclude=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0133-sweet-smmu-context-lifetime.patch"
-          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_k6a.c --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0134-sweet-k6a-smmu-register-probe.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_k6a.c --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp --exclude=iokit/conf/files.arm64 "$GITHUB_WORKSPACE/xnu/patches/0134-sweet-k6a-smmu-register-probe.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0135-sweet-smmu-preserve-fault-streams.patch"
           # 0136 adapter is superseded by 0138; final source cmp below is exact.
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0137-sweet-smmu-fault-type-check.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0138-sweet-smmu-inactive-unmatched-teardown.patch"
-          for name in sweet_gpu_memory.cpp sweet_gpu_memory.h sweet_gpu_hfi_memory.cpp sweet_gpu_hfi_memory.h sweet_gpu_memory_probe.cpp sweet_gpu_smmu_probe.cpp; do
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0138-sweet-smmu-inactive-unmatched-teardown.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
+          for name in sweet_gpu_memory.cpp sweet_gpu_memory.h sweet_gpu_hfi_memory.cpp sweet_gpu_hfi_memory.h sweet_gpu_memory_probe.cpp sweet_gpu_smmu_probe.cpp sweet_gmu_memory.cpp sweet_gmu_memory.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/iokit/Kernel/arm/$name"
           done
-          for name in sweet_smmu_context.c sweet_smmu_context.h sweet_smmu_k6a.c sweet_smmu_k6a.h; do
+          for name in sweet_smmu_context.c sweet_smmu_context.h sweet_smmu_k6a.c sweet_smmu_k6a.h sweet_gpu_pte.c sweet_gpu_pte.h sweet_gpu_tables.c sweet_gpu_tables.h sweet_gpu_hfi_table.c sweet_gpu_hfi_table.h sweet_gmu_layout.c sweet_gmu_layout.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
           done
           grep -Fx $'bsd/dev/sweet_smmu_context.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          grep -Fx $'bsd/dev/sweet_gmu_layout.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          grep -Fx 'iokit/Kernel/arm/sweet_gmu_memory.cpp                            optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
+          grep -Fx 'iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp                        optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
           find dxb/build/xnu.obj -name sweet_smmu_context.o -print | grep -F 'sweet_smmu_context.o' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU SMMU: begin register-only test' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU SMMU: legacy GMU memory SID5, 131 data pages, 5 tables' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'memory retained until reboot; no retry' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GPU MEM: inactive HFI Normal-NC=' > /dev/null
           grep -F 'TCM prerequisites' dxb/xnu/bsd/dev/sweet_gpu_probe.c > /dev/null

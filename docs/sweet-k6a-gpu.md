@@ -8,12 +8,61 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+0138 passed the phone's full inactive register lifecycle: prepare/install/remove
+all zero, GFSR0, CB_FSR0x400 (FORMAT2, no faults), RETIRED with retained=0.
+The user confirmed iOS loaded. This is not evidence of translated DMA or GMU
+execution. The latest test log is recorded in local NOTES.md.
+
+0139 prepares a complete legacy GMU memory image instead of the diagnostic
+HFI-only image. The inactive test selects gmu_kernel SID5 from the captured DT;
+SID4 remains unmatched/faulting. Before actual GMU execution, reconcile that
+with downstream's attached empty user domain and implement a running-producer
+lifetime protocol. CM3 remains reset and GX remains off in this test.
+
+The profile follows pinned Qualcomm
+[kgsl_gmu.c](https://android.googlesource.com/kernel/msm/+/b6410c3f75259c0ca2df45a01838d2e46272723e/drivers/gpu/msm/kgsl_gmu.c)
+with no firmware preallocations and no ECP. The pinned adreno-gpulist.h A618
+feature list has no ADRENO_ECP; the captured 32768-byte flat firmware has second
+dword9, so the metadata allocation loop stops immediately. These are profile
+checks, not firmware execution or authentication. Unknown/preallocated/ECP
+profiles are rejected by the offline layout helper.
+
+| Region | IOVA | Bytes | Access |
+| --- | --- | --- | --- |
+| ICACHE | 0x4000 | 0x3c000 | privileged RW |
+| DCACHE | 0x44000 | 0x3c000 | privileged RW |
+| Dummy | 0x60000000 | 0x1000 | privileged RW |
+| HFI | 0x60001000 | 0x5000 | unprivileged RW |
+| Dump | 0x60006000 | 0x4000 | unprivileged RW |
+| Log | 0x6000a000 | 0x1000 | privileged RW |
+
+All 131 logical data pages use separate canonical Normal-NC allocations per
+region; five cached table pages form the two L2/L3 branches. Native 16KiB
+rounding must not change the 4KiB IOVA layout. Allocation padding, TCM and all
+other addresses remain unmapped. Cross-allocation aliases, including shared
+native-page boundaries, are rejected before building tables. Deferred mapping
+references prevent destruction while hardware may still own the memory.
+
+0139 corrects the HFI unused words introduced by 0125: pinned kgsl_hfi.h calls
+them unused1/2/3 and hfi_init leaves them zero. Four queue IDs/priorities and
+54-dword table size remain unchanged; the helper requires a 4KiB-aligned base.
+The allocator zeroes the entire five-page HFI allocation, not just occupied
+bytes. Stage-1 AP now supports privileged RW/RO while the old API continues
+to encode unprivileged access. MAIR44, outer shareability, AF/nG and XN-clear
+follow the pinned reference. No live queue access API is supplied yet.
+
+Host ASan/UBSan tests cover the complete 32-bit address space, scattered
+physical pages above4GiB, all AP combinations, HFI bytes, seven allocation,
+136 page-query and136 clean failures, alias rejection and deferred destruction.
+ARM64 freestanding C and target-header C++ compiles passed; the composed
+power/reset/SMMU model passed with SID5. Full CI/device result is pending.
+
 The 0137 phone log confirms preparation and installation returned zero, with
 FSR=0x400 correctly decoded as FORMAT2, faults0, unknown0. Removal returned
 MISMATCH: the requested S2CR TYPE=FAULT write left TYPE=TRANS (0x300).
 All pages remained retained, and iOS loaded. This is an observed ignored TYPE
 change, distinct from the earlier reserved-field readback mismatch.
-Patch 0138 tests a separate inactive-only teardown; DMA and rendering remain untested.
+Patch 0138 passed a separate inactive-only teardown; DMA and rendering remain untested.
 
 Patch 0132 passed full XNU CI (run 42073509204) and a temporary phone boot.
 The fresh log reports `inactive HFI Normal-NC=pass` and `done result=pass`;

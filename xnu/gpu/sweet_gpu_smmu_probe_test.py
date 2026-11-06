@@ -45,7 +45,7 @@ assert '__asm__' not in adapter
 #include <cstring>
 #include <cstdarg>
 #include <string>
-#include "sweet_gpu_hfi_memory.h"
+#include "sweet_gmu_memory.h"
 alignas(8) static uint32_t smmu[0x10000/4], gcc[1024], cc[1024], gmu[1024];
 static unsigned writes, maps, creates, destroys, pins, unpins, barriers;
 static uint64_t elapsed;
@@ -59,20 +59,20 @@ static bool ignore_fault_writes;
 static bool late_global_timeout, late_context_timeout, late_fault, late_global_fault, late_policy;
 static unsigned fault_writes;
 static std::string messages;
-struct sweet_gpu_hfi_memory { unsigned refs; };
-static sweet_gpu_hfi_memory *allocated;
-extern "C" sweet_gpu_hfi_memory *sweet_gpu_hfi_memory_create(uint32_t addr) {
-    assert(addr==0x60010000); ++creates; if(alloc_fail)return nullptr;
-    assert(!allocated); allocated=new sweet_gpu_hfi_memory{}; ++live;return allocated;
+struct sweet_gmu_memory { unsigned refs; };
+static sweet_gmu_memory *allocated;
+extern "C" sweet_gmu_memory *sweet_gmu_memory_create_legacy(void) {
+    ++creates; if(alloc_fail)return nullptr;
+    assert(!allocated); allocated=new sweet_gmu_memory{}; ++live;return allocated;
 }
-extern "C" void sweet_gpu_hfi_memory_destroy(sweet_gpu_hfi_memory *p) {
+extern "C" void sweet_gmu_memory_destroy(sweet_gmu_memory *p) {
     assert(p==allocated && !p->refs);delete p;allocated=nullptr;--live;++destroys;
 }
-extern "C" int sweet_gpu_hfi_memory_retain_mapping(sweet_gpu_hfi_memory *p,uint64_t *root) {
+extern "C" int sweet_gmu_memory_retain_mapping(sweet_gmu_memory *p,uint64_t *root) {
     assert(p==allocated);if(pin_fail)return -1;
     ++pins;++p->refs;*root=0x10456c000ull;return 0;
 }
-extern "C" int sweet_gpu_hfi_memory_release_mapping(sweet_gpu_hfi_memory *p) {
+extern "C" int sweet_gmu_memory_release_mapping(sweet_gmu_memory *p) {
     assert(p==allocated && p->refs);++unpins;--p->refs;return 0;
 }
 void IOLog(const char *fmt,...) {
@@ -160,7 +160,7 @@ static void retained() {
     // Model teardown represents a separately proven full reset, NOT recovery
     // behavior offered by production code.
     memset(smmu,0,sizeof(smmu));allocated->refs=0;
-    sweet_gpu_hfi_memory_destroy(allocated);
+    sweet_gmu_memory_destroy(allocated);
 }
 int main() {
     reset();sweet_gpu_smmu_probe(0,uintptr_t(cc),uintptr_t(gmu));assert(!attempted&&!maps);
@@ -196,7 +196,7 @@ int main() {
     for(unsigned bit=0;bit<32;++bit) {
         if(bit==9||bit==10)continue;
         reset();inject_fault=1u<<bit;run();
-        assert(smmu[0xc00/4]==0x300&&smmu[0x800/4]==0x80000004);
+        assert(smmu[0xc00/4]==0x300&&smmu[0x800/4]==0x80000005);
         retained();
     }
     reset();inject_global=1;run();retained();

@@ -28,8 +28,8 @@ static int rd(void *v,uint32_t off,uint32_t *out)
 static int wr(void *v,uint32_t off,uint32_t value)
 {
     struct model *m=v;assert(m->quiet>=2);
-    if(off>=0xc00&&off<=0xc10)assert(value==0x20300);
-    else if(off==0x6c){assert(value==UINT32_MAX);m->invalidations|=1;}
+    assert(!(off>=0xc00&&off<=0xc10)); // preserve already-faulting streams
+    if(off==0x6c){assert(value==UINT32_MAX);m->invalidations|=1;}
     else if(off==0x68){assert(value==UINT32_MAX);m->invalidations|=2;}
     else if(off==0x70){assert(value==UINT32_MAX&&m->invalidations==3);m->sync_busy=2;}
     else if(off==0){
@@ -71,6 +71,7 @@ int main(void)
     assert(d.state==SWEET_SMMU_K6A_READY&&m.attach_writes==11&&m.micro_writes==3);
     assert((m.reg[0x6000/4]&~8u)==(0x2378&~8u));
     assert(m.reg[0x6960/4]==UINT32_MAX); // legitimate configured all-ones value
+    for(unsigned i=0;i<5;++i)assert(m.reg[(0xc00+4*i)/4]==0x200ff);
     assert(sweet_smmu_k6a_prepare(&d,&ops));
     for(unsigned n=1;n<=callbacks;++n){
         ops=setup(&m);memset(&d,0,sizeof(d));m.fail_at=n;

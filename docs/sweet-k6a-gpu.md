@@ -73,14 +73,43 @@ completion register at GDSCR+4, requiring POWER_DOWN_COMPLETE and rejecting
 POWER_UP_COMPLETE, in addition to software-collapse/no-hardware-control state.
 The field definitions and polling convention follow the
 [Qualcomm GDSC driver](https://android.googlesource.com/kernel/common/+/9af93db9e140a4e6e79cdb098919bc928a72cd59/drivers/clk/qcom/gdsc.c).
-This GX read has not yet been observed on the phone.
+On the 0134 phone boot, GX control was 0x00222001 and completion was
+0x00088400; both passed these checks.
 
-The board model covers 114 callback failures, global/halt timeouts, read-only
+The revised board model covers 99 callback failures, global/halt timeouts, read-only
 IDLE, literal attach/resume order and absence of undocumented reads. The
 composed adapter model covers power/reset rejection, once-only execution,
 successful install/remove, allocation/pin failures, unexpected faults and
 timeout retention. These are host ASan/UBSan models, not hardware validation.
-0134 still requires a full XNU build and temporary device test.
+Full XNU CI run 42089630500 passed, including final-source and linked-kernel
+marker checks. The downloaded kernel passed CRC/SHA-256; the linked high-memory
+cache fix still uses the 64-bit physical-page shift. Its temporary image was
+sent with `fastboot boot` (Sending/Booting both OKAY). The user confirmed iOS
+loaded, and a fresh recovery log located a preparation failure: writing
+S2CR0=0x00020300 left the register at 0x000200ff. The test stopped at stage1
+before any TTBR was installed. Power/clocks/reset/GX checks passed; controller
+preparation and translated DMA did not pass.
+
+Patch 0135 preserves the already-faulting stream entries instead of rewriting
+irrelevant context-index/shareability fields. Preflight still requires all
+SMRs invalid and all S2CR types FAULT. The
+[Qualcomm SMMU driver](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c)
+describes firmware that ignores FAULT writes, but its Adreno-v2 path does not
+use that generic quirk. The observation is not proof that this phone has it
+or that all register writes are blocked. No BYPASS request is introduced.
+Translation installation and removal keep strict verification; a model where
+FAULT writes are ignored during removal still retains all exposed pages.
+0135 passed host models, ARM64 compile and sequential patch checks; its full
+build and device outcome remain pending.
+
+Before a subsequent firmware-start implementation, the
+[Linux v6.12 GMU initialization](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpu/drm/msm/adreno/a6xx_gmu.c)
+also requires owned dummy, log and legacy debug storage. Non-fixed buffers
+come from the GMU uncached IOVA range below 0x80000000, with the dummy region
+reserved at 0x60000000. The present object maps HFI pages only: it is not a
+complete firmware address space. Additional buffers must share the retained
+mapping lifetime and have distinct reserved ranges before any firmware start.
+Register-only success cannot replace validation of translated device access.
 
 ## Device-specific SMMU constraints
 

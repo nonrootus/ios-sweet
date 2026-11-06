@@ -54,6 +54,7 @@ static bool alloc_fail, pin_fail, global_timeout, context_timeout, inject_fault;
 static uint32_t corrupt_offset;
 static bool corrupt_remove;
 static bool lose_reset_active, lose_reset_detach;
+static bool ignore_fault_writes;
 static std::string messages;
 struct sweet_gpu_hfi_memory { unsigned refs; };
 static sweet_gpu_hfi_memory *allocated;
@@ -93,6 +94,7 @@ static uint32_t model_read(uintptr_t a) {
 static void model_write32(uintptr_t a,uint32_t v) {
     assert(is_smmu(a)&&!(a&3));++writes;
     unsigned off=a-uintptr_t(smmu);
+    if(ignore_fault_writes&&off>=0xc00&&off<=0xc10&&((v>>16)&3)==2)return;
     if(off==corrupt_offset || (corrupt_remove&&off==0x800&&v==0))v^=1;
     if(off==0x6000)v|=8;
     *reinterpret_cast<uint32_t*>(a)=v;
@@ -113,6 +115,7 @@ static void reset() {
     probe={};attempted=0;writes=maps=creates=destroys=pins=unpins=barriers=0;elapsed=0;
     alloc_fail=pin_fail=global_timeout=context_timeout=inject_fault=corrupt_remove=false;
     lose_reset_active=lose_reset_detach=false;
+    ignore_fault_writes=false;
     corrupt_offset=UINT32_MAX;messages.clear();
     gcc[0xc/4]=1;cc[0x540/4]=0x80001fe0;cc[0x98/4]=0x4221;
     cc[0x124/4]=0x602;cc[0xc/4]=1;cc[0x10/4]=0x8000;gmu[0]=1;
@@ -152,7 +155,7 @@ int main() {
     for(auto b:failures){reset();*b.p=b.value;run();assert(!maps&&!creates&&!writes&&!live);once();}
     reset();alloc_fail=true;run();assert(creates==1&&!live&&!writes);once();
     reset();smmu[0x800/4]=0x80000000;run();assert(!writes&&!live&&destroys==1&&!pins);once();
-    reset();corrupt_offset=0xc00;run();assert(!live&&!pins&&destroys==1&&probe.board.state==SWEET_SMMU_K6A_POISONED);once();
+    reset();corrupt_offset=0;run();assert(!live&&!pins&&destroys==1&&probe.board.state==SWEET_SMMU_K6A_POISONED);once();
     reset();global_timeout=true;run();assert(!live&&!pins&&elapsed==1500000);once();
     reset();pin_fail=true;run();assert(!live&&!pins&&destroys==1);once();
     reset();corrupt_offset=0x1800;run();retained();
@@ -161,6 +164,11 @@ int main() {
     reset();corrupt_remove=true;run();retained();
     reset();lose_reset_active=true;run();retained();
     reset();lose_reset_detach=true;run();retained();
+    // The 0134 observation does NOT authorize ignoring failure to switch a
+    // live translated stream to FAULT. Keep the pages on that distinct error.
+    reset();ignore_fault_writes=true;run();
+    assert(probe.board.state==SWEET_SMMU_K6A_READY&&smmu[0x800/4]==0x80000004);
+    assert(smmu[0xc00/4]==0x300);retained();
     puts("PASS: real adapter+board+context model: 27 power/reset gates, once-only execution, install/remove, pin/timeout/fault retention; no hardware proof");
 }
 ''')

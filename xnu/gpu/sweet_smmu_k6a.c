@@ -84,8 +84,12 @@ int sweet_smmu_k6a_prepare(struct sweet_smmu_k6a *d,const struct sweet_smmu_cont
     if (ops->quiescent(ops->ctx)) return SWEET_SMMU_CONTEXT_BUSY;
     d->state=SWEET_SMMU_K6A_POISONED;
     d->stage=SWEET_SMMU_K6A_INVALIDATE;
-    for (unsigned i=0;i<5;++i)
-        if ((rc=checked(d,0xc00+4*i,0x20300))) return rc;
+    /* Preflight already requires every S2CR to be FAULT with every SMR
+     * invalid. Preserve that state: CBNDX/shareability are immaterial for a
+     * faulting stream. On the phone, a redundant FAULT write left 0x200ff
+     * unchanged. That alone neither proves write protection nor identifies
+     * the Qualcomm firmware quirk. Do not try BYPASS or weaken the later
+     * translation-install/removal checks to work around this observation. */
     /* Invalidation/sync command registers are not read back. */
     if ((rc=wr(d,0x6c,UINT32_MAX)) || (rc=wr(d,0x68,UINT32_MAX)) ||
         (rc=wr(d,0x70,UINT32_MAX)) || (rc=poll(d,0x74,1,0,500000))) return rc;

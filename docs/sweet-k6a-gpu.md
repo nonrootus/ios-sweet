@@ -13,13 +13,34 @@ when the polled receive queue is empty. This is not an interrupt-driven receiver
 0142 adds `sweetcmdsnapshot=1`: a one-shot, read-only capture of the known
 4216-byte command database via the existing RPMh mapping/lock. It sends no
 TCS request and does not modify voltage votes. The offline decoder validates
-row continuity, length, checksum and all entry/aux bounds. Device result pending.
+row continuity, length, checksum and all entry/aux bounds. The phone returned
+the complete snapshot with a matching checksum and rc0, then booted iOS.
+The generic decoder preserves metadata and duplicate names; a vote consumer
+must separately require a unique, correctly typed target resource.
 
 The offline `sweet_gmu_arc_vote` helper encodes primary/MX indices and the raw
 level in the stock HFI format. It consumes level+1 OPP values, not microvolts.
 Unlike stock KGSL's fallback to the highest available MX entry, initial bring-up
 rejects an MX table unable to meet the primary level. Synthetic tests do not
-establish the real MX table; no hardware caller or power control is added.
+establish hardware behavior. The captured MX table now resolves the proposed
+MIN_SVS start request to primary64 / MX192, rather than equal rail levels.
+No hardware caller or power control is added.
+
+`tools/gpu-bw-table.py` reconstructs the isolated stock HFI bandwidth query
+from a checksum-verified command database log and the local device tree. It
+retains the original ordered BCM list, VCD grouping, positive-subunit minimum1,
+and the pinned driver's `BIT(i)` wait-mask behavior. It rejects unsupported
+routes, ambiguous resource names and invalid BCM auxiliary data. Reports stay
+outside git and are not a live host vote: host votes aggregate other clients
+and may affect active, wake and sleep sets.
+
+The pinned `bcm_query_bus_req` retains its scaled maximum across the BCM loop
+for each node. At slv-ebi, MC0 precedes ACV, so a nonzero MC0 value reaches
+ACV even though ACV's own width is zero. Treating that resource as always-off
+would not reproduce the stock table. The differential test extracts the real
+pinned C function into a host harness to check this behavior independently.
+The observed CNOC route also includes SH2 as well as SN15, so the single-SN15
+table from another driver profile is not interchangeable.
 
 Cold-start ordering is pinned to Xiaomi10c33d40 `kgsl_gmu.c`,
 `adreno_a6xx_gmu.c`, `adreno.c` and `kgsl_hfi.h`:

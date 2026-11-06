@@ -53,7 +53,6 @@ def decode(data):
     if flags & 1:
         raise ValueError('standalone command database')
     result = {'version': version, 'checksum': checksum, 'flags': flags, 'resources': []}
-    names = set()
     for i in range(8):
         slave, header, aux, count, aux_version, *_ = struct.unpack_from('<8H', data, 8 + 16 * i)
         if not slave:
@@ -68,9 +67,11 @@ def decode(data):
             if not name_bytes or any(c < 32 or c > 126 for c in name_bytes):
                 raise ValueError('invalid resource name')
             name = name_bytes.decode('ascii')
-            if name in names or (address >> 16) & 7 != slave:
-                raise ValueError('duplicate resource or inconsistent slave')
-            names.add(name)
+            # This is a database decoder, not a vote-address validator.
+            # Real tables contain address-zero .mol metadata, duplicate names,
+            # aliases and entries whose address does not encode the header's
+            # slave. Preserve them exactly; hardware consumers must separately
+            # select an unambiguous named resource and validate its address.
             payload = region(144 + aux + offset, size)
             result['resources'].append({'name': name, 'slave': slave,
                 'address': f'0x{address:08x}', 'priority': [p0, p1],

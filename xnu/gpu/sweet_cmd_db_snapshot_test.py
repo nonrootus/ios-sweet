@@ -82,10 +82,19 @@ rejects(mod.extract_log,log.replace('data 0010','data 0020'))
 rejects(mod.extract_log,log.replace('00000001 0c0330db','00000002 0c0330db'))
 rejects(mod.extract_log,log.replace('data 1070 2','data 1070 4'))
 for offset, value in [(0,2),(4,0),(8,2),(10,0xffff),(12,0xffff),(14,0xffff),
-                       (160,0x40010),(164,0xffff),(166,0xffff)]:
+                       (164,0xffff),(166,0xffff)]:
     data=bytearray(raw)
     struct.pack_into('<I' if offset in (0,4,160) else '<H',data,offset,value)
     rejects(mod.decode,bytes(data))
 for size in (0,8,143,167,170): rejects(mod.decode,raw[:size])
+# Valid descriptive metadata is not a hardware command address. Preserve it.
+data=bytearray(raw);struct.pack_into('<I',data,160,0)
+assert mod.decode(bytes(data))['resources'][0]['address']=='0x00000000'
+struct.pack_into('<I',data,160,0x5b00)
+assert mod.decode(bytes(data))['resources'][0]['address']=='0x00005b00'
+# Stock lookup permits repeated resource names; retain both entries.
+data=bytearray(raw);struct.pack_into('<H',data,12,48);struct.pack_into('<H',data,14,2)
+data[168:192]=raw[144:168];data[192:196]=raw[168:172]
+assert len(mod.decode(bytes(data))['resources'])==2
 (build/'fixture.log').write_text(log)
 print('PASS: exact 1054 aligned reads, last partial row, one-shot/lock/errors; checksum, missing rows and malformed database bounds')

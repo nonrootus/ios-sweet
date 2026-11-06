@@ -8,6 +8,31 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+0146 implements an opt-in first CM3 boot, ending at fresh BABEFACE before
+GX OOB, SPTPRAC or HFI initialization. `sweetgmustart=1` requires the existing
+power/clock/status flags, successful same-boot DDR handoff and `jtag=1 wfi=0`;
+it rejects the separate TCM and inactive SMMU tests. A separate persistent
+adapter installs the full SID5 map and latches memory before any startup
+write. No exit path tears down, frees, resets or retries the device. Even
+pre-start allocations remain owned until reboot.
+
+The sequencer masks/clears IRQs, enables TCM retention, writes the pinned
+48-command A618 PDC/RSC program, loads/verifies the actual 32 KiB flat image,
+sets the stock ACTIVE configuration and releases CM3 once. It rejects busy
+RSC or pending control requests, records inherited PDC enable state, and
+intentionally replaces an inherited program like stock's first driver start.
+An enabled PDC alone is not treated as proof that CM3 is executing. Firmware
+readiness has a 100 ms deadline, requires a cleared fresh result, and polls
+CM3/watchdog/fence/AHB error status while interrupts are masked. The adapter
+records SMMU fault registers and retains mappings on every outcome.
+
+The source-derived sequence model passed 138 callback failure points, and the
+composed persistent adapter passed power/reset, SMMU fault, timeout, lifetime
+and one-shot checks under ASan/UBSan. ARM64 compilation with XNU headers and
+the full patch/source checks passed. Full kernel CI and device execution are
+pending. BABEFACE would establish CM3 firmware initialization, not HFI, DMA
+translation, graphics command execution or acceleration.
+
 Offline `sweet_hfi_perf` encodes the pinned legacy 43-word frequency table
 and two-word TEST terminator for HFI_USE_REG. Input frequencies are kHz and
 votes come from the separately validated ARC calculation. Tests compare the
@@ -33,8 +58,9 @@ bindings, empty TCS banks and a reset/inactive GMU. It retains the vote until
 reboot, quarantines uncertain transactions, and never releases CM3. A request
 ACK would not prove bandwidth, firmware execution or rendering. Full XNU CI
 and mandatory source/kernel checks passed; the temporary image was sent with
-fastboot Booting OKAY. The device log is pending; this is not a complete
-shared-client interconnect implementation.
+fastboot Booting OKAY. The device log confirms all three request statuses
+0x10101, completion, cleanup rc0 and poisoned0; iOS loaded and returned to
+recovery. This is not a complete shared-client interconnect implementation.
 
 0144 prepares a complete legacy HFI bandwidth-message encoder and an opt-in
 `sweettcssnapshot=1` inventory using the existing RPMh mapping and lock.

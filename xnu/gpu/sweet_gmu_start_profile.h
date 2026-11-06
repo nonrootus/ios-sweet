@@ -1,0 +1,92 @@
+/* Register offsets relative to captured GMU/PDC resources.
+ * Pinned Xiaomi sweet_k6a-r-oss 10c33d40a11ecdc75cc1dadb5bd07894bab05815,
+ * a6xx_reg.h and A618 branch of _load_gmu_rpmh_ucode in adreno_a6xx_gmu.c.
+ * Sequence constants originate in Qualcomm's GPL-2.0-only downstream driver,
+ * Copyright (c) 2018-2019, The Linux Foundation. No phone firmware bytes. */
+#ifndef SWEET_GMU_START_PROFILE_H
+#define SWEET_GMU_START_PROFILE_H
+enum { SWEET_GMU_REG, SWEET_GMU_PDC_CFG, SWEET_GMU_PDC_SEQ };
+#define SWEET_GMU_REG_BASE 0x0506a000ull
+#define SWEET_GMU_REG_SIZE 0x31000u
+#define SWEET_GMU_PDC_CFG_BASE 0x0b290000ull
+#define SWEET_GMU_PDC_SEQ_BASE 0x0b490000ull
+#define SWEET_GMU_PDC_SIZE 0x10000u
+#define A6XX_GMU_CM3_SYSRESET 0x14000u
+#define A6XX_GMU_CM3_FW_INIT_RESULT 0x14070u
+#define A6XX_GMU_GENERAL_7 0x14730u
+#define A6XX_GMU_CM3_BOOT_CONFIG 0x14004u
+#define A6XX_GMU_HFI_QTBL_ADDR 0x14614u
+#define A6XX_GMU_HFI_QTBL_INFO 0x14610u
+#define A6XX_GMU_AHB_FENCE_RANGE_0 0x24c44u
+#define A6XX_GMU_CM3_CFG 0x140b4u
+#define A6XX_GMU_HFI_SFR_ADDR 0x14608u
+#define A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x14400u
+#define A6XX_GMU_SYS_BUS_CONFIG 0x1303cu
+#define A6XX_GMU_ICACHE_CONFIG 0x13000u
+#define A6XX_GMU_DCACHE_CONFIG 0x13004u
+#define A6XX_GMU_PWR_COL_INTER_FRAME_CTRL 0x14300u
+#define A6XX_GMU_RPMH_CTRL 0x143a0u
+#define A6XX_GMU_GPU_NAP_CTRL 0x14390u
+#define A6XX_GMU_CX_GMU_WFI_CONFIG 0x14008u
+#define A6XX_GMU_AO_HOST_INTERRUPT_MASK 0x24c18u
+#define A6XX_GMU_GMU2HOST_INTR_MASK 0x1464cu
+#define A6XX_GMU_AO_HOST_INTERRUPT_CLR 0x24c10u
+#define A6XX_GMU_GMU2HOST_INTR_CLR 0x14644u
+#define A6XX_GMU_AO_HOST_INTERRUPT_STATUS 0x24c14u
+#define A6XX_GMU_GMU2HOST_INTR_INFO 0x14648u
+#define A6XX_RSCC_SEQ_BUSY_DRV0 0x23404u
+#define A6XX_GMU_RSCC_CONTROL_REQ 0x24c1cu
+#define SWEET_GMU_RPMH_ENABLE 0x00000f11u
+#define SWEET_GMU_PDC_ENABLE 0x4500u
+struct sweet_gmu_boot_write { unsigned region; uint32_t offset, value; };
+static const struct sweet_gmu_boot_write sweet_gmu_pdc_program[] = {
+    {SWEET_GMU_REG, 0x23010u, 0x1000000u},
+    {SWEET_GMU_REG, 0x2302cu, 0x1u},
+    {SWEET_GMU_REG, 0x23038u, 0x0u},
+    {SWEET_GMU_REG, 0x23034u, 0x0u},
+    {SWEET_GMU_REG, 0x23040u, 0x0u},
+    {SWEET_GMU_REG, 0x2303cu, 0x0u},
+    {SWEET_GMU_REG, 0x23048u, 0x80000000u},
+    {SWEET_GMU_REG, 0x23044u, 0x0u},
+    {SWEET_GMU_REG, 0x23400u, 0x0u},
+    {SWEET_GMU_REG, 0x23020u, 0x4520u},
+    {SWEET_GMU_REG, 0x23024u, 0x4510u},
+    {SWEET_GMU_REG, 0x23028u, 0x4514u},
+    {SWEET_GMU_REG, 0x23600u, 0xa7a506a0u},
+    {SWEET_GMU_REG, 0x23604u, 0xa1e6a6e7u},
+    {SWEET_GMU_REG, 0x23608u, 0xa2e081e1u},
+    {SWEET_GMU_REG, 0x2360cu, 0xe9a982e2u},
+    {SWEET_GMU_REG, 0x23610u, 0x20e8a8u},
+    {SWEET_GMU_PDC_SEQ, 0x0u, 0xfebea1e1u},
+    {SWEET_GMU_PDC_SEQ, 0x4u, 0xa5a4a3a2u},
+    {SWEET_GMU_PDC_SEQ, 0x8u, 0x8382a6e0u},
+    {SWEET_GMU_PDC_SEQ, 0xcu, 0xbce3e284u},
+    {SWEET_GMU_PDC_SEQ, 0x10u, 0x2081fcu},
+    {SWEET_GMU_PDC_CFG, 0x55ccu, 0x7u},
+    {SWEET_GMU_PDC_CFG, 0x55d0u, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x55c8u, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x55d4u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x55d8u, 0x30010u},
+    {SWEET_GMU_PDC_CFG, 0x55dcu, 0x1u},
+    {SWEET_GMU_PDC_CFG, 0x55e4u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x55e8u, 0x30000u},
+    {SWEET_GMU_PDC_CFG, 0x55ecu, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x55f4u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x55f8u, 0x30090u},
+    {SWEET_GMU_PDC_CFG, 0x55fcu, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x575cu, 0x7u},
+    {SWEET_GMU_PDC_CFG, 0x5760u, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x5758u, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x5764u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x5768u, 0x30010u},
+    {SWEET_GMU_PDC_CFG, 0x576cu, 0x2u},
+    {SWEET_GMU_PDC_CFG, 0x5774u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x5778u, 0x30000u},
+    {SWEET_GMU_PDC_CFG, 0x577cu, 0x2u},
+    {SWEET_GMU_PDC_CFG, 0x5784u, 0x10108u},
+    {SWEET_GMU_PDC_CFG, 0x5788u, 0x30090u},
+    {SWEET_GMU_PDC_CFG, 0x578cu, 0x3u},
+    {SWEET_GMU_PDC_CFG, 0x4520u, 0x0u},
+    {SWEET_GMU_PDC_CFG, 0x4500u, 0x80000001u},
+};
+#endif

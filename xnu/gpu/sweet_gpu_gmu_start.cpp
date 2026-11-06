@@ -1,0 +1,227 @@
+/* One-shot first firmware boot with permanently retained SID5 memory.
+ * This is separate from the inactive SMMU diagnostic. No teardown, retry,
+ * clock release, GX/OOB, HFI initialization or GPU submission after entry.
+ * Sole early root-device owner; jtag=1,wfi=0 and successful DDR handoff required.
+ */
+#include "sweet_gmu_memory.h"
+#include <IOKit/IOLib.h>
+extern "C" {
+#include <arm/machine_routines.h>
+/* Internal declaration is hidden from the exported IOKit header view. */
+extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+#ifdef KERNEL
+#include "../../../bsd/dev/sweet_smmu_k6a.h"
+#include "../../../bsd/dev/sweet_gmu_start.h"
+#include "../../../bsd/dev/sweet_gmu_start_profile.h"
+#else
+#include "sweet_smmu_k6a.h"
+#include "sweet_gmu_start.h"
+#include "sweet_gmu_start_profile.h"
+#endif
+}
+
+struct persistent_gmu {
+    uintptr_t gcc, cc, gmu, smmu, region[3];
+    sweet_gmu_start_state boot;
+    volatile uint32_t *hfi_cpu;
+    uint32_t hfi_bytes;
+    sweet_gmu_memory *memory;
+    sweet_smmu_k6a board;
+    sweet_smmu_context context;
+    uint32_t last_offset, last_value;
+    bool checked_power;
+};
+/* Static storage preserves callbacks and pinned allocations on any ambiguous
+ * hardware failure. A failed attempt cannot be retried in the same boot. */
+static persistent_gmu probe;
+static unsigned attempted;
+
+static uint32_t mmio_read(uintptr_t address)
+{
+    uint32_t value = *reinterpret_cast<volatile uint32_t *>(address);
+    __asm__ volatile("dmb oshld" ::: "memory");
+    return value;
+}
+static void mmio_write32(uintptr_t address, uint32_t value)
+{
+    __asm__ volatile("str %w0, [%1]" :: "r"(value), "r"(address) : "memory");
+}
+static void mmio_write64(uintptr_t address, uint64_t value)
+{
+    __asm__ volatile("str %x0, [%1]" :: "r"(value), "r"(address) : "memory");
+}
+static int complete(void *)
+{
+    __asm__ volatile("dsb sy" ::: "memory");
+    return 0;
+}
+static int pause_us(void *, unsigned us)
+{
+    IODelay(us);
+    return 0;
+}
+static int read32(void *opaque, uint32_t offset, uint32_t *value)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    if (!s->smmu || !value || (offset & 3) || offset >= 0x10000) return -1;
+    s->last_offset = offset;
+    *value = mmio_read(s->smmu + offset);
+    s->last_value = *value;
+    return 0;
+}
+static int write32(void *opaque, uint32_t offset, uint32_t value)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    if (!s->smmu || (offset & 3) || offset >= 0x10000) return -1;
+    s->last_offset = offset; s->last_value = value;
+    mmio_write32(s->smmu + offset, value);
+    return 0;
+}
+static int write64(void *opaque, uint32_t offset, uint64_t value)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    /* This diagnostic reserves only context bank 0 and its two TTBRs. */
+    if (!s->smmu || (offset != 0x8020 && offset != 0x8028)) return -1;
+    s->last_offset = offset; s->last_value = static_cast<uint32_t>(value);
+    mmio_write64(s->smmu + offset, value);
+    return 0;
+}
+static int power_check(void *opaque, unsigned phase)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    /* These reads do not trap external aborts or bound a stalled bus access.
+     * Entry is permitted only after this boot's CX/memnoc/GMU-clock acquisition.
+     * Sole early-boot ownership and never-started masters are part of the call
+     * contract; status registers alone cannot prove ownership or DMA drain. */
+    uint32_t ahb = mmio_read(s->gcc + 0x004);
+    uint32_t memnoc = mmio_read(s->gcc + 0x00c);
+    if (!s->checked_power) IOLog("SWEET GMU BOOT: AHB=%08x memnoc=%08x\n", ahb, memnoc);
+    if (ahb == UINT32_MAX || (ahb & 0x80000000u) ||
+        (memnoc & 0x80000001u) != 1) return -1;
+    uint32_t cx = mmio_read(s->cc + 0x06c);
+    uint32_t cx_status = mmio_read(s->cc + 0x540);
+    if (!s->checked_power) IOLog("SWEET GMU BOOT: CX=%08x status=%08x\n", cx, cx_status);
+    if (cx == UINT32_MAX || (cx & 7) || cx_status == UINT32_MAX ||
+        !(cx_status & 0x80000000u)) return -1;
+    uint32_t clock = mmio_read(s->cc + 0x098);
+    uint32_t root = mmio_read(s->cc + 0x120);
+    uint32_t cfg = mmio_read(s->cc + 0x124);
+    if (!s->checked_power) IOLog("SWEET GMU BOOT: GMU clock=%08x root=%08x cfg=%08x\n", clock, root, cfg);
+    if ((clock & 0x80000001u) != 1 || (root & 0x80000003u) ||
+        cfg != 0x602) return -1;
+    uint32_t gx = mmio_read(s->cc + 0x00c);
+    if (!s->checked_power) IOLog("SWEET GMU BOOT: GX=%08x (requires collapsed, software control)\n", gx);
+    if ((gx & 0x80000007u) != 1) return -1;
+    /* Captured GX node has qcom,poll-cfg-gdscr: completion is in GDSCR+4,
+     * not established by GDSCR PWR_ON alone. Require DOWN and reject UP. */
+    uint32_t gx_status = mmio_read(s->cc + 0x010);
+    if (!s->checked_power) IOLog("SWEET GMU BOOT: GX completion=%08x\n", gx_status);
+    if (gx_status == UINT32_MAX || (gx_status & 0x18000u) != 0x8000u) return -1;
+    if (mmio_read(s->gmu) != (phase == 2 ? 0u : 1u) ||
+        mmio_read(s->gmu + 0x730) != (phase ? 1u : 0u)) return -1;
+    if (phase != 2 && (mmio_read(s->gmu + 0x068) != 0 ||
+        mmio_read(s->gmu + 0x070) != 0)) return -1;
+    s->checked_power = true;
+    return complete(s);
+}
+static int pin(void *opaque, uint64_t *root)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    return sweet_gmu_memory_retain_mapping(s->memory, root);
+}
+static void unpin(void *opaque)
+{
+    auto *s = static_cast<persistent_gmu *>(opaque);
+    if (sweet_gmu_memory_release_mapping(s->memory))
+        IOLog("SWEET GMU BOOT: internal reference release error\n");
+}
+
+
+extern "C" boolean_t idle_enable;
+extern "C" int sweet_gpu_firmware_get(unsigned, const void **, size_t *);
+static int stopped(void *opaque) { return power_check(opaque,0); }
+static int boot_check(void *opaque, unsigned phase)
+{
+    auto *s=static_cast<persistent_gmu *>(opaque);
+    if (phase>2 || idle_enable || power_check(s,phase) ||
+        s->context.state!=SWEET_SMMU_CONTEXT_ACTIVE || !s->context.retained) return -1;
+    uint32_t global,fsr,smr;
+    if (read32(s,0x48,&global) || read32(s,0x8058,&fsr) ||
+        read32(s,0x800,&smr)) return -1;
+    return global==0 && fsr==0x400 && smr==0x80000005 ? 0 : -1;
+}
+static int hold_memory(void *opaque)
+{
+    auto *s=static_cast<persistent_gmu *>(opaque);
+    uint64_t root=0;uint32_t hfi=0,dump=0,log=0;
+    if (boot_check(s,0) || sweet_gmu_memory_info(s->memory,&root,&hfi,&dump,&log) ||
+        root!=s->context.root_pa || hfi!=0x60100000 || dump!=0x60200000 || log!=0x60300000)
+        return -1;
+    int rc=sweet_gmu_memory_begin_execution(s->memory,&s->hfi_cpu,&s->hfi_bytes);
+    /* A successful latch is irreversible, even if these consistency checks fail. */
+    return rc || !s->hfi_cpu || s->hfi_bytes!=0x5000 ? -1 : 0;
+}
+static int boot_read(void *opaque,unsigned region,uint32_t off,uint32_t *value)
+{
+    auto *s=static_cast<persistent_gmu *>(opaque);
+    if (!value || region>2 || !s->region[region] || (off&3) ||
+        off>=(region ? SWEET_GMU_PDC_SIZE : SWEET_GMU_REG_SIZE)) return -1;
+    *value=mmio_read(s->region[region]+off);return 0;
+}
+static int boot_write(void *opaque,unsigned region,uint32_t off,uint32_t value)
+{
+    auto *s=static_cast<persistent_gmu *>(opaque);
+    if (region>2 || !s->region[region] || (off&3) ||
+        off>=(region ? SWEET_GMU_PDC_SIZE : SWEET_GMU_REG_SIZE)) return -1;
+    mmio_write32(s->region[region]+off,value);return 0;
+}
+static void boot_progress(void *,enum sweet_gmu_start_stage phase)
+{
+    IOLog("SWEET GMU BOOT: phase=%u; memory held through reboot\n",static_cast<unsigned>(phase));
+}
+static void report_faults(persistent_gmu *s)
+{
+    uint32_t global=0,fsr=0,farlo=0,farhi=0,syndrome=0;
+    (void)read32(s,0x48,&global);(void)read32(s,0x8058,&fsr);
+    (void)read32(s,0x8060,&farlo);(void)read32(s,0x8064,&farhi);
+    (void)read32(s,0x8068,&syndrome);
+    IOLog("SWEET GMU BOOT: SMMU global=%08x fsr=%08x far=%08x%08x syndrome=%08x\n",
+        global,fsr,farhi,farlo,syndrome);
+}
+extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
+{
+    if (!gcc || !cc || !gmu || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
+    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
+    const void *firmware=nullptr;size_t bytes=0;
+    IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
+    if (idle_enable || stopped(s) || sweet_gpu_firmware_get(0,&firmware,&bytes) ||
+        !firmware || bytes!=0x8000) return -3;
+    s->smmu=ml_io_map(0x05040000ull,0x10000);
+    s->region[0]=ml_io_map(SWEET_GMU_REG_BASE,SWEET_GMU_REG_SIZE);
+    s->region[1]=ml_io_map(SWEET_GMU_PDC_CFG_BASE,SWEET_GMU_PDC_SIZE);
+    s->region[2]=ml_io_map(SWEET_GMU_PDC_SEQ_BASE,SWEET_GMU_PDC_SIZE);
+    if (!s->smmu || !s->region[0] || !s->region[1] || !s->region[2]) return -2;
+    s->memory=sweet_gmu_memory_create_legacy();
+    if (!s->memory) return -2;
+    /* This sole attempt retains even failed pre-start allocations until reboot.
+     * No inactive teardown can be reached from this function. */
+    sweet_smmu_context_ops smmu_ops={s,read32,write32,write64,complete,pause_us,stopped,pin,unpin};
+    int rc=sweet_smmu_k6a_prepare(&s->board,&smmu_ops);
+    IOLog("SWEET GMU BOOT: prepare rc=%d stage=%u off=%x value=%08x\n",
+        rc,static_cast<unsigned>(s->board.stage),s->board.last_offset,s->board.last_value);
+    if (rc) return rc;
+    rc=sweet_smmu_context_install(&s->context,&smmu_ops,0,0,5,1);
+    IOLog("SWEET GMU BOOT: install rc=%d state=%u retained=%u root=%llx\n",
+        rc,static_cast<unsigned>(s->context.state),s->context.retained,
+        static_cast<unsigned long long>(s->context.root_pa));
+    if (rc) return rc;
+    sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
+    rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
+    report_faults(s);
+    IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",
+        rc,static_cast<unsigned>(s->boot.stage),s->boot.held,s->boot.release_attempted,
+        s->boot.fw_init,s->boot.host_irq,s->boot.ao_irq,s->boot.pdc_before,s->boot.last_region,s->boot.last_offset);
+    if (!rc) IOLog("SWEET GMU BOOT: fresh CM3 init BABEFACE; GX OOB and HFI not started\n");
+    IOLog("SWEET GMU BOOT: all mappings retained until reboot; no acceleration\n");
+    return rc;
+}

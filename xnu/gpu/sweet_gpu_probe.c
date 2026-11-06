@@ -18,6 +18,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
+extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t);
 void sweet_gpu_probe(void);
 extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
 extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
@@ -173,10 +174,30 @@ static void gmu_tcm_probe(vm_offset_t status, vm_offset_t gcc, vm_offset_t cc) {
 void
 sweet_gpu_probe(void)
 {
-    int enabled = 0, k6a = 0;
+    int enabled = 0, k6a = 0, requested_start = 0;
     vm_offset_t gcc;
     uint32_t state;
 
+    PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
+    if (requested_start == 1) {
+        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus"};
+        const char *conflicting[] = {"sweetgmuload", "sweetgpusmmuinit"};
+        unsigned long jtag = 0;
+        unsigned wfi_mode = 1;
+        for (unsigned i = 0; i < sizeof(required)/sizeof(required[0]); ++i) {
+            int value = 0;
+            if (!PE_parse_boot_argn(required[i], &value, sizeof(value)) || value != 1) {
+                printf("SWEET GMU BOOT: missing required boot flag %s=1\n", required[i]); return;
+            }
+        }
+        for (unsigned i = 0; i < sizeof(conflicting)/sizeof(conflicting[0]); ++i) {
+            int value = 0; PE_parse_boot_argn(conflicting[i], &value, sizeof(value));
+            if (value) { printf("SWEET GMU BOOT: conflicting boot flag %s\n", conflicting[i]); return; }
+        }
+        PE_parse_boot_argn("jtag", &jtag, sizeof(jtag));
+        PE_parse_boot_argn("wfi", &wfi_mode, sizeof(wfi_mode));
+        if (jtag != 1 || wfi_mode != 0) { printf("SWEET GMU BOOT: requires jtag=1 wfi=0\n"); return; }
+    }
     if (!PE_parse_boot_argn("sweetgpuprobe", &enabled, sizeof(enabled)) || enabled != 1 ||
         !PE_parse_boot_argn("sweetk6a", &k6a, sizeof(k6a)) || k6a != 1) {
         return;
@@ -374,7 +395,15 @@ sweet_gpu_probe(void)
                                         if (!gmu_status_ok || gmu_reset != 1u || gmu_busy || gmu_init ||
                                             gmu_retention || jtag != 1 || wfi_mode != 0 || load_arg || smmu_arg)
                                             printf("SWEET GPU: BCM handoff skipped: reset, idle flags or conflicting probe\n");
-                                        else printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", sweet_rpmh_gpu_bw_bootstrap());
+                                        else {
+                                            int bw_rc = sweet_rpmh_gpu_bw_bootstrap();
+                                            printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", bw_rc);
+                                            if (requested_start == 1) {
+                                                if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
+                                                else printf("SWEET GMU BOOT: entry rc=%d\n", sweet_gpu_gmu_start(gcc, cc, gmu));
+                                                return; /* no other GPU diagnostics after an attempted start */
+                                            }
+                                        }
                                     }
                                     int gmu_load = 0, smmu_init = 0;
                                     PE_parse_boot_argn("sweetgmuload", &gmu_load, sizeof(gmu_load));

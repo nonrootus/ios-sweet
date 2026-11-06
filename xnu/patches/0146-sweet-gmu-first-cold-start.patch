@@ -1,0 +1,655 @@
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_start.c
+@@ -0,0 +1,129 @@
++#include "sweet_gmu_start.h"
++#include "sweet_gmu_start_profile.h"
++#include "sweet_gpu_gmu.h"
++
++struct start_io {
++    struct sweet_gmu_start_state *s;
++    const struct sweet_gmu_start_ops *o;
++};
++static void stage(struct start_io *io, enum sweet_gmu_start_stage value)
++{
++    io->s->stage=value;
++    if (io->o->progress) io->o->progress(io->o->ctx,value);
++}
++static int rd(struct start_io *io,unsigned region,uint32_t off,uint32_t *value)
++{
++    io->s->last_region=region;io->s->last_offset=off;
++    return io->o->read32(io->o->ctx,region,off,value);
++}
++static int wr(struct start_io *io,unsigned region,uint32_t off,uint32_t value)
++{
++    io->s->last_region=region;io->s->last_offset=off;
++    return io->o->write32(io->o->ctx,region,off,value);
++}
++static int sync_write(struct start_io *io,uint32_t off,uint32_t value)
++{
++    uint32_t actual;
++    return wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
++        rd(io,SWEET_GMU_REG,off,&actual) || actual!=value;
++}
++static int tcm_read(void *p,uint32_t off,uint32_t *value)
++{
++    return rd(p,SWEET_GMU_REG,off,value);
++}
++static int tcm_write(void *p,uint32_t off,uint32_t value)
++{
++    return wr(p,SWEET_GMU_REG,off,value);
++}
++static int irq_status(struct start_io *io)
++{
++    if (rd(io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_INFO,&io->s->host_irq) ||
++        rd(io,SWEET_GMU_REG,A6XX_GMU_AO_HOST_INTERRUPT_STATUS,&io->s->ao_irq) ||
++        io->s->host_irq==UINT32_MAX || io->s->ao_irq==UINT32_MAX) return -2;
++    return (io->s->host_irq&(1u<<15)) || (io->s->ao_irq&0x29u) ? -6 : 0;
++}
++int sweet_gmu_cold_start(struct sweet_gmu_start_state *s,
++    const struct sweet_gmu_start_ops *o,const void *firmware,size_t bytes)
++{
++    if (!s || !o || !o->read32 || !o->write32 || !o->barrier || !o->delay_us ||
++        !o->check || !o->hold_memory || !firmware || bytes!=0x8000 || s->attempted)
++        return -1;
++    s->attempted=1;
++    struct start_io io={s,o};
++    uint32_t value, rpmh;
++    stage(&io,SWEET_GMU_START_PREFLIGHT);
++    if (o->check(o->ctx,0)) return -3;
++    if (rd(&io,SWEET_GMU_PDC_CFG,SWEET_GMU_PDC_ENABLE,&s->pdc_before) ||
++        rd(&io,SWEET_GMU_REG,A6XX_RSCC_SEQ_BUSY_DRV0,&value)) return -2;
++    if (s->pdc_before==UINT32_MAX || value) return -3;
++    if (rd(&io,SWEET_GMU_REG,A6XX_GMU_RSCC_CONTROL_REQ,&value)) return -2;
++    if (value) return -3;
++    /* First driver cold start intentionally replaces an inherited PDC program,
++     * as stock does when its software GMU_BOOT_INIT_DONE flag is clear.
++     * ENABLE alone is not evidence that CM3 or the sequencer is running. */
++    /* Reject inherited low-power requests for this explicit ACTIVE profile.
++     * Do not silently enable min-bandwidth or NAP during first bring-up. */
++    if (rd(&io,SWEET_GMU_REG,A6XX_GMU_RPMH_CTRL,&rpmh) ||
++        rd(&io,SWEET_GMU_REG,A6XX_GMU_GPU_NAP_CTRL,&value)) return -2;
++    if (rpmh==UINT32_MAX || value==UINT32_MAX || (rpmh&(1u<<12)) || (value&1)) return -3;
++    if (o->hold_memory(o->ctx)) return -3;
++    s->held=1;
++    stage(&io,SWEET_GMU_START_HELD);
++    stage(&io,SWEET_GMU_START_IRQ);
++    /* W1C registers and reserved mask bits do not have ordinary readback. */
++    if (wr(&io,SWEET_GMU_REG,A6XX_GMU_AO_HOST_INTERRUPT_MASK,UINT32_MAX) ||
++        wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_MASK,UINT32_MAX) ||
++        wr(&io,SWEET_GMU_REG,A6XX_GMU_AO_HOST_INTERRUPT_CLR,UINT32_MAX) ||
++        wr(&io,SWEET_GMU_REG,A6XX_GMU_GMU2HOST_INTR_CLR,UINT32_MAX) ||
++        o->barrier(o->ctx) || sync_write(&io,A6XX_GMU_GENERAL_7,1)) return -2;
++    stage(&io,SWEET_GMU_START_PDC);
++    for (size_t i=0;i<sizeof(sweet_gmu_pdc_program)/sizeof(sweet_gmu_pdc_program[0]);++i) {
++        const struct sweet_gmu_boot_write *w=&sweet_gmu_pdc_program[i];
++        if (wr(&io,w->region,w->offset,w->value)) return -2;
++    }
++    if (o->barrier(o->ctx)) return -2;
++    stage(&io,SWEET_GMU_START_TCM);
++    const struct sweet_gpu_gmu_ops tcm={&io,tcm_read,tcm_write};
++    size_t done=0;
++    if (sweet_gpu_gmu_load_legacy(&tcm,firmware,bytes,&done) || done!=bytes ||
++        o->barrier(o->ctx)) return -2;
++    if (sweet_gpu_gmu_verify_legacy(&tcm,firmware,bytes,&done) || done!=bytes) return -5;
++    stage(&io,SWEET_GMU_START_CONFIG);
++    if (sync_write(&io,A6XX_GMU_CM3_FW_INIT_RESULT,0) ||
++        sync_write(&io,A6XX_GMU_CM3_BOOT_CONFIG,2) ||
++        sync_write(&io,A6XX_GMU_HFI_QTBL_ADDR,0x60100000) ||
++        sync_write(&io,A6XX_GMU_HFI_QTBL_INFO,1) ||
++        sync_write(&io,A6XX_GMU_AHB_FENCE_RANGE_0,0x80a008a0) ||
++        sync_write(&io,A6XX_GMU_CM3_CFG,0x4052) ||
++        sync_write(&io,A6XX_GMU_HFI_SFR_ADDR,0x06018000) ||
++        sync_write(&io,A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000) ||
++        sync_write(&io,A6XX_GMU_SYS_BUS_CONFIG,1) ||
++        sync_write(&io,A6XX_GMU_ICACHE_CONFIG,1) ||
++        sync_write(&io,A6XX_GMU_DCACHE_CONFIG,1) ||
++        sync_write(&io,A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400) ||
++        sync_write(&io,A6XX_GMU_RPMH_CTRL,rpmh|SWEET_GMU_RPMH_ENABLE) ||
++        sync_write(&io,A6XX_GMU_CX_GMU_WFI_CONFIG,0)) return -2;
++    if (o->check(o->ctx,1)) return -3;
++    int error=irq_status(&io);
++    if (error) return error;
++    /* Fresh completion required; stale BABEFACE must never pass. */
++    if (rd(&io,SWEET_GMU_REG,A6XX_GMU_CM3_FW_INIT_RESULT,&value)) return -2;
++    if (value) return -3;
++    stage(&io,SWEET_GMU_START_RELEASE);
++    s->release_attempted=1; /* a failed callback may already have reached MMIO */
++    if (wr(&io,SWEET_GMU_REG,A6XX_GMU_CM3_SYSRESET,0) || o->barrier(o->ctx)) return -2;
++    for (unsigned elapsed=0;elapsed<=100000;elapsed+=10) {
++        if (rd(&io,SWEET_GMU_REG,A6XX_GMU_CM3_FW_INIT_RESULT,&s->fw_init)) return -2;
++        if (s->fw_init==UINT32_MAX) return -2;
++        error=irq_status(&io);
++        if (error) return error;
++        if (s->fw_init==0xbabeface) {
++            if (o->check(o->ctx,2)) return -3;
++            stage(&io,SWEET_GMU_START_READY);
++            return 0;
++        }
++        if (elapsed==100000) break;
++        if (o->delay_us(o->ctx,10)) return -2;
++    }
++    return -4;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_start.h
+@@ -0,0 +1,46 @@
++#ifndef SWEET_GMU_START_H
++#define SWEET_GMU_START_H
++#include <stdint.h>
++#include <stddef.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* First cold start for the pinned A618 legacy profile. Serialized sole owner,
++ * DDR/CX/clocks acquired, complete SID5 memory installed before entry.
++ * All callbacks/storage remain resident through reboot. This API has no stop,
++ * unmap, rollback or retry. It ends at firmware readiness, before GX OOB/HFI.
++ * Memory is permanently latched before any register write, even on failure. */
++enum sweet_gmu_start_stage {
++    SWEET_GMU_START_EMPTY, SWEET_GMU_START_PREFLIGHT,
++    SWEET_GMU_START_HELD, SWEET_GMU_START_IRQ,
++    SWEET_GMU_START_PDC, SWEET_GMU_START_TCM,
++    SWEET_GMU_START_CONFIG, SWEET_GMU_START_RELEASE,
++    SWEET_GMU_START_READY
++};
++struct sweet_gmu_start_ops {
++    void *ctx;
++    int (*read32)(void *, unsigned region, uint32_t offset, uint32_t *);
++    int (*write32)(void *, unsigned region, uint32_t offset, uint32_t);
++    int (*barrier)(void *);
++    int (*delay_us)(void *, unsigned);
++    /* phase0: reset/inactive and retention0, phase1: reset/retention1,
++     * phase2: CM3 running. All require owned powered mappings and no faults. */
++    int (*check)(void *, unsigned phase);
++    int (*hold_memory)(void *); /* monotonic retention until reboot */
++    void (*progress)(void *, enum sweet_gmu_start_stage);
++};
++struct sweet_gmu_start_state {
++    unsigned attempted, held, release_attempted;
++    enum sweet_gmu_start_stage stage;
++    uint32_t fw_init, host_irq, ao_irq, pdc_before, last_region, last_offset;
++};
++/* 0: fresh BABEFACE + postcheck. -1 invalid/repeated, -2 callback/I/O error,
++ * -3 precondition/profile mismatch, -4 deadline, -5 TCM verification failure,
++ * -6 CM3/watchdog/fence/AHB error reported with IRQs masked.
++ * No result establishes HFI exchange, translated DMA or GPU rendering. */
++int sweet_gmu_cold_start(struct sweet_gmu_start_state *,
++    const struct sweet_gmu_start_ops *, const void *firmware, size_t bytes);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_start_profile.h
+@@ -0,0 +1,92 @@
++/* Register offsets relative to captured GMU/PDC resources.
++ * Pinned Xiaomi sweet_k6a-r-oss 10c33d40a11ecdc75cc1dadb5bd07894bab05815,
++ * a6xx_reg.h and A618 branch of _load_gmu_rpmh_ucode in adreno_a6xx_gmu.c.
++ * Sequence constants originate in Qualcomm's GPL-2.0-only downstream driver,
++ * Copyright (c) 2018-2019, The Linux Foundation. No phone firmware bytes. */
++#ifndef SWEET_GMU_START_PROFILE_H
++#define SWEET_GMU_START_PROFILE_H
++enum { SWEET_GMU_REG, SWEET_GMU_PDC_CFG, SWEET_GMU_PDC_SEQ };
++#define SWEET_GMU_REG_BASE 0x0506a000ull
++#define SWEET_GMU_REG_SIZE 0x31000u
++#define SWEET_GMU_PDC_CFG_BASE 0x0b290000ull
++#define SWEET_GMU_PDC_SEQ_BASE 0x0b490000ull
++#define SWEET_GMU_PDC_SIZE 0x10000u
++#define A6XX_GMU_CM3_SYSRESET 0x14000u
++#define A6XX_GMU_CM3_FW_INIT_RESULT 0x14070u
++#define A6XX_GMU_GENERAL_7 0x14730u
++#define A6XX_GMU_CM3_BOOT_CONFIG 0x14004u
++#define A6XX_GMU_HFI_QTBL_ADDR 0x14614u
++#define A6XX_GMU_HFI_QTBL_INFO 0x14610u
++#define A6XX_GMU_AHB_FENCE_RANGE_0 0x24c44u
++#define A6XX_GMU_CM3_CFG 0x140b4u
++#define A6XX_GMU_HFI_SFR_ADDR 0x14608u
++#define A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG 0x14400u
++#define A6XX_GMU_SYS_BUS_CONFIG 0x1303cu
++#define A6XX_GMU_ICACHE_CONFIG 0x13000u
++#define A6XX_GMU_DCACHE_CONFIG 0x13004u
++#define A6XX_GMU_PWR_COL_INTER_FRAME_CTRL 0x14300u
++#define A6XX_GMU_RPMH_CTRL 0x143a0u
++#define A6XX_GMU_GPU_NAP_CTRL 0x14390u
++#define A6XX_GMU_CX_GMU_WFI_CONFIG 0x14008u
++#define A6XX_GMU_AO_HOST_INTERRUPT_MASK 0x24c18u
++#define A6XX_GMU_GMU2HOST_INTR_MASK 0x1464cu
++#define A6XX_GMU_AO_HOST_INTERRUPT_CLR 0x24c10u
++#define A6XX_GMU_GMU2HOST_INTR_CLR 0x14644u
++#define A6XX_GMU_AO_HOST_INTERRUPT_STATUS 0x24c14u
++#define A6XX_GMU_GMU2HOST_INTR_INFO 0x14648u
++#define A6XX_RSCC_SEQ_BUSY_DRV0 0x23404u
++#define A6XX_GMU_RSCC_CONTROL_REQ 0x24c1cu
++#define SWEET_GMU_RPMH_ENABLE 0x00000f11u
++#define SWEET_GMU_PDC_ENABLE 0x4500u
++struct sweet_gmu_boot_write { unsigned region; uint32_t offset, value; };
++static const struct sweet_gmu_boot_write sweet_gmu_pdc_program[] = {
++    {SWEET_GMU_REG, 0x23010u, 0x1000000u},
++    {SWEET_GMU_REG, 0x2302cu, 0x1u},
++    {SWEET_GMU_REG, 0x23038u, 0x0u},
++    {SWEET_GMU_REG, 0x23034u, 0x0u},
++    {SWEET_GMU_REG, 0x23040u, 0x0u},
++    {SWEET_GMU_REG, 0x2303cu, 0x0u},
++    {SWEET_GMU_REG, 0x23048u, 0x80000000u},
++    {SWEET_GMU_REG, 0x23044u, 0x0u},
++    {SWEET_GMU_REG, 0x23400u, 0x0u},
++    {SWEET_GMU_REG, 0x23020u, 0x4520u},
++    {SWEET_GMU_REG, 0x23024u, 0x4510u},
++    {SWEET_GMU_REG, 0x23028u, 0x4514u},
++    {SWEET_GMU_REG, 0x23600u, 0xa7a506a0u},
++    {SWEET_GMU_REG, 0x23604u, 0xa1e6a6e7u},
++    {SWEET_GMU_REG, 0x23608u, 0xa2e081e1u},
++    {SWEET_GMU_REG, 0x2360cu, 0xe9a982e2u},
++    {SWEET_GMU_REG, 0x23610u, 0x20e8a8u},
++    {SWEET_GMU_PDC_SEQ, 0x0u, 0xfebea1e1u},
++    {SWEET_GMU_PDC_SEQ, 0x4u, 0xa5a4a3a2u},
++    {SWEET_GMU_PDC_SEQ, 0x8u, 0x8382a6e0u},
++    {SWEET_GMU_PDC_SEQ, 0xcu, 0xbce3e284u},
++    {SWEET_GMU_PDC_SEQ, 0x10u, 0x2081fcu},
++    {SWEET_GMU_PDC_CFG, 0x55ccu, 0x7u},
++    {SWEET_GMU_PDC_CFG, 0x55d0u, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x55c8u, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x55d4u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x55d8u, 0x30010u},
++    {SWEET_GMU_PDC_CFG, 0x55dcu, 0x1u},
++    {SWEET_GMU_PDC_CFG, 0x55e4u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x55e8u, 0x30000u},
++    {SWEET_GMU_PDC_CFG, 0x55ecu, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x55f4u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x55f8u, 0x30090u},
++    {SWEET_GMU_PDC_CFG, 0x55fcu, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x575cu, 0x7u},
++    {SWEET_GMU_PDC_CFG, 0x5760u, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x5758u, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x5764u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x5768u, 0x30010u},
++    {SWEET_GMU_PDC_CFG, 0x576cu, 0x2u},
++    {SWEET_GMU_PDC_CFG, 0x5774u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x5778u, 0x30000u},
++    {SWEET_GMU_PDC_CFG, 0x577cu, 0x2u},
++    {SWEET_GMU_PDC_CFG, 0x5784u, 0x10108u},
++    {SWEET_GMU_PDC_CFG, 0x5788u, 0x30090u},
++    {SWEET_GMU_PDC_CFG, 0x578cu, 0x3u},
++    {SWEET_GMU_PDC_CFG, 0x4520u, 0x0u},
++    {SWEET_GMU_PDC_CFG, 0x4500u, 0x80000001u},
++};
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_perf.c
+@@ -0,0 +1,39 @@
++#include "sweet_hfi_perf.h"
++#include "sweet_hfi_codec.h"
++static int valid(const struct sweet_hfi_perf_pair *v, unsigned n)
++{
++    if (v[0].vote || v[0].frequency_khz) return 0;
++    for (unsigned i = 1; i < n; ++i) {
++        if (v[i].frequency_khz <= v[i-1].frequency_khz ||
++            !(v[i].vote >> 16) || (v[i].vote & 0x0000f0f0u)) return 0;
++    }
++    return 1;
++}
++int sweet_hfi_perf_encode(uint32_t *out, size_t cap, uint16_t seq,
++    const struct sweet_hfi_perf_table *t)
++{
++    uint32_t header;
++    if (!out || !t || cap < SWEET_HFI_PERF_WORDS ||
++        sweet_hfi_command_header(SWEET_HFI_PERF_COMMAND,seq,SWEET_HFI_PERF_WORDS,&header)) return -1;
++    const uintptr_t dst=(uintptr_t)out, src=(uintptr_t)t;
++    const size_t bytes=SWEET_HFI_PERF_WORDS*sizeof(*out);
++    if (dst>UINTPTR_MAX-bytes || src>UINTPTR_MAX-sizeof(*t) ||
++        (dst<src+sizeof(*t) && src<dst+bytes) ||
++        !t->gpu_count || t->gpu_count>16 || !t->gmu_count || t->gmu_count>4 ||
++        !valid(t->gpu,t->gpu_count) || !valid(t->gmu,t->gmu_count)) return -1;
++    for (unsigned i=0;i<SWEET_HFI_PERF_WORDS;++i) out[i]=0;
++    out[0]=header;out[1]=t->gpu_count;out[2]=t->gmu_count;
++    for (unsigned i=0;i<t->gpu_count;++i) {
++        out[3+2*i]=t->gpu[i].vote;out[4+2*i]=t->gpu[i].frequency_khz;
++    }
++    for (unsigned i=0;i<t->gmu_count;++i) {
++        out[35+2*i]=t->gmu[i].vote;out[36+2*i]=t->gmu[i].frequency_khz;
++    }
++    return 0;
++}
++int sweet_hfi_v1_test(uint32_t *out, size_t cap, uint16_t seq)
++{
++    uint32_t header;
++    if (!out || cap<2 || sweet_hfi_command_header(SWEET_HFI_TEST_COMMAND,seq,2,&header)) return -1;
++    out[0]=header;out[1]=0;return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_perf.h
+@@ -0,0 +1,24 @@
++#ifndef SWEET_HFI_PERF_H
++#define SWEET_HFI_PERF_H
++#include <stdint.h>
++#include <stddef.h>
++/* Pinned legacy hfi_dcvstable_v1_cmd, not the later ACD-bearing format. */
++#define SWEET_HFI_PERF_WORDS 43u
++#define SWEET_HFI_PERF_COMMAND 4u
++#define SWEET_HFI_TEST_COMMAND 5u
++struct sweet_hfi_perf_pair { uint32_t vote, frequency_khz; };
++struct sweet_hfi_perf_table {
++    uint32_t gpu_count, gmu_count;
++    struct sweet_hfi_perf_pair gpu[16], gmu[4];
++};
++/* Offline codec only. Caller chooses supported OPPs and derives votes from
++ * the real ARC tables. Frequencies are kHz (stock uses Hz / 1000), not Hz.
++ * Input must start with the off entry and ascend. No hardware is accessed.
++ * Caller must verify the firmware uses legacy HFI major < 2 and that its
++ * selected OPP/ARC tables provide the required zero-frequency/zero-vote entry.
++ * Nonoverlapping input/output; errors leave output unchanged, padding zero. */
++int sweet_hfi_perf_encode(uint32_t *, size_t, uint16_t,
++    const struct sweet_hfi_perf_table *);
++/* Legacy A618 HFI_USE_REG terminator; this encodes TEST, not CORE_FW_START. */
++int sweet_hfi_v1_test(uint32_t *, size_t, uint16_t);
++#endif
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -18,6 +18,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
++extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t);
+ void sweet_gpu_probe(void);
+ extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
+ extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
+@@ -173,10 +174,30 @@
+ void
+ sweet_gpu_probe(void)
+ {
+-    int enabled = 0, k6a = 0;
++    int enabled = 0, k6a = 0, requested_start = 0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
++    PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
++    if (requested_start == 1) {
++        const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus"};
++        const char *conflicting[] = {"sweetgmuload", "sweetgpusmmuinit"};
++        unsigned long jtag = 0;
++        unsigned wfi_mode = 1;
++        for (unsigned i = 0; i < sizeof(required)/sizeof(required[0]); ++i) {
++            int value = 0;
++            if (!PE_parse_boot_argn(required[i], &value, sizeof(value)) || value != 1) {
++                printf("SWEET GMU BOOT: missing required boot flag %s=1\n", required[i]); return;
++            }
++        }
++        for (unsigned i = 0; i < sizeof(conflicting)/sizeof(conflicting[0]); ++i) {
++            int value = 0; PE_parse_boot_argn(conflicting[i], &value, sizeof(value));
++            if (value) { printf("SWEET GMU BOOT: conflicting boot flag %s\n", conflicting[i]); return; }
++        }
++        PE_parse_boot_argn("jtag", &jtag, sizeof(jtag));
++        PE_parse_boot_argn("wfi", &wfi_mode, sizeof(wfi_mode));
++        if (jtag != 1 || wfi_mode != 0) { printf("SWEET GMU BOOT: requires jtag=1 wfi=0\n"); return; }
++    }
+     if (!PE_parse_boot_argn("sweetgpuprobe", &enabled, sizeof(enabled)) || enabled != 1 ||
+         !PE_parse_boot_argn("sweetk6a", &k6a, sizeof(k6a)) || k6a != 1) {
+         return;
+@@ -374,7 +395,15 @@
+                                         if (!gmu_status_ok || gmu_reset != 1u || gmu_busy || gmu_init ||
+                                             gmu_retention || jtag != 1 || wfi_mode != 0 || load_arg || smmu_arg)
+                                             printf("SWEET GPU: BCM handoff skipped: reset, idle flags or conflicting probe\n");
+-                                        else printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", sweet_rpmh_gpu_bw_bootstrap());
++                                        else {
++                                            int bw_rc = sweet_rpmh_gpu_bw_bootstrap();
++                                            printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", bw_rc);
++                                            if (requested_start == 1) {
++                                                if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
++                                                else printf("SWEET GMU BOOT: entry rc=%d\n", sweet_gpu_gmu_start(gcc, cc, gmu));
++                                                return; /* no other GPU diagnostics after an attempted start */
++                                            }
++                                        }
+                                     }
+                                     int gmu_load = 0, smmu_init = 0;
+                                     PE_parse_boot_argn("sweetgmuload", &gmu_load, sizeof(gmu_load));
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -0,0 +1,227 @@
++/* One-shot first firmware boot with permanently retained SID5 memory.
++ * This is separate from the inactive SMMU diagnostic. No teardown, retry,
++ * clock release, GX/OOB, HFI initialization or GPU submission after entry.
++ * Sole early root-device owner; jtag=1,wfi=0 and successful DDR handoff required.
++ */
++#include "sweet_gmu_memory.h"
++#include <IOKit/IOLib.h>
++extern "C" {
++#include <arm/machine_routines.h>
++/* Internal declaration is hidden from the exported IOKit header view. */
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++#ifdef KERNEL
++#include "../../../bsd/dev/sweet_smmu_k6a.h"
++#include "../../../bsd/dev/sweet_gmu_start.h"
++#include "../../../bsd/dev/sweet_gmu_start_profile.h"
++#else
++#include "sweet_smmu_k6a.h"
++#include "sweet_gmu_start.h"
++#include "sweet_gmu_start_profile.h"
++#endif
++}
++
++struct persistent_gmu {
++    uintptr_t gcc, cc, gmu, smmu, region[3];
++    sweet_gmu_start_state boot;
++    volatile uint32_t *hfi_cpu;
++    uint32_t hfi_bytes;
++    sweet_gmu_memory *memory;
++    sweet_smmu_k6a board;
++    sweet_smmu_context context;
++    uint32_t last_offset, last_value;
++    bool checked_power;
++};
++/* Static storage preserves callbacks and pinned allocations on any ambiguous
++ * hardware failure. A failed attempt cannot be retried in the same boot. */
++static persistent_gmu probe;
++static unsigned attempted;
++
++static uint32_t mmio_read(uintptr_t address)
++{
++    uint32_t value = *reinterpret_cast<volatile uint32_t *>(address);
++    __asm__ volatile("dmb oshld" ::: "memory");
++    return value;
++}
++static void mmio_write32(uintptr_t address, uint32_t value)
++{
++    __asm__ volatile("str %w0, [%1]" :: "r"(value), "r"(address) : "memory");
++}
++static void mmio_write64(uintptr_t address, uint64_t value)
++{
++    __asm__ volatile("str %x0, [%1]" :: "r"(value), "r"(address) : "memory");
++}
++static int complete(void *)
++{
++    __asm__ volatile("dsb sy" ::: "memory");
++    return 0;
++}
++static int pause_us(void *, unsigned us)
++{
++    IODelay(us);
++    return 0;
++}
++static int read32(void *opaque, uint32_t offset, uint32_t *value)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    if (!s->smmu || !value || (offset & 3) || offset >= 0x10000) return -1;
++    s->last_offset = offset;
++    *value = mmio_read(s->smmu + offset);
++    s->last_value = *value;
++    return 0;
++}
++static int write32(void *opaque, uint32_t offset, uint32_t value)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    if (!s->smmu || (offset & 3) || offset >= 0x10000) return -1;
++    s->last_offset = offset; s->last_value = value;
++    mmio_write32(s->smmu + offset, value);
++    return 0;
++}
++static int write64(void *opaque, uint32_t offset, uint64_t value)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    /* This diagnostic reserves only context bank 0 and its two TTBRs. */
++    if (!s->smmu || (offset != 0x8020 && offset != 0x8028)) return -1;
++    s->last_offset = offset; s->last_value = static_cast<uint32_t>(value);
++    mmio_write64(s->smmu + offset, value);
++    return 0;
++}
++static int power_check(void *opaque, unsigned phase)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    /* These reads do not trap external aborts or bound a stalled bus access.
++     * Entry is permitted only after this boot's CX/memnoc/GMU-clock acquisition.
++     * Sole early-boot ownership and never-started masters are part of the call
++     * contract; status registers alone cannot prove ownership or DMA drain. */
++    uint32_t ahb = mmio_read(s->gcc + 0x004);
++    uint32_t memnoc = mmio_read(s->gcc + 0x00c);
++    if (!s->checked_power) IOLog("SWEET GMU BOOT: AHB=%08x memnoc=%08x\n", ahb, memnoc);
++    if (ahb == UINT32_MAX || (ahb & 0x80000000u) ||
++        (memnoc & 0x80000001u) != 1) return -1;
++    uint32_t cx = mmio_read(s->cc + 0x06c);
++    uint32_t cx_status = mmio_read(s->cc + 0x540);
++    if (!s->checked_power) IOLog("SWEET GMU BOOT: CX=%08x status=%08x\n", cx, cx_status);
++    if (cx == UINT32_MAX || (cx & 7) || cx_status == UINT32_MAX ||
++        !(cx_status & 0x80000000u)) return -1;
++    uint32_t clock = mmio_read(s->cc + 0x098);
++    uint32_t root = mmio_read(s->cc + 0x120);
++    uint32_t cfg = mmio_read(s->cc + 0x124);
++    if (!s->checked_power) IOLog("SWEET GMU BOOT: GMU clock=%08x root=%08x cfg=%08x\n", clock, root, cfg);
++    if ((clock & 0x80000001u) != 1 || (root & 0x80000003u) ||
++        cfg != 0x602) return -1;
++    uint32_t gx = mmio_read(s->cc + 0x00c);
++    if (!s->checked_power) IOLog("SWEET GMU BOOT: GX=%08x (requires collapsed, software control)\n", gx);
++    if ((gx & 0x80000007u) != 1) return -1;
++    /* Captured GX node has qcom,poll-cfg-gdscr: completion is in GDSCR+4,
++     * not established by GDSCR PWR_ON alone. Require DOWN and reject UP. */
++    uint32_t gx_status = mmio_read(s->cc + 0x010);
++    if (!s->checked_power) IOLog("SWEET GMU BOOT: GX completion=%08x\n", gx_status);
++    if (gx_status == UINT32_MAX || (gx_status & 0x18000u) != 0x8000u) return -1;
++    if (mmio_read(s->gmu) != (phase == 2 ? 0u : 1u) ||
++        mmio_read(s->gmu + 0x730) != (phase ? 1u : 0u)) return -1;
++    if (phase != 2 && (mmio_read(s->gmu + 0x068) != 0 ||
++        mmio_read(s->gmu + 0x070) != 0)) return -1;
++    s->checked_power = true;
++    return complete(s);
++}
++static int pin(void *opaque, uint64_t *root)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    return sweet_gmu_memory_retain_mapping(s->memory, root);
++}
++static void unpin(void *opaque)
++{
++    auto *s = static_cast<persistent_gmu *>(opaque);
++    if (sweet_gmu_memory_release_mapping(s->memory))
++        IOLog("SWEET GMU BOOT: internal reference release error\n");
++}
++
++
++extern "C" boolean_t idle_enable;
++extern "C" int sweet_gpu_firmware_get(unsigned, const void **, size_t *);
++static int stopped(void *opaque) { return power_check(opaque,0); }
++static int boot_check(void *opaque, unsigned phase)
++{
++    auto *s=static_cast<persistent_gmu *>(opaque);
++    if (phase>2 || idle_enable || power_check(s,phase) ||
++        s->context.state!=SWEET_SMMU_CONTEXT_ACTIVE || !s->context.retained) return -1;
++    uint32_t global,fsr,smr;
++    if (read32(s,0x48,&global) || read32(s,0x8058,&fsr) ||
++        read32(s,0x800,&smr)) return -1;
++    return global==0 && fsr==0x400 && smr==0x80000005 ? 0 : -1;
++}
++static int hold_memory(void *opaque)
++{
++    auto *s=static_cast<persistent_gmu *>(opaque);
++    uint64_t root=0;uint32_t hfi=0,dump=0,log=0;
++    if (boot_check(s,0) || sweet_gmu_memory_info(s->memory,&root,&hfi,&dump,&log) ||
++        root!=s->context.root_pa || hfi!=0x60100000 || dump!=0x60200000 || log!=0x60300000)
++        return -1;
++    int rc=sweet_gmu_memory_begin_execution(s->memory,&s->hfi_cpu,&s->hfi_bytes);
++    /* A successful latch is irreversible, even if these consistency checks fail. */
++    return rc || !s->hfi_cpu || s->hfi_bytes!=0x5000 ? -1 : 0;
++}
++static int boot_read(void *opaque,unsigned region,uint32_t off,uint32_t *value)
++{
++    auto *s=static_cast<persistent_gmu *>(opaque);
++    if (!value || region>2 || !s->region[region] || (off&3) ||
++        off>=(region ? SWEET_GMU_PDC_SIZE : SWEET_GMU_REG_SIZE)) return -1;
++    *value=mmio_read(s->region[region]+off);return 0;
++}
++static int boot_write(void *opaque,unsigned region,uint32_t off,uint32_t value)
++{
++    auto *s=static_cast<persistent_gmu *>(opaque);
++    if (region>2 || !s->region[region] || (off&3) ||
++        off>=(region ? SWEET_GMU_PDC_SIZE : SWEET_GMU_REG_SIZE)) return -1;
++    mmio_write32(s->region[region]+off,value);return 0;
++}
++static void boot_progress(void *,enum sweet_gmu_start_stage phase)
++{
++    IOLog("SWEET GMU BOOT: phase=%u; memory held through reboot\n",static_cast<unsigned>(phase));
++}
++static void report_faults(persistent_gmu *s)
++{
++    uint32_t global=0,fsr=0,farlo=0,farhi=0,syndrome=0;
++    (void)read32(s,0x48,&global);(void)read32(s,0x8058,&fsr);
++    (void)read32(s,0x8060,&farlo);(void)read32(s,0x8064,&farhi);
++    (void)read32(s,0x8068,&syndrome);
++    IOLog("SWEET GMU BOOT: SMMU global=%08x fsr=%08x far=%08x%08x syndrome=%08x\n",
++        global,fsr,farhi,farlo,syndrome);
++}
++extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
++{
++    if (!gcc || !cc || !gmu || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
++    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
++    const void *firmware=nullptr;size_t bytes=0;
++    IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
++    if (idle_enable || stopped(s) || sweet_gpu_firmware_get(0,&firmware,&bytes) ||
++        !firmware || bytes!=0x8000) return -3;
++    s->smmu=ml_io_map(0x05040000ull,0x10000);
++    s->region[0]=ml_io_map(SWEET_GMU_REG_BASE,SWEET_GMU_REG_SIZE);
++    s->region[1]=ml_io_map(SWEET_GMU_PDC_CFG_BASE,SWEET_GMU_PDC_SIZE);
++    s->region[2]=ml_io_map(SWEET_GMU_PDC_SEQ_BASE,SWEET_GMU_PDC_SIZE);
++    if (!s->smmu || !s->region[0] || !s->region[1] || !s->region[2]) return -2;
++    s->memory=sweet_gmu_memory_create_legacy();
++    if (!s->memory) return -2;
++    /* This sole attempt retains even failed pre-start allocations until reboot.
++     * No inactive teardown can be reached from this function. */
++    sweet_smmu_context_ops smmu_ops={s,read32,write32,write64,complete,pause_us,stopped,pin,unpin};
++    int rc=sweet_smmu_k6a_prepare(&s->board,&smmu_ops);
++    IOLog("SWEET GMU BOOT: prepare rc=%d stage=%u off=%x value=%08x\n",
++        rc,static_cast<unsigned>(s->board.stage),s->board.last_offset,s->board.last_value);
++    if (rc) return rc;
++    rc=sweet_smmu_context_install(&s->context,&smmu_ops,0,0,5,1);
++    IOLog("SWEET GMU BOOT: install rc=%d state=%u retained=%u root=%llx\n",
++        rc,static_cast<unsigned>(s->context.state),s->context.retained,
++        static_cast<unsigned long long>(s->context.root_pa));
++    if (rc) return rc;
++    sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
++    rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
++    report_faults(s);
++    IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",
++        rc,static_cast<unsigned>(s->boot.stage),s->boot.held,s->boot.release_attempted,
++        s->boot.fw_init,s->boot.host_irq,s->boot.ao_irq,s->boot.pdc_before,s->boot.last_region,s->boot.last_offset);
++    if (!rc) IOLog("SWEET GMU BOOT: fresh CM3 init BABEFACE; GX OOB and HFI not started\n");
++    IOLog("SWEET GMU BOOT: all mappings retained until reboot; no acceleration\n");
++    return rc;
++}
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,8 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_gmu_start.c		standard
++bsd/dev/sweet_hfi_perf.c		standard
+ bsd/dev/sweet_gpu_firmware.c		standard
+ bsd/dev/sweet_gpu_gdsc.c			standard
+ bsd/dev/sweet_gpu_gmu.c			standard
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -7,6 +7,7 @@
+ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ 
+ # SWEET device-tree platform (empty translation unit on other boards)
++iokit/Kernel/arm/sweet_gpu_gmu_start.cpp                         optional iokitcpp
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp

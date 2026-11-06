@@ -8,6 +8,19 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
+0144 inventory completed on the device: all eight normal banks were stable,
+idle and disabled. Historical payloads are not current vote values.
+
+0145 prepares the first opt-in APPS-DRV DDR bandwidth handoff. It establishes
+the pinned stock DDR usecase4 as a new floor; it can replace or lower an unknown
+bootloader vote and does not claim to preserve it. Only MC0/SH0/ACV are sent,
+matching the stock pre-FW_START host path. CNOC remains in the future HFI table.
+The test requires `jtag=1 wfi=0`, disabled kernel idle, matching command-database
+bindings, empty TCS banks and a reset/inactive GMU. It retains the vote until
+reboot, quarantines uncertain transactions, and never releases CM3. A request
+ACK would not prove bandwidth, firmware execution or rendering. Device test
+pending; this is not a complete shared-client interconnect implementation.
+
 0144 prepares a complete legacy HFI bandwidth-message encoder and an opt-in
 `sweettcssnapshot=1` inventory using the existing RPMh mapping and lock.
 The encoder preserves the pinned 160-word ABI and zeros unused slots; it has
@@ -16,7 +29,8 @@ banks and their 16 payload slots twice, before the GPU probe's first vote.
 It performs no register writes and reports inconsistent samples. Cleared slots
 can still correspond to votes retained inside BCM, so even a stable inventory
 does not establish a current vote or ownership. No BCM readback protocol is
-assumed and no BCM request is sent by this patch. Device result pending.
+assumed and no BCM request is sent by this patch. The inventory passed on the
+device; it does not demonstrate GMU execution.
 
 0141 corrects the requested GMU firmware version to1.8 and rearms `rx_req`
 when the polled receive queue is empty. This is not an interrupt-driven receiver.

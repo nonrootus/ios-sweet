@@ -11,6 +11,8 @@ struct model {
     unsigned bank, slot, busy_reads, never_sync, mismatch, bad_root, waited;
     unsigned fault_readback_override;
     uint32_t fault_readback;
+    unsigned unmatched_remove, global_busy_reads, global_never_sync, ignore_smr;
+    unsigned late_fault, late_global_fault, late_policy, late_other_stream;
 };
 static int fail(struct model *m) { return ++m->count == m->fail_at; }
 static int rd(void *v, uint32_t off, uint32_t *out)
@@ -23,7 +25,12 @@ static int rd(void *v, uint32_t off, uint32_t *out)
     if (off == 0x8000 + m->bank*4096 + 0x7f4) {
         *out = m->never_sync || m->busy_reads;
         if (m->busy_reads) --m->busy_reads;
+    } else if(off == 0x74) {
+        *out = m->global_never_sync || m->global_busy_reads;
+        if(m->global_busy_reads)--m->global_busy_reads;
     } else *out = m->reg[off/4];
+    if(off == 0x8000 + m->bank*4096 + 0x58 &&
+        (m->reg[(0x1800+4*m->bank)/4]&1)) *out |= 0x400;
     if (m->mismatch && m->writes && off == 0x1800 + 4*m->bank) *out ^= 1;
     return 0;
 }
@@ -48,9 +55,11 @@ static int wr(void *v, uint32_t off, uint32_t value)
         assert(value == 0x20000); /* no translated-format fields in FAULT */
         value = m->fault_readback_override ? m->fault_readback : 0x200ff;
     }
-    m->reg[off/4] = value;
+    if(!(m->ignore_smr && off==0x800+4*m->slot && value==0))
+        m->reg[off/4] = value;
     ++m->writes;
     if (off == 0x8000 + m->bank*4096 + 0x7f0) m->busy_reads = 2;
+    if (off == 0x70) m->global_busy_reads = 2;
     return fail(m) ? -1 : 0; /* even a failed store may have landed */
 }
 static int wr64(void *v, uint32_t off, uint64_t value)
@@ -63,6 +72,12 @@ static int wr64(void *v, uint32_t off, uint64_t value)
            off == 0x8000 + m->bank*4096 + 0x28);
     m->reg[off/4] = (uint32_t)value;
     m->reg[off/4+1] = (uint32_t)(value >> 32);
+    if(off == 0x8000 + m->bank*4096 + 0x28 && value==0) {
+        if(m->late_fault)m->reg[(0x8000+m->bank*4096+0x58)/4]|=2;
+        if(m->late_global_fault)m->reg[0x48/4]|=1;
+        if(m->late_policy)m->reg[0]&=~0x400u;
+        if(m->late_other_stream)m->reg[(0x800+4*((m->slot+1)%5))/4]=0x80000005;
+    }
     ++m->writes;
     return fail(m) ? -1 : 0;
 }
@@ -94,7 +109,12 @@ static void unpin(void *v)
         unsigned cb = (0x8000 + m->bank*4096)/4;
         assert(!m->reg[cb] && !m->reg[cb+0x20/4] && !m->reg[cb+0x24/4]);
         assert(!m->reg[(0x800+4*m->slot)/4]);
-        assert((m->reg[(0xc00+4*m->slot)/4] & 0x30000) == 0x20000);
+        if(m->unmatched_remove) {
+            assert(m->reg[(0xc00+4*m->slot)/4] == (0x300 | m->bank));
+            assert((m->reg[0]&0x40b)==0x402);
+            for(unsigned i=0;i<5;++i)assert(!m->reg[(0x800+4*i)/4]);
+            assert(!m->global_busy_reads&&!m->global_never_sync);
+        } else assert((m->reg[(0xc00+4*m->slot)/4] & 0x30000) == 0x20000);
         assert(!m->busy_reads && !m->never_sync);
     }
     --m->held; ++m->unpins;
@@ -194,5 +214,49 @@ int main(void)
     assert(sweet_smmu_context_install(&c,&ops,0,0,4,0));
     assert(sweet_smmu_context_install(&c,&ops,0,0,4,256));
     assert(!m.count && !m.writes);
-    printf("PASS: %u install/%u removal callback failures, geometry, stream conflicts, timeout retention and ordered teardown (model only)\n",install_callbacks,remove_callbacks);
+    ops=setup(&m,0,0);memset(&c,0,sizeof(c));m.unmatched_remove=1;
+    assert(!sweet_smmu_context_install(&c,&ops,0,0,4,1));m.count=0;
+    assert(!sweet_smmu_context_remove_unmatched(&c));
+    unsigned unmatched_callbacks=m.count;
+    assert(!m.held&&c.state==SWEET_SMMU_CONTEXT_RETIRED);
+    assert(sweet_smmu_context_remove_unmatched(&c));
+    for(unsigned n=1;n<=unmatched_callbacks;++n) {
+        ops=setup(&m,0,0);memset(&c,0,sizeof(c));m.unmatched_remove=1;
+        assert(!sweet_smmu_context_install(&c,&ops,0,0,4,1));m.count=0;m.fail_at=n;
+        assert(sweet_smmu_context_remove_unmatched(&c));
+        assert(m.held&&c.retained&&!m.unpins);
+        assert(c.state==(n==1?SWEET_SMMU_CONTEXT_ACTIVE:SWEET_SMMU_CONTEXT_POISONED));
+        if(n!=1){unsigned before=m.count;assert(sweet_smmu_context_remove_unmatched(&c));assert(m.count==before);}
+    }
+    for(unsigned bank=0;bank<5;++bank)for(unsigned slot=0;slot<5;++slot) {
+        ops=setup(&m,bank,slot);memset(&c,0,sizeof(c));m.unmatched_remove=1;
+        assert(!sweet_smmu_context_install(&c,&ops,bank,slot,5,1));
+        assert(!sweet_smmu_context_remove_unmatched(&c));assert(!m.held);
+    }
+    const unsigned bad_off[]={0,0,0,0,0x20,0x804,0xc00,0x8000,0x8058,0x48};
+    const uint32_t bad_val[]={0x200226,0x200627,0x20062e,0x200624,0,0x80000005,0x10000,0,0x402,1};
+    for(unsigned i=0;i<sizeof(bad_off)/sizeof(*bad_off);++i) {
+        ops=setup(&m,0,0);memset(&c,0,sizeof(c));m.unmatched_remove=1;
+        assert(!sweet_smmu_context_install(&c,&ops,0,0,4,1));writes=m.writes;
+        m.reg[bad_off[i]/4]=bad_val[i];
+        assert(sweet_smmu_context_remove_unmatched(&c));
+        assert(m.writes==writes&&m.held&&c.retained&&!m.unpins);
+    }
+    for(unsigned mode=0;mode<7;++mode) {
+        ops=setup(&m,0,0);memset(&c,0,sizeof(c));m.unmatched_remove=1;
+        assert(!sweet_smmu_context_install(&c,&ops,0,0,4,1));m.waited=0;
+        switch(mode) {
+        case 0:m.global_never_sync=1;break;
+        case 1:m.ignore_smr=1;break;
+        case 2:m.late_fault=1;break;
+        case 3:m.late_global_fault=1;break;
+        case 4:m.late_policy=1;break;
+        case 5:m.late_other_stream=1;break;
+        case 6:m.never_sync=1;break;
+        }
+        assert(sweet_smmu_context_remove_unmatched(&c));
+        assert(m.held&&c.retained&&!m.unpins&&c.state==SWEET_SMMU_CONTEXT_POISONED);
+        if(mode==0)assert(m.waited==500000);
+    }
+    printf("PASS: %u install/%u FAULT removal/%u unmatched removal callback failures; policy/SMR/global sync/late-fault retention; 25 bank-slot combinations (model only)\n",install_callbacks,remove_callbacks,unmatched_callbacks);
 }

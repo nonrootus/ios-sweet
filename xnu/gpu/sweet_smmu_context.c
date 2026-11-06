@@ -170,3 +170,77 @@ int sweet_smmu_context_remove(struct sweet_smmu_context *c)
     c->ops.unpin(c->ops.ctx);
     return 0;
 }
+
+static int exclusive_streams(struct sweet_smmu_context *c, int installed)
+{
+    uint32_t value;
+    int rc;
+    if ((rc = expect(c, 0x20, 0x48016605)) ||
+        (rc = expect(c, 0x24, 0x20008005)) ||
+        (rc = expect(c, 0x28, 0x00007511)) ||
+        (rc = read32(c, 0, &value))) return rc;
+    /* Nonsecure unmatched transactions must fault and report aborts, the
+     * client must stay enabled, and extended stream IDs must stay disabled.
+     * Never change the controller's default policy to make this check pass. */
+    if (value == UINT32_MAX || (value & 0x40b) != 0x402)
+        return SWEET_SMMU_CONTEXT_BUSY;
+    for (unsigned i = 0; i < 5; ++i)
+        if ((rc = expect(c, 0x800 + 4*i,
+            installed && i == c->slot ? SMR_VALID | c->sid : 0))) return rc;
+    return 0;
+}
+static int no_faults(struct sweet_smmu_context *c)
+{
+    uint32_t value;
+    int rc = expect(c, 0x48, 0);
+    if (rc) return rc;
+    if ((rc = read32(c, CB(c) + 0x58, &value))) return rc;
+    /* Ignore only read-only FORMAT metadata, retain on fault/stall/reserved
+     * bits. Faults are never acknowledged/cleared by this diagnostic. */
+    return (value & ~0x600u) ? SWEET_SMMU_CONTEXT_IO : 0;
+}
+static int global_sync(struct sweet_smmu_context *c)
+{
+    uint32_t value;
+    if (c->ops.write32(c->ops.ctx, 0x70, UINT32_MAX) ||
+        c->ops.barrier(c->ops.ctx)) return SWEET_SMMU_CONTEXT_IO;
+    for (unsigned waited = 0, delay = 1;;) {
+        int rc = read32(c, 0x74, &value);
+        if (rc) return rc;
+        if (value == UINT32_MAX) return SWEET_SMMU_CONTEXT_IO;
+        if (!(value & 1))
+            return c->ops.barrier(c->ops.ctx) ? SWEET_SMMU_CONTEXT_IO : 0;
+        if (waited == 500000) return SWEET_SMMU_CONTEXT_TIMEOUT;
+        unsigned step = delay < 500000 - waited ? delay : 500000 - waited;
+        if (c->ops.delay_us(c->ops.ctx, step)) return SWEET_SMMU_CONTEXT_IO;
+        waited += step;
+        delay = delay < 500 ? delay * 2 : 1000;
+    }
+}
+int sweet_smmu_context_remove_unmatched(struct sweet_smmu_context *c)
+{
+    int rc;
+    if (!c || c->state != SWEET_SMMU_CONTEXT_ACTIVE || !c->retained)
+        return SWEET_SMMU_CONTEXT_INVALID;
+    if (c->ops.quiescent(c->ops.ctx)) return SWEET_SMMU_CONTEXT_BUSY;
+    c->state = SWEET_SMMU_CONTEXT_POISONED;
+    if ((rc = exclusive_streams(c, 1)) || (rc = no_faults(c)) ||
+        (rc = expect(c, S2CR(c), S2CR_NSH | c->bank)) ||
+        (rc = expect(c, CB(c), SCTLR_VALUE))) return rc;
+    /* ARM IHI0062D.c 2.3.6-7 and 9.6.22: with matching enabled, invalid
+     * SMRs cannot select their S2CR. All five entries will be invalid and
+     * USFCFG=1 faults unmatched traffic. No FAULT or BYPASS write is attempted.
+     * Global sync does NOT replace the caller's stopped/drained guarantee. */
+    if ((rc = write32(c, SMR(c), 0)) || (rc = global_sync(c)) ||
+        (rc = exclusive_streams(c, 0)) ||
+        (rc = write32(c, CB(c), 0)) || (rc = invalidate(c)) ||
+        (rc = write64(c, CB(c) + 0x20, 0)) ||
+        (rc = write64(c, CB(c) + 0x28, 0))) return rc;
+    if (c->ops.quiescent(c->ops.ctx)) return SWEET_SMMU_CONTEXT_BUSY;
+    if ((rc = exclusive_streams(c, 0)) || (rc = no_faults(c))) return rc;
+    if (c->ops.barrier(c->ops.ctx)) return SWEET_SMMU_CONTEXT_IO;
+    c->state = SWEET_SMMU_CONTEXT_RETIRED;
+    c->retained = 0;
+    c->ops.unpin(c->ops.ctx);
+    return 0;
+}

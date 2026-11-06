@@ -49,6 +49,14 @@ int sweet_smmu_context_install(struct sweet_smmu_context *,
     const struct sweet_smmu_context_ops *, unsigned bank, unsigned slot,
     unsigned sid, unsigned asid);
 int sweet_smmu_context_remove(struct sweet_smmu_context *);
+/* Separate inactive-only teardown for this controller when FAULT writes are
+ * ignored. Only for the early-boot register test: no producer may have run
+ * since reset. Not a general live-GPU teardown API.
+ * Caller must own ALL stream slots, keep all producers stopped and
+ * drained, and reserve this controller until reset. Select before teardown;
+ * never call as a retry/fallback on a POISONED context. The S2CR remains TRANS
+ * behind an invalid SMR; this is not a reusable/reinitialized stream slot. */
+int sweet_smmu_context_remove_unmatched(struct sweet_smmu_context *);
 #ifdef __cplusplus
 }
 #endif

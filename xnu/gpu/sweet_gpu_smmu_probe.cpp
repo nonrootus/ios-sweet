@@ -181,7 +181,8 @@ extern "C" void sweet_gpu_smmu_probe(uintptr_t gcc, uintptr_t cc, uintptr_t gmu)
                 IOLog("SWEET GPU SMMU: unexpected fault/status global=%08x context=%08x\n",
                     global_fault, context_fault);
             } else {
-                rc = sweet_smmu_context_remove(&s->context);
+                IOLog("SWEET GPU SMMU: inactive teardown via unmatched-fault policy\n");
+                rc = sweet_smmu_context_remove_unmatched(&s->context);
                 IOLog("SWEET GPU SMMU: remove rc=%d state=%u retained=%u off=%x value=%08x\n",
                     rc, static_cast<unsigned>(s->context.state), s->context.retained,
                     s->last_offset, s->last_value);

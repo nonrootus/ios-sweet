@@ -56,6 +56,8 @@ static uint32_t corrupt_offset;
 static bool corrupt_remove;
 static bool lose_reset_active, lose_reset_detach;
 static bool ignore_fault_writes;
+static bool late_global_timeout, late_context_timeout, late_fault, late_global_fault, late_policy;
+static unsigned fault_writes;
 static std::string messages;
 struct sweet_gpu_hfi_memory { unsigned refs; };
 static sweet_gpu_hfi_memory *allocated;
@@ -99,6 +101,7 @@ static uint32_t model_read(uintptr_t a) {
 static void model_write32(uintptr_t a,uint32_t v) {
     assert(is_smmu(a)&&!(a&3));++writes;
     unsigned off=a-uintptr_t(smmu);
+    if(off>=0xc00&&off<=0xc10&&((v>>16)&3)==2)++fault_writes;
     if(ignore_fault_writes&&off>=0xc00&&off<=0xc10&&((v>>16)&3)==2)return;
     if(off>=0xc00&&off<=0xc10&&((v>>16)&3)==2) {
         assert(v==0x20000);
@@ -112,6 +115,10 @@ static void model_write32(uintptr_t a,uint32_t v) {
         smmu[0x48/4]|=inject_global;
     }
     if(lose_reset_active&&off==0x800&&(v&0x80000000u))gmu[0]=0;
+    if(off==0x800&&v==0) {
+        if(late_global_timeout)global_timeout=true;
+        if(late_context_timeout)context_timeout=true;
+    }
 }
 static void model_write64(uintptr_t a,uint64_t v) {
     assert(is_smmu(a)&&!(a&7));assert(allocated&&allocated->refs==1);++writes;
@@ -119,6 +126,11 @@ static void model_write64(uintptr_t a,uint64_t v) {
     assert(smmu[0x8000/4]==0);
     memcpy(reinterpret_cast<void*>(a),&v,8);
     if(lose_reset_detach&&a==uintptr_t(smmu)+0x8028&&v==0)gmu[0]=0;
+    if(a==uintptr_t(smmu)+0x8028&&v==0) {
+        if(late_fault)smmu[0x8058/4]|=2;
+        if(late_global_fault)smmu[0x48/4]|=1;
+        if(late_policy)smmu[0]&=~0x400u;
+    }
 }
 #include "adapter.inc"
 static void reset() {
@@ -129,6 +141,8 @@ static void reset() {
     inject_fault=inject_global=0;
     lose_reset_active=lose_reset_detach=false;
     ignore_fault_writes=false;
+    late_global_timeout=late_context_timeout=late_fault=late_global_fault=late_policy=false;
+    fault_writes=0;
     corrupt_offset=UINT32_MAX;messages.clear();
     gcc[0xc/4]=1;cc[0x540/4]=0x80001fe0;cc[0x98/4]=0x4221;
     cc[0x124/4]=0x602;cc[0xc/4]=1;cc[0x10/4]=0x8000;gmu[0]=1;
@@ -155,7 +169,8 @@ int main() {
     assert(messages.find("context=00000400 format=2 faults=00000000 unknown=00000000")!=std::string::npos);
     assert(messages.find("done rc=0;")!=std::string::npos);
     assert(model_read(uintptr_t(smmu)+0x8058)==0x400); // FORMAT survives detach
-    assert(smmu[0]==0xe01e12&&smmu[0x800/4]==0&&smmu[0xc00/4]==0x200ff&&smmu[0x8000/4]==0);
+    assert(smmu[0]==0xe01e12&&smmu[0x800/4]==0&&smmu[0xc00/4]==0x300&&smmu[0x8000/4]==0);
+    assert(!fault_writes);
     for(unsigned off=0x8020;off<0x8030;off+=4)assert(!smmu[off/4]);
     once();
     // Every power/reset dependency must stop before mapping SMMU or allocating.
@@ -188,12 +203,18 @@ int main() {
     reset();corrupt_remove=true;run();retained();
     reset();lose_reset_active=true;run();retained();
     reset();lose_reset_detach=true;run();retained();
-    // The 0134 observation does NOT authorize ignoring failure to switch a
-    // live translated stream to FAULT. Keep the pages on that distinct error.
+    // A fresh inactive-only attempt deliberately selects SMR invalidation;
+    // it does not retry the failed FAULT path or turn a mismatch into success.
     reset();ignore_fault_writes=true;run();
-    assert(probe.board.state==SWEET_SMMU_K6A_READY&&smmu[0x800/4]==0x80000004);
-    assert(smmu[0xc00/4]==0x300);retained();
-    puts("PASS: real adapter+board+context model: AArch64 FSR FORMAT accepted; 30 other FSR bits/global faults retain memory; 27 power/reset gates, install/remove and timeout retention; no hardware proof");
+    assert(!fault_writes&&!live&&pins==1&&unpins==1&&destroys==1);
+    assert(probe.context.state==SWEET_SMMU_CONTEXT_RETIRED&&smmu[0x800/4]==0);
+    assert(smmu[0xc00/4]==0x300);once();
+    reset();late_global_timeout=true;run();assert(elapsed==1500000);retained();
+    reset();late_context_timeout=true;run();assert(elapsed==1500000);retained();
+    reset();late_fault=true;run();retained();
+    reset();late_global_fault=true;run();retained();
+    reset();late_policy=true;run();retained();
+    puts("PASS: composed inactive SMR teardown without FAULT writes; FSR FORMAT accepted; 30 other FSR bits, late faults/policy changes, timeouts and 27 power/reset gates retain memory; no hardware proof");
 }
 ''')
 common = ['-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined', '-g', '-I', str(src)]

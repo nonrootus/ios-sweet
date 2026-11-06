@@ -8,12 +8,12 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-06
 
-The 0135 phone log confirms controller preparation and context installation
-both returned zero. Its apparent fault `FSR=0x400` is a diagnostic bug:
-FORMAT[10:9]=2 denotes AArch64 and is read-only, generated from the configured
-translation scheme. No architectural fault/stall bits were set in that sample.
-The adapter stopped and retained memory, so removal has not yet run on hardware.
-Patch 0136 corrects that classification; hardware DMA and rendering remain untested.
+The 0137 phone log confirms preparation and installation returned zero, with
+FSR=0x400 correctly decoded as FORMAT2, faults0, unknown0. Removal returned
+MISMATCH: the requested S2CR TYPE=FAULT write left TYPE=TRANS (0x300).
+All pages remained retained, and iOS loaded. This is an observed ignored TYPE
+change, distinct from the earlier reserved-field readback mismatch.
+Patch 0138 tests a separate inactive-only teardown; DMA and rendering remain untested.
 
 Patch 0132 passed full XNU CI (run 42073509204) and a temporary phone boot.
 The fresh log reports `inactive HFI Normal-NC=pass` and `done result=pass`;
@@ -134,7 +134,25 @@ cleared TTBRs and fresh quiescence before releasing memory. No BYPASS write is
 introduced. The model covers accepted FAULT readbacks 0x20000/0x200ff/0x20300/
 0x2ffff and retained allocations on all other types. The observed initial
 0x200ff does not establish how a live TRANS-to-FAULT write behaves on hardware;
-that transition remains to be tested.
+0137 tested that transition: TYPE remained TRANS, so strict retention triggered.
+
+Patch 0138 adds a separate `remove_unmatched` operation for the sole early-boot
+caller with never-started masters. It is selected before teardown, never as a
+retry after a failed FAULT write. It verifies exact geometry, enabled client,
+disabled extended IDs, unmatched-fault/abort policy, exclusive stream ownership,
+the installed context and absence of fault bits. Then it invalidates the SMR,
+verifies readback, synchronizes globally, rechecks all streams invalid, disables
+the context, invalidates/synchronizes its ASID and clears both TTBRs. Fresh
+quiescence, policy, stream and fault checks precede unpinning. Every error
+retains pages. No S2CR, BYPASS, reset or firmware-start write is issued here.
+
+This follows the unmatched-stream behavior in ARM IHI0062D.c sections 2.3.6-7
+and 9.6.22. Global synchronization does not prove arbitrary DMA is drained.
+The caller's never-started-master and exclusive-controller contract remains
+essential. S2CR stays TRANS behind an invalid SMR, so the slot/controller
+must remain reserved until reset; it is not a general reusable teardown API.
+Claude did not complete review of this new sequence: its service classifier
+stopped the response. No independent verdict is claimed for 0138.
 
 Before a subsequent firmware-start implementation, the
 [Linux v6.12 GMU initialization](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpu/drm/msm/adreno/a6xx_gmu.c)

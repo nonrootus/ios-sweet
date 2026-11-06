@@ -31,8 +31,13 @@ composed persistent adapter passed power/reset, SMMU fault, timeout, lifetime
 and one-shot checks under ASan/UBSan. ARM64 compilation with XNU headers and
 the full patch/source checks passed. Full kernel CI42259603028 and required
 source/kernel checks passed. The verified image was temporarily sent through
-fastboot with Booting OKAY; the device log is pending. BABEFACE would establish
-CM3 firmware initialization, not HFI, DMA
+fastboot with Booting OKAY. The first device log stopped at entry rc=-3 before
+SMMU setup or CM3 release. Its payload omitted `sweetgpucheck=1`, which gates
+the only firmware-store call in IOFindBSDRoot. Without it, the getter cannot
+succeed even when the bundle is present. Repacking the same kernel with that
+flag and `sweetgpubundle=1` produced temporary test0146b; its result is pending.
+The boot script now checks the real payload's prerequisites and its inclusion
+in the image. BABEFACE would establish CM3 firmware initialization, not HFI, DMA
 translation, graphics command execution or acceleration.
 
 Offline `sweet_hfi_perf` encodes the pinned legacy 43-word frequency table

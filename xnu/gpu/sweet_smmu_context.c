@@ -8,7 +8,8 @@
 #define S2CR(c) (0xc00u + 4u * (c)->slot)
 #define SMR_VALID (1u << 31)
 #define S2CR_NSH (3u << 8)
-#define S2CR_FAULT ((2u << 16) | S2CR_NSH)
+#define S2CR_TYPE_MASK (3u << 16)
+#define S2CR_FAULT (2u << 16)
 #define TCR_VALUE 0x00802020u /* EPD1, outer-shareable NC walker, 32-bit IOVA */
 #define TCR2_VALUE 0x00038011u /* upstream SEP, 16-bit ASID format, 36-bit PA */
 #define SCTLR_VALUE 0x00c01027u /* NSH bypass, ASIDPNE, CFRE, AFE/TRE/M; no IRQ/stall */
@@ -37,6 +38,21 @@ static int write64(struct sweet_smmu_context *c, uint32_t off, uint64_t value)
     /* The context is disabled while TTBRs change, so halves are stable. */
     rc = expect(c, off, (uint32_t)value);
     return rc ? rc : expect(c, off + 4, (uint32_t)(value >> 32));
+}
+static int route_fault(struct sweet_smmu_context *c)
+{
+    uint32_t actual;
+    /* ARM IHI0062D.c 9.6.23: TYPE=2 has no CB index or SHCFG fields;
+     * those bits are reserved. Request FAULT with reserved bits zero and
+     * verify TYPE rather than requiring the translated-format fields to
+     * echo. Exact ID0 preflight excludes extended StreamIDs. In particular,
+     * an ignored write leaving TYPE=TRANS or BYPASS must retain the pages. */
+    if (c->ops.write32(c->ops.ctx, S2CR(c), S2CR_FAULT) ||
+        c->ops.barrier(c->ops.ctx)) return SWEET_SMMU_CONTEXT_IO;
+    int rc = read32(c, S2CR(c), &actual);
+    if (rc) return rc;
+    if (actual == UINT32_MAX) return SWEET_SMMU_CONTEXT_IO;
+    return (actual & S2CR_TYPE_MASK) == S2CR_FAULT ? 0 : SWEET_SMMU_CONTEXT_MISMATCH;
 }
 static int invalidate(struct sweet_smmu_context *c)
 {
@@ -142,7 +158,7 @@ int sweet_smmu_context_remove(struct sweet_smmu_context *c)
         return SWEET_SMMU_CONTEXT_INVALID;
     if (c->ops.quiescent(c->ops.ctx)) return SWEET_SMMU_CONTEXT_BUSY;
     c->state = SWEET_SMMU_CONTEXT_POISONED;
-    if ((rc = write32(c, S2CR(c), S2CR_FAULT)) ||
+    if ((rc = route_fault(c)) ||
         (rc = write32(c, SMR(c), 0)) ||
         (rc = write32(c, CB(c), 0)) ||
         (rc = invalidate(c)) ||

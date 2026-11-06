@@ -9,6 +9,8 @@ struct model {
     uint32_t reg[0x10000/4];
     unsigned count, fail_at, writes, pins, unpins, held, quiescence;
     unsigned bank, slot, busy_reads, never_sync, mismatch, bad_root, waited;
+    unsigned fault_readback_override;
+    uint32_t fault_readback;
 };
 static int fail(struct model *m) { return ++m->count == m->fail_at; }
 static int rd(void *v, uint32_t off, uint32_t *out)
@@ -41,6 +43,10 @@ static int wr(void *v, uint32_t off, uint32_t value)
         assert(m->reg[cb+0x24/4] == 0x00010001);
         assert(m->reg[cb+0x38/4] == 0x44);
         assert(m->reg[(0xc00+4*m->slot)/4] == (0x300 | m->bank));
+    }
+    if (off == 0xc00 + 4*m->slot && ((value >> 16) & 3) == 2) {
+        assert(value == 0x20000); /* no translated-format fields in FAULT */
+        value = m->fault_readback_override ? m->fault_readback : 0x200ff;
     }
     m->reg[off/4] = value;
     ++m->writes;
@@ -88,7 +94,7 @@ static void unpin(void *v)
         unsigned cb = (0x8000 + m->bank*4096)/4;
         assert(!m->reg[cb] && !m->reg[cb+0x20/4] && !m->reg[cb+0x24/4]);
         assert(!m->reg[(0x800+4*m->slot)/4]);
-        assert(m->reg[(0xc00+4*m->slot)/4] == 0x20300);
+        assert((m->reg[(0xc00+4*m->slot)/4] & 0x30000) == 0x20000);
         assert(!m->busy_reads && !m->never_sync);
     }
     --m->held; ++m->unpins;
@@ -138,6 +144,24 @@ int main(void)
         ops=setup(&m,bank,slot);memset(&c,0,sizeof(c));
         assert(!sweet_smmu_context_install(&c,&ops,bank,slot,5,1));
         assert(!sweet_smmu_context_remove(&c));assert(!m.held);
+    }
+    /* Reserved FAULT-format low bits need not echo the write. Every other
+     * TYPE, including the reserved encoding, must fail before invalidating
+     * the stream or clearing TTBRs; all-ones also rejects inaccessible MMIO. */
+    const uint32_t fault_values[]={0x20000,0x200ff,0x20300,0x2ffff,
+        0x300,0x10000,0x30000,UINT32_MAX};
+    for(unsigned i=0;i<sizeof(fault_values)/sizeof(*fault_values);++i) {
+        ops=setup(&m,0,0);memset(&c,0,sizeof(c));
+        assert(!sweet_smmu_context_install(&c,&ops,0,0,4,1));
+        m.fault_readback_override=1;m.fault_readback=fault_values[i];
+        int rc=sweet_smmu_context_remove(&c);
+        if(i<4)assert(!rc&&!m.held&&m.unpins==1);
+        else {
+            assert(rc&&m.held&&c.retained&&!m.unpins);
+            assert(c.state==SWEET_SMMU_CONTEXT_POISONED);
+            assert(m.reg[0x800/4]==0x80000004&&m.reg[0x8000/4]==0x00c01027);
+            assert(m.reg[0x8024/4]==0x00010001);
+        }
     }
     ops=setup(&m,0,0);memset(&c,0,sizeof(c));m.never_sync=1;
     assert(sweet_smmu_context_install(&c,&ops,0,0,4,1)==SWEET_SMMU_CONTEXT_TIMEOUT);

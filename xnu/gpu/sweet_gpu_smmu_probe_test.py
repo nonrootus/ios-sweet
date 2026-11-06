@@ -100,6 +100,10 @@ static void model_write32(uintptr_t a,uint32_t v) {
     assert(is_smmu(a)&&!(a&3));++writes;
     unsigned off=a-uintptr_t(smmu);
     if(ignore_fault_writes&&off>=0xc00&&off<=0xc10&&((v>>16)&3)==2)return;
+    if(off>=0xc00&&off<=0xc10&&((v>>16)&3)==2) {
+        assert(v==0x20000);
+        v=0x200ff; // reserved CBNDX/shareability bits do not echo writes
+    }
     if(off==corrupt_offset || (corrupt_remove&&off==0x800&&v==0))v^=1;
     if(off==0x6000)v|=8;
     *reinterpret_cast<uint32_t*>(a)=v;
@@ -151,7 +155,7 @@ int main() {
     assert(messages.find("context=00000400 format=2 faults=00000000 unknown=00000000")!=std::string::npos);
     assert(messages.find("done rc=0;")!=std::string::npos);
     assert(model_read(uintptr_t(smmu)+0x8058)==0x400); // FORMAT survives detach
-    assert(smmu[0]==0xe01e12&&smmu[0x800/4]==0&&smmu[0xc00/4]==0x20300&&smmu[0x8000/4]==0);
+    assert(smmu[0]==0xe01e12&&smmu[0x800/4]==0&&smmu[0xc00/4]==0x200ff&&smmu[0x8000/4]==0);
     for(unsigned off=0x8020;off<0x8030;off+=4)assert(!smmu[off/4]);
     once();
     // Every power/reset dependency must stop before mapping SMMU or allocating.

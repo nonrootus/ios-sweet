@@ -124,6 +124,18 @@ instead of treating FORMAT as a fault. The model now derives FORMAT from
 CBA2R/TCR and exercises retention for all 30 non-FORMAT bits, including actual
 translation/permission faults; its old injected bit0 was reserved, not a TF.
 
+Patch 0137 fixes the corresponding FAULT-format readback rule during removal.
+ARM IHI0062D.c section 9.6.23 specifies no context index or shareability fields
+in S2CR TYPE=2: their bit positions are reserved. The helper now writes TYPE=2
+with the other bits zero and requires readback TYPE=2, rejecting all-ones.
+It still rejects an ignored write leaving TRANS, BYPASS or the reserved TYPE=3;
+then it requires SMR invalidation, context disable, completed TLB invalidation,
+cleared TTBRs and fresh quiescence before releasing memory. No BYPASS write is
+introduced. The model covers accepted FAULT readbacks 0x20000/0x200ff/0x20300/
+0x2ffff and retained allocations on all other types. The observed initial
+0x200ff does not establish how a live TRANS-to-FAULT write behaves on hardware;
+that transition remains to be tested.
+
 Before a subsequent firmware-start implementation, the
 [Linux v6.12 GMU initialization](https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpu/drm/msm/adreno/a6xx_gmu.c)
 also requires owned dummy, log and legacy debug storage. Non-fixed buffers

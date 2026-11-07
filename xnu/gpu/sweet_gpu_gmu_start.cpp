@@ -5,6 +5,7 @@
  * Sole early root-device owner; jtag=1,wfi=0 and successful DDR handoff required.
  */
 #include "sweet_gmu_memory.h"
+#include "sweet_gpu_memory.h"
 #include <IOKit/IOLib.h>
 extern "C" {
 #include <arm/machine_routines.h>
@@ -19,6 +20,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_arc.h"
 #include "../../../bsd/dev/sweet_gmu_board_profile.h"
 #include "../../../bsd/dev/sweet_gmu_dcvs.h"
+#include "../../../bsd/dev/sweet_a618_firmware.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
@@ -28,6 +30,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_arc.h"
 #include "sweet_gmu_board_profile.h"
 #include "sweet_gmu_dcvs.h"
+#include "sweet_a618_firmware.h"
 #endif
 }
 
@@ -54,6 +57,7 @@ static unsigned attempted;
 static unsigned postboot_attempted;
 static unsigned config_attempted;
 static unsigned dcvs_attempted;
+static bool dcvs_succeeded;
 
 static uint32_t mmio_read(uintptr_t address)
 {
@@ -383,6 +387,7 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
      * callbacks, mapping and votes remain retained even on an ambiguous write. */
     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,nullptr};
     int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile);
+    dcvs_succeeded = rc==0;
     auto &d=s->dcvs;
     report_faults(s);
     IOLog("SWEET GMU DCVS: done rc=%d attempt=%u request=%u ACK=%u return_valid=%u return=%08x response_clear=%u request_clear=%u cleanup=%d abandoned=%u service=%x late_ACK=%u irq=%08x/%08x GX=%08x last=%x/%08x\n",
@@ -392,3 +397,5 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
     IOLog("SWEET GMU DCVS: response acceptance only, not measured Hz; retained until reboot; SQE and rendering not started\n");
     return rc;
 }
+
+#include "sweet_a618_prepare.inc"

@@ -128,7 +128,11 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$GITHUB_WORKSPACE/xnu/patches/0151-sweet-gmu-sptp-already-on.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$GITHUB_WORKSPACE/xnu/patches/0152-sweet-gmu-ack-identity.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0153-sweet-gmu-configuration.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0154-sweet-gmu-dcvs-request.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0154-sweet-gmu-dcvs-request.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0155-sweet-a618-inactive-prepare.patch"
+          cmp xnu/gpu/sweet_a618_prepare.inc dxb/xnu/iokit/Kernel/arm/sweet_a618_prepare.inc
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 PREP: done rc=0' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'sweetgpuprep' > /dev/null
           cmp xnu/gpu/sweet_gmu_dcvs.c dxb/xnu/bsd/dev/sweet_gmu_dcvs.c
           cmp xnu/gpu/sweet_gmu_dcvs.h dxb/xnu/bsd/dev/sweet_gmu_dcvs.h
           grep -Fx $'bsd/dev/sweet_gmu_dcvs.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null

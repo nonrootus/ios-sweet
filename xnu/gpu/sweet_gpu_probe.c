@@ -428,7 +428,14 @@ sweet_gpu_probe(void)
                                                             printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
                                                             if(!config_rc && requested_dcvs==1) {
                                                                 extern int sweet_gpu_gmu_dcvs_start(void);
-                                                                printf("SWEET GMU DCVS: entry rc=%d\n",sweet_gpu_gmu_dcvs_start());
+                                                                int dcvs_rc=sweet_gpu_gmu_dcvs_start();
+                                                                printf("SWEET GMU DCVS: entry rc=%d\n",dcvs_rc);
+                                                                int prepare=0;
+                                                                PE_parse_boot_argn("sweetgpuprep",&prepare,sizeof(prepare));
+                                                                if(!dcvs_rc && prepare==1) {
+                                                                    extern int sweet_gpu_a618_prepare(void);
+                                                                    printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
+                                                                }
                                                             }
                                                         }
                                                     }

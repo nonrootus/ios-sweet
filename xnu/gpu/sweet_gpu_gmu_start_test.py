@@ -110,6 +110,50 @@ model=model.replace('    assert(!live&&!allocated);','''    // Test harness only
     for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*3+1);''',1)
 model=model.replace('memset(gmu,0,sizeof(gmu))','memset(gmu_full,0,sizeof(gmu_full))')
 model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attempted=config_attempted=dcvs_attempted=0;post_active=arc_failure=post_timeout=post_compact_ack=bcm_failure=dcvs_timeout=dcvs_sticky=false;assert(!sweet_gpu_hfi_table_init(hfi_words,sizeof(hfi_words),0x60100000));gmu_full[0x14340/4]=0xc0;gmu_full[0x14604/4]=0x10000000;')
+
+model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\n#include "sweet_gpu_memory.h"')
+model=model.replace('static unsigned writes,',r"""
+alignas(4096) static uint8_t prep_data[4][8*4096];
+static uint32_t gpu_regs[0x40000/4];
+static uint8_t sqe_file[32136];
+struct sweet_gpu_memory { unsigned index,pages; };
+static sweet_gpu_memory prep_memory[4];
+static unsigned prep_creates,prep_clean,prep_pages,gpu_reads,prep_clean_fail,prep_page_fail,prep_create_fail;
+static bool prep_map_fail,prep_bad_pa,prep_alias,prep_bad_cpu,prep_corrupt,prep_sqe_missing,prep_sqe_bad,prep_late_irq;
+static bool prep_check_active;
+static unsigned prep_guard_reads,prep_fail_guard;
+extern "C" sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) {
+ ++prep_creates;assert(prep_creates<=4);if(prep_creates==prep_create_fail)return nullptr;
+ auto *m=&prep_memory[prep_creates-1];*m={prep_creates-1,(unsigned)pages};return m;
+}
+extern "C" int sweet_gpu_memory_page(sweet_gpu_memory *m,size_t p,void **cpu,uint64_t *pa){
+ ++prep_pages;if(prep_pages==prep_page_fail)return -1;
+ assert(p<m->pages);*cpu=prep_data[m->index]+p*4096+(prep_bad_cpu?1:0);
+ *pa=0x105000000ull+(prep_alias?0:m->index*0x10000)+p*4096;
+ if(prep_bad_pa)*pa=1ull<<36;
+ return 0;
+}
+extern "C" int sweet_gpu_memory_clean(sweet_gpu_memory *m,size_t p){
+ ++prep_clean;if(prep_corrupt)prep_data[m->index][p*4096]^=1;
+ return prep_clean==prep_clean_fail?-1:0;
+}
+static unsigned writes,""")
+model=model.replace(' ++maps;\n if(pa==', ' ++maps;\n if(pa==0x5000000 && len==0x4000)return prep_map_fail?0:uintptr_t(gpu_regs);\n if(pa==',1)
+model=model.replace(' assert(id==0);if(fw_missing)',r""" if(id==1){if(prep_sqe_missing)return -1;*p=sqe_file;*n=sizeof(sqe_file)-(prep_sqe_bad?4:0);return 0;}
+ assert(id==0);if(fw_missing)""")
+model=model.replace('    assert(!(a&3));',r"""    assert(!(a&3));
+    if(prep_check_active && a==uintptr_t(cc)+0x10 && ++prep_guard_reads==prep_fail_guard)return 0;
+    if(a>=uintptr_t(gpu_regs) && a<uintptr_t(gpu_regs)+sizeof(gpu_regs)){
+      ++gpu_reads;if(prep_late_irq)gmu_full[0x14648/4]|=4;
+    }""",1)
+model=model.replace('    released=fw_timeout=',r"""    a618_preparation={};a618_prepare_attempted=0;dcvs_succeeded=false;
+    prep_check_active=false;prep_guard_reads=prep_fail_guard=0;
+    prep_creates=prep_clean=prep_pages=gpu_reads=prep_clean_fail=prep_page_fail=prep_create_fail=0;
+    prep_map_fail=prep_bad_pa=prep_alias=prep_bad_cpu=prep_corrupt=prep_sqe_missing=prep_sqe_bad=prep_late_irq=false;
+    memset(prep_data,0xa5,sizeof(prep_data));memset(gpu_regs,0,sizeof(gpu_regs));
+    for(unsigned i=0;i<sizeof(sqe_file);i++)sqe_file[i]=(uint8_t)(i*7+11);
+    uint32_t version=0x190;memcpy(sqe_file+4,&version,4);
+    released=fw_timeout=""",1)
 model+=r'''
 static int run(){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu));}
 static void once(){unsigned w=writes,m=maps,c=creates;assert(run()==-1);assert(w==writes&&m==maps&&c==creates);}
@@ -234,13 +278,76 @@ int main(){
   prior_writes=writes;assert(sweet_gpu_gmu_dcvs_start()==-1 && writes==prior_writes);
   retained();
  }
+
+ reset();assert(sweet_gpu_a618_prepare()==-3 && !maps && !prep_creates);
+ assert(sweet_gpu_a618_prepare()==-1);
+ for(unsigned mode=0;mode<34;mode++){
+  reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  unsigned prior_writes=writes;
+  if(mode==1)dcvs_succeeded=false;
+  if(mode==2)idle_enable=1;
+  if(mode==3)smmu[0x8058/4]|=2;
+  if(mode==4)gmu_full[0x14648/4]|=4;
+  if(mode==5)gmu_full[0x24c14/4]=1;
+  if(mode==6)gmu_full[0x14340/4]=0xc0;
+  if(mode==7)gmu_full[0x14600/4]=0;
+  if(mode==8)cc[3]=1;
+  if(mode==9)cc[4]=0x8000;
+  if(mode==10)prep_sqe_missing=true;
+  if(mode==11)prep_sqe_bad=true;
+  if(mode==12)memset(sqe_file+4,0,4);
+  if(mode>=13 && mode<=16)prep_create_fail=mode-12;
+  if(mode==17)prep_bad_pa=true;
+  if(mode==18)prep_alias=true;
+  if(mode==19)prep_bad_cpu=true;
+  if(mode==20)prep_corrupt=true;
+  if(mode==21)prep_map_fail=true;
+  if(mode==22)prep_late_irq=true;
+  if(mode==23)probe.transport.poisoned=1;
+  if(mode==24)probe.transport.tx_closed=0;
+  if(mode==25)probe.config.configured=0;
+  if(mode==26)probe.postboot.next_sequence=7;
+  if(mode==27)probe.postboot.stage=SWEET_GMU_POST_READY;
+  if(mode==28)gmu_full[0x14648/4]|=1u<<31;
+  if(mode==29)cc[4]=UINT32_MAX;
+  if(mode==30)cc[3]=UINT32_MAX;
+  if(mode==31)gmu_full[0x14340/4]=UINT32_MAX;
+  if(mode==32)prep_page_fail=18;
+  if(mode==33)prep_clean_fail=18;
+  int rc=sweet_gpu_a618_prepare();assert(writes==prior_writes);
+  if(mode==0 || mode==8){
+   assert(!rc && a618_preparation.prepared && a618_preparation.pages==18 && prep_clean==18 && gpu_reads==18);
+   assert(!memcmp(prep_data[0],sqe_file+4,sizeof(sqe_file)-4));
+   for(unsigned i=sizeof(sqe_file)-4;i<8*4096;i++)assert(!prep_data[0][i]);
+   for(unsigned b=1;b<4;b++)for(unsigned i=0;i<prep_memory[b].pages*4096;i++)assert(!prep_data[b][i]);
+  } else assert(rc && !a618_preparation.prepared);
+  if(mode>=1 && mode<=9 && mode!=8)assert(!prep_creates && !gpu_reads);
+  assert(sweet_gpu_a618_prepare()==-1 && writes==prior_writes);retained();
+ }
+ for(unsigned bad=0;bad<a618_register_count;bad++){
+  reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  gpu_regs[a618_snapshot_regs[bad].dword]=UINT32_MAX;unsigned prior_writes=writes;
+  assert(sweet_gpu_a618_prepare()==-2 && gpu_reads==bad+1 && !a618_preparation.prepared);
+  assert(writes==prior_writes && prep_creates==4 && prep_clean==18);retained();
+ }
+ for(unsigned bad=1;bad<=21;bad++){
+  reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  prep_check_active=true;prep_fail_guard=bad;unsigned prior_writes=writes;
+  assert(sweet_gpu_a618_prepare()==-3 && !a618_preparation.prepared && prep_guard_reads==bad);
+  assert(gpu_reads==(bad<=2?0:bad-3) && writes==prior_writes);
+  assert(prep_creates==(bad==1?0:4));retained();
+ }
+ puts("PASS0155 actual preparation:34 state/allocation/data-failure cases,18 MMIO sentinels,21 temporal guard failures, exact SQE copy/zero padding,18 disjoint pages,no writes or retry");
  reset();puts("PASS persistent adapter+real SMMU/CM3 helpers: full boot model, 27 power gates, faults/timeouts, latch before writes, no teardown/free or retry");
 }
 '''
 (work/'test.cpp').write_text(model)
 common=['-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g','-I',str(src)]
 objects=[]
-for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile','sweet_gmu_dcvs'):
+for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_firmware'):
     obj=work/(name+'.o');subprocess.run(['gcc','-std=c11',*common,'-c',str(src/(name+'.c')),'-o',str(obj)],check=True);objects.append(str(obj))
 subprocess.run(['g++','-std=c++17',*common,'-I',str(work),str(work/'test.cpp'),*objects,'-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)

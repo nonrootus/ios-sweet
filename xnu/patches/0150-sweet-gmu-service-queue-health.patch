@@ -168,12 +168,10 @@
      if(h[0]!=1 || h[3]!=QWORDS) return -1;
      read=h[10];write=h[11];t->barrier(t->ctx);
      if(read>=QWORDS || write>=QWORDS) return -1;
-@@ -48,4 +49,7 @@
-     for(unsigned i=0;i<n;i++){out[i]=q[index];index=(index+1)%QWORDS;}
+@@ -49,3 +50,6 @@
      t->barrier(t->ctx);h[10]=index;t->barrier(t->ctx);*count=n;
      return 0;
--}
-+}
+ }
 +int sweet_hfi_receive(struct sweet_hfi_transport *t, uint32_t *out, size_t cap, size_t *count) {
 +    return sweet_hfi_receive_queue(t,1,out,cap,count);
 +}
@@ -183,11 +181,10 @@
  /* Polled receive; no IRQ sleep/recheck protocol. An empty queue rearms rx_req.
   * 0 message, 1 empty/incomplete, -1 invalid; outputs unchanged on failure. */
  int sweet_hfi_receive(struct sweet_hfi_transport *, uint32_t *, size_t, size_t *);
--#endif
 +/* Same bounded polled receive for MSG=1 or DBG=2; CMD/DSP are rejected. */
 +int sweet_hfi_receive_queue(struct sweet_hfi_transport *, unsigned queue,
 +    uint32_t *, size_t, size_t *);
-+#endif
+ #endif
 --- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
 +++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
 @@ -292,8 +292,8 @@

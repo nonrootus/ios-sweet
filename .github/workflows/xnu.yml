@@ -47,6 +47,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Preflight exact HFI service patch
+        run: |
+          baseline=4a0bc2a0d09383f6134c2eda5b8669029cdce012
+          if ! git cat-file -e "$baseline^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$baseline"
+          fi
+          python3 tools/verify-gmu-service-patch.py "$RUNNER_TEMP/hfi-preflight"
+
       - name: Fetch build script
         run: |
           git init -q dxb

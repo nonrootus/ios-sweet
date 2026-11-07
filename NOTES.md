@@ -490,3 +490,12 @@ profile match unchanged stock ARC/PERF code under ASan/UBSan. Unsupported
 140MHz/source mismatch and unsupported MX dependency are rejected. No runtime
 caller or active-fuse proof. GPU kernel CI42342878712 remains pinned to96f6626;
 these offline tools do not change its runtime code. Phone remains recovery.
+
+## Exact baseline correction for0150
+
+CI42342878712 compiled the kernel but failed final verification. No artifact
+was used. Raw reproduction found the0150 patch expected legacy CRLF EOF bytes
+from a development commit, whereas published0149 had LF. Regenerated0150
+against exact4a0bc2a blobs with canonical runtime code unchanged. The new
+preflight checks all5 committed source blobs and runs before expensive builds;
+it reproduces rejection of broken96f6626. Full corrected CI remains pending.

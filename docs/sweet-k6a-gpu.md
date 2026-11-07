@@ -8,6 +8,50 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-07
 
+Full Intel XNU CI [42344518565](https://github.com/nonrootus/ios-sweet/actions/runs/42344518565)
+passed for `cdcc69b4001ea9adea3f639fd2bfb39ff9c75171`, including exact
+0149-baseline/0150 preflight and final source/kernel verification. The prepared
+temporary0150 image is **unbooted**. Its kernel has been checked by CRC/SHA256,
+13 required markers, exact payload reconstruction and independent comparison
+of all10 Mach-O segments (zero chained fixups), plus the boot shim and DTB.
+This is build/package validation, not a new hardware result. The last phone
+result remains0148 CM3 readiness below. Do not leave this `wfi=0` diagnostic
+running unattended; phone remains in recovery while the owner is away.
+
+### Capture summary
+
+`python tools/gpu-log-summary.py CAPTURE.bin --json` reads a SWEETLOG v1
+capture or decoded UTF-8 text and summarizes the0148-0150 record format. It
+checks bounded/complete binary capture, boot-session ambiguity, required
+completion/ACK/event records, queue indexes and both health samples. It never
+contacts a device and does not treat CM3 readiness as completed HFI or GPU
+rendering. Exit0 means the log consistently reports initial INIT/VERSION
+readiness; exit3 means insufficient evidence/CM3 only, exit4 an explicit
+nonzero completion, exit2 invalid input. Capture freshness and kernel source
+identity still require the separate boot record and artifact manifest.
+
+`python tools/gpu-log-summary-test.py` passed seven test groups including
+missing/out-of-order/duplicate records, version/ACK/queue contradictions,
+every reported failure code, malformed/truncated/wrapped binary input and
+invalid encoding. The actual0148 binary correctly reports CM3 only (exit3).
+Positive HFI fixtures are synthetic; no successful phone HFI log exists yet.
+
+### Pinned HakiOS reference refresh
+
+The selected source reference is now verified against Git blobs at
+[`aa7f8e463c786502d93d574a58e3f4351eaaa1a4`](https://github.com/xiongnemo/hakios-alioth/tree/aa7f8e463c786502d93d574a58e3f4351eaaa1a4),
+not a moving branch URL. All15 selected files have local blob/SHA256/length
+records. The selected Adreno/GPU/GLES, Wi-Fi, Bluetooth and camera files match
+the previously cached bytes. The changed selected `inject_ui.c` adds handling
+of third-party notification prompts; it is not a wallpaper or A618 GPU fix.
+The new head's frame-timing claim concerns the POCO F3 display path and remains
+the upstream author's observation, not a sweet_k6a measurement. Its
+[status document](https://github.com/xiongnemo/hakios-alioth/blob/aa7f8e463c786502d93d574a58e3f4351eaaa1a4/docs/alioth/status.md)
+identifies Adreno650, a120Hz panel and iOS16.5/20F66; our target remains
+Adreno618 and20H392. No new hardware driver was copied blindly from it.
+
+### Offline performance profile
+
 `tools/gpu-perf-table.py FDT CMD_DB STOCK_CACHE --speed-bin N --output JSON
 --header HEADER` now resolves a complete offline legacy PERF candidate. It
 checks the four pinned clock/regulator source hashes, the A618 identity and
@@ -26,6 +70,33 @@ its140MHz rate is absent from the pinned clock source. Bin0's825MHz level416
 was also rejected because captured MX ends at384; stock clamps to its last
 MX entry, which is not evidence that this dependency is appropriate here.
 The current initial-HFI image does not submit any of these candidate tables.
+
+### Next legacy HFI completion API (reviewed, not implemented)
+
+The next transaction must explicitly continue the same one-shot session:
+PERF43, BW160 and TEST2, sequences3/4/5 after INIT1/VERSION2. Check a retained
+next-sequence field and empty CMD indexes7/7 before publication; completed
+indexes become50,210,212. Generic ACK/event handling should be shared with
+initial startup, with separate attempted/published/acked evidence and saved
+ACK/error information for each command. Encode and validate every input table
+before publishing the first command. Side messages must be rejected throughout
+the exchange, not only in the later observation loop.
+
+Require an explicit initial GPU performance index whose vote equals the
+earlier boot vote. Do **not** require a unique matching vote: the verified
+recovery profile has identical ARC votes at180MHz and267MHz. Claude suggested
+uniqueness, but the actual stock comparison disproves that restriction. The
+chosen index is also required by the later DCVS NOHFI operation; equal rail
+votes are not interchangeable frequency selections.
+
+TEST ends command-mode HFI for this legacy HFI_USE_REG profile. Close TX once
+TEST may have been published, including ambiguous doorbell/ACK failure, while
+preserving RX diagnostics. Retain all existing power/memory holds. Distinguish
+post-TEST observations from configuration rejection: stock does not assert
+HFI_CTRL_STATUS after TEST, and immediately proceeds to register DCVS and DDR
+handoff. A diagnostic CONFIGURED stop would not prove that whole stock path,
+GPU command execution or rendering. No completion API or hardware caller has
+been added yet; current0150 still ends after initial INIT/VERSION observation.
 
 0148 reached fresh CM3 firmware readiness on the actual sweet_k6a: rc0,
 phase8, held1/release1, BABEFACE. The complete235500-byte log (flush17) has
@@ -63,7 +134,8 @@ response bits, and keeps all error flags available for diagnosis. The result
 records queue indexes and health samples at1s and10s. Passing those samples
 does not establish long-term stability with incomplete HFI initialization.
 PERF/BW/TEST, GPU firmware/command submission and iOS acceleration are not
-started by0149. Full CI and actual-device outcome are not yet established.
+started by0149. Full CI for0149+0150 now passed as recorded above; the
+actual-device outcome is not yet established.
 
 New host tests: `sweet_gmu_postboot_test.py STOCK_CACHE BUILD_DIR` validates
 register offsets against pinned headers and exercises the real sequencer,

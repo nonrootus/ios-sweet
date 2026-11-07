@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Current 0150 handoff - 2026-11-07
+
+Full Intel XNU CI42344518565 PASSED for cdcc69b4001ea9adea3f639fd2bfb39ff9c75171,
+including exact published-baseline patch preflight and final source/kernel
+verification. A temporary initial-HFI image was prepared and verified locally:
+CRC/SHA,13 kernel markers, exact payload reconstruction,10 original Mach-O
+segments with zero fixups, boot shim and DTB. NOT BOOTED. Last hardware result
+is0148 fresh CM3 BABEFACE; GX/INIT/VERSION and acceleration remain unverified.
+Keep the phone in recovery while its owner is away; this image retains power
+and disables CPU idle. No userdata flash was performed.
+
+Added a read-only0148-0150 log summary with seven passing offline test groups.
+Actual0148 capture yields CM3-only; successful HFI fixtures are synthetic.
+It does not prove capture freshness or source identity. A pinned HakiOS source
+refresh and reviewed future PERF/BW/TEST constraints are in docs/sweet-k6a-gpu.md.
+No device captures, identifiers, firmware or Apple files are published.
+
+
 ## Current 0148 handoff - 2026-11-07
 
 0147 repeated device boot produced a complete log: CM3_CFG read0x52;

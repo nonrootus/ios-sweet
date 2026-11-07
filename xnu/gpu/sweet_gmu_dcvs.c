@@ -88,5 +88,5 @@ int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_po
         s->abandoned_request=1;
         if(!s->cleanup_error)s->cleanup_error=guard;
     }
-    return rc?rc:s->cleanup_error?s->cleanup_error:s->service_pending?-6:0;
+    return rc?rc:s->cleanup_error?s->cleanup_error:s->ack_after_clear?-3:s->service_pending?-6:0;
 }

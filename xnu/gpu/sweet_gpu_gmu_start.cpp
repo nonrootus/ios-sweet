@@ -18,6 +18,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_postboot_profile.h"
 #include "../../../bsd/dev/sweet_gmu_arc.h"
 #include "../../../bsd/dev/sweet_gmu_board_profile.h"
+#include "../../../bsd/dev/sweet_gmu_dcvs.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
@@ -26,6 +27,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_postboot_profile.h"
 #include "sweet_gmu_arc.h"
 #include "sweet_gmu_board_profile.h"
+#include "sweet_gmu_dcvs.h"
 #endif
 }
 
@@ -34,6 +36,7 @@ struct persistent_gmu {
     sweet_gmu_start_state boot;
     sweet_gmu_postboot_state postboot;
     sweet_gmu_config_state config;
+    sweet_gmu_dcvs_state dcvs;
     sweet_gmu_board_profile profile;
     sweet_hfi_transport transport;
     volatile uint32_t *hfi_cpu;
@@ -50,6 +53,7 @@ static persistent_gmu probe;
 static unsigned attempted;
 static unsigned postboot_attempted;
 static unsigned config_attempted;
+static unsigned dcvs_attempted;
 
 static uint32_t mmio_read(uintptr_t address)
 {
@@ -365,5 +369,26 @@ extern "C" int sweet_gpu_gmu_configure(unsigned selected_profile)
             seconds[i],c.samples[i][0],c.samples[i][1],c.samples[i][2],c.samples[i][3],
             c.samples[i][4],c.samples[i][5],c.samples[i][6],c.samples[i][7],c.samples[i][8],c.samples[i][9]);
     IOLog("SWEET GMU CONFIG: power, memory and DDR floor held until reboot; DCVS, SQE and rendering not started\n");
+    return rc;
+}
+
+extern "C" int sweet_gpu_gmu_dcvs_start(void)
+{
+    auto *s=&probe;
+    if(!__sync_bool_compare_and_swap(&dcvs_attempted,0u,1u))return -1;
+    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s))return -3;
+    IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
+    /* The sole early-root caller has finished configuration. HFI TX is sealed,
+     * no IRQ/RX worker or other frequency owner has been started. All state,
+     * callbacks, mapping and votes remain retained even on an ambiguous write. */
+    sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,nullptr};
+    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile);
+    auto &d=s->dcvs;
+    report_faults(s);
+    IOLog("SWEET GMU DCVS: done rc=%d attempt=%u request=%u ACK=%u return_valid=%u return=%08x response_clear=%u request_clear=%u cleanup=%d abandoned=%u service=%x late_ACK=%u irq=%08x/%08x GX=%08x last=%x/%08x\n",
+        rc,d.attempted,d.request_attempted,d.acked,d.return_valid,d.firmware_return,
+        d.response_clear_attempted,d.request_clear_attempted,d.cleanup_error,d.abandoned_request,
+        d.service_pending,d.ack_after_clear,d.host_irq,d.ao_irq,d.gx_status,d.last_offset,d.last_value);
+    IOLog("SWEET GMU DCVS: response acceptance only, not measured Hz; retained until reboot; SQE and rendering not started\n");
     return rc;
 }

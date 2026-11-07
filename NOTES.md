@@ -1,5 +1,39 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Opt-in one-shot DCVS request0154
+
+Actual0153b on sweet_k6a passed PERF/BW/TEST and clean0/1/10s configuration
+observations.0154 links the previously tested register DCVS helper into the
+same persistent early-root owner. Explicit sweetgmudcvs=1 additionally needs
+cfg1/profile167/hfi1/start1 and configuration return0. A global atomic latch,
+same-session bindings and fresh power/SMMU guards prohibit retries and stale
+configuration. It requests index1/ATLEAST180MHz with unchanged bandwidth;
+boot OOB, host DDR floor and all memory remain retained through reboot.
+No GPU command processor, GPU-client mapping or rendering starts here.
+
+The six-write request/response-clear/request-clear sequence matches unchanged
+Xiaomi10c33d40 A615-family stock functions. A timeout still attempts cleanup
+when fresh health permits; inaccessible/faulted state is recorded abandoned.
+Claude review found no blocking integration issue and recommended rejecting
+a sticky response bit: helper now returns-3 after request-clear, with retained
+evidence, rather than reporting clean success. Accepted this change. Its
+claim that TEST acceptance alone proves the stock quirk is not relied on;
+the explicit pinned board profile is still required.
+
+Host ASan/UBSan composed adapter tests pass ten DCVS paths, including success,
+timeout, raw firmwareFFFFFFFF, stale/sticky ACK, SMMU/idle/profile/service/
+poisoned gates, no HFI TX changes, no retry and no release. Helper33callback
+failure points and unchanged stock trace pass. Target-header ARM64 compilation
+passes helper, probe and persistent adapter; full126-154 patch/reverse checks
+compare45 canonical sources and YAML. DCVS log checker passes five synthetic
+integrity groups and requires prior configuration evidence. Full XNU build
+and hardware DCVS acceptance remain pending until separately recorded.
+
+ACK/return0 means request acceptance, not measured180MHz: NONBLOCK permits an
+unfinished transition and ATLEAST permits a higher frequency. Logged IRQ/GX
+are sampled before the request-clear write, not post-clear stability evidence.
+Source: https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/10c33d40a11ecdc75cc1dadb5bd07894bab05815/drivers/gpu/msm/adreno_a6xx_gmu.c
+
 ## Current sweet_k6a configuration test: 0153b
 
 Full XNU CI42364489199 succeeded for source

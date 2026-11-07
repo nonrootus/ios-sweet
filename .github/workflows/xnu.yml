@@ -127,7 +127,13 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c --exclude=bsd/dev/sweet_gmu_postboot.h --exclude=bsd/dev/sweet_hfi_transport.c --exclude=bsd/dev/sweet_hfi_transport.h --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0150-sweet-gmu-service-queue-health.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$GITHUB_WORKSPACE/xnu/patches/0151-sweet-gmu-sptp-already-on.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$GITHUB_WORKSPACE/xnu/patches/0152-sweet-gmu-ack-identity.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0153-sweet-gmu-configuration.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0153-sweet-gmu-configuration.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0154-sweet-gmu-dcvs-request.patch"
+          cmp xnu/gpu/sweet_gmu_dcvs.c dxb/xnu/bsd/dev/sweet_gmu_dcvs.c
+          cmp xnu/gpu/sweet_gmu_dcvs.h dxb/xnu/bsd/dev/sweet_gmu_dcvs.h
+          grep -Fx $'bsd/dev/sweet_gmu_dcvs.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GMU DCVS: done rc=' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'sweetgmudcvs' > /dev/null
           for name in sweet_hfi_config.c sweet_hfi_config.h sweet_gmu_board_profile.c sweet_gmu_board_profile.h sweet_rpmh_gpu_bcm_info.inc; do
             cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
           done

@@ -1,0 +1,227 @@
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -18,6 +18,7 @@
+ #include "../../../bsd/dev/sweet_gmu_postboot_profile.h"
+ #include "../../../bsd/dev/sweet_gmu_arc.h"
+ #include "../../../bsd/dev/sweet_gmu_board_profile.h"
++#include "../../../bsd/dev/sweet_gmu_dcvs.h"
+ #else
+ #include "sweet_smmu_k6a.h"
+ #include "sweet_gmu_start.h"
+@@ -26,6 +27,7 @@
+ #include "sweet_gmu_postboot_profile.h"
+ #include "sweet_gmu_arc.h"
+ #include "sweet_gmu_board_profile.h"
++#include "sweet_gmu_dcvs.h"
+ #endif
+ }
+ 
+@@ -34,6 +36,7 @@
+     sweet_gmu_start_state boot;
+     sweet_gmu_postboot_state postboot;
+     sweet_gmu_config_state config;
++    sweet_gmu_dcvs_state dcvs;
+     sweet_gmu_board_profile profile;
+     sweet_hfi_transport transport;
+     volatile uint32_t *hfi_cpu;
+@@ -50,6 +53,7 @@
+ static unsigned attempted;
+ static unsigned postboot_attempted;
+ static unsigned config_attempted;
++static unsigned dcvs_attempted;
+ 
+ static uint32_t mmio_read(uintptr_t address)
+ {
+@@ -367,3 +371,24 @@
+     IOLog("SWEET GMU CONFIG: power, memory and DDR floor held until reboot; DCVS, SQE and rendering not started\n");
+     return rc;
+ }
++
++extern "C" int sweet_gpu_gmu_dcvs_start(void)
++{
++    auto *s=&probe;
++    if(!__sync_bool_compare_and_swap(&dcvs_attempted,0u,1u))return -1;
++    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s))return -3;
++    IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
++    /* The sole early-root caller has finished configuration. HFI TX is sealed,
++     * no IRQ/RX worker or other frequency owner has been started. All state,
++     * callbacks, mapping and votes remain retained even on an ambiguous write. */
++    sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,nullptr};
++    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile);
++    auto &d=s->dcvs;
++    report_faults(s);
++    IOLog("SWEET GMU DCVS: done rc=%d attempt=%u request=%u ACK=%u return_valid=%u return=%08x response_clear=%u request_clear=%u cleanup=%d abandoned=%u service=%x late_ACK=%u irq=%08x/%08x GX=%08x last=%x/%08x\n",
++        rc,d.attempted,d.request_attempted,d.acked,d.return_valid,d.firmware_return,
++        d.response_clear_attempted,d.request_clear_attempted,d.cleanup_error,d.abandoned_request,
++        d.service_pending,d.ack_after_clear,d.host_irq,d.ao_irq,d.gx_status,d.last_offset,d.last_value);
++    IOLog("SWEET GMU DCVS: response acceptance only, not measured Hz; retained until reboot; SQE and rendering not started\n");
++    return rc;
++}
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -175,7 +175,7 @@
+ sweet_gpu_probe(void)
+ {
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+-    int requested_config = 0, selected_profile = 0;
++    int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+@@ -183,6 +183,10 @@
+     PE_parse_boot_argn("sweetgmuhfi", &requested_hfi, sizeof(requested_hfi));
+     PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
+     PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
++    PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
++    if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
++        printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
++    }
+     if((requested_config || selected_profile) &&
+         (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+         printf("SWEET GMU CONFIG: requires cfg=1 profile=167 hfi=1 start=1\n");return;
+@@ -420,7 +424,12 @@
+                                                         printf("SWEET GMU HFI: entry rc=%d\n",hfi_rc);
+                                                         if(!hfi_rc && requested_config==1) {
+                                                             extern int sweet_gpu_gmu_configure(unsigned);
+-                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",sweet_gpu_gmu_configure((unsigned)selected_profile));
++                                                            int config_rc=sweet_gpu_gmu_configure((unsigned)selected_profile);
++                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
++                                                            if(!config_rc && requested_dcvs==1) {
++                                                                extern int sweet_gpu_gmu_dcvs_start(void);
++                                                                printf("SWEET GMU DCVS: entry rc=%d\n",sweet_gpu_gmu_dcvs_start());
++                                                            }
+                                                         }
+                                                     }
+                                                 }
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_dcvs.c
+@@ -0,0 +1,92 @@
++#include "sweet_gmu_dcvs.h"
++#include "sweet_gmu_postboot_profile.h"
++/* Xiaomi10c33d40: a6xx_reg.h DWORD*4-0x6a000, GMU-relative bytes.
++ * a6xx_gmu_dcvs_nohfi + A615-family oob_dcvs7. Kept in one profile area. */
++#define DCVS_ACK_OPTION 0x8ff0u
++#define DCVS_PERF_SETTING 0x8ff4u
++#define DCVS_BW_SETTING 0x8ff8u
++#define DCVS_RETURN 0x8ffcu
++#define DCVS_REQUEST (1u<<23)
++#define DCVS_ACK (1u<<31)
++#define DCVS_CLEAR (1u<<31)
++#define DCVS_PERF_MINIMUM 0x30000001u /* ATLEAST3, profile index1 */
++#define DCVS_BW_UNCHANGED 0x000ff0ffu /* INVALID0xff in both12bit fields */
++static int rd(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,uint32_t a,uint32_t *v)
++{
++    s->last_offset=a;if(o->read32(o->ctx,a,v))return -2;s->last_value=*v;
++    return *v==UINT32_MAX?-2:0;
++}
++static int wr(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,uint32_t a,uint32_t v)
++{
++    s->last_offset=a;s->last_value=v;
++    return o->write32(o->ctx,a,v) || o->barrier(o->ctx)?-2:0;
++}
++static int health(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o)
++{
++    if(o->check(o->ctx))return -3;
++    int rc=rd(s,o,A6XX_GMU_GMU2HOST_INTR_INFO,&s->host_irq);if(rc)return rc;
++    rc=rd(s,o,A6XX_GMU_AO_HOST_INTERRUPT_STATUS,&s->ao_irq);if(rc)return rc;
++    if((s->host_irq&0x8000u) || (s->ao_irq&0x29u))return -5;
++    s->service_pending|=s->host_irq&7u;
++    if(s->service_pending && !s->request_attempted)return -3;
++    rc=rd(s,o,A6XX_GMU_SPTPRAC_PWR_CLK_STATUS,&s->gx_status);if(rc)return rc;
++    return (s->gx_status&0xdcu)==8u?0:-3;
++}
++int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,
++    const struct sweet_gmu_postboot_state *p,const struct sweet_gmu_config_state *c,
++    const struct sweet_hfi_transport *t,const struct sweet_gmu_board_profile *b)
++{
++    if(!s || !o || !p || !c || !t || !b || !o->read32 || !o->write32 || !o->barrier ||
++        !o->delay_us || !o->check || s->attempted)return -1;
++    s->attempted=1;
++    if(p->stage!=SWEET_GMU_CONFIG_READY || p->next_sequence!=6 || !p->exchange[4].acked ||
++        !c->configured || c->observed!=3 || !t->tx_closed || t->poisoned ||
++        p->session_transport!=t || p->session_words!=t->words ||
++        p->session_transport_ctx!=t->ctx || p->session_barrier!=t->barrier || p->session_doorbell!=t->doorbell ||
++        p->session_ops.ctx!=o->ctx || p->session_ops.read32!=o->read32 || p->session_ops.write32!=o->write32 ||
++        p->session_ops.barrier!=o->barrier || p->session_ops.delay_us!=o->delay_us || p->session_ops.check!=o->check ||
++        b->initial_gpu_index!=1 || b->max_requested_gpu_index!=1 || b->perf.gpu_count!=8 ||
++        b->perf.gpu[1].frequency_khz!=180000 || b->perf.gpu[1].vote!=p->vote)return -3;
++    int rc=health(s,o);if(rc)return rc;
++    if(s->host_irq&DCVS_ACK)return -3; /* reject a stale completion */
++    rc=wr(s,o,DCVS_ACK_OPTION,0);if(rc)return rc;
++    rc=wr(s,o,DCVS_PERF_SETTING,DCVS_PERF_MINIMUM);if(rc)return rc;
++    rc=wr(s,o,DCVS_BW_SETTING,DCVS_BW_UNCHANGED);if(rc)return rc;
++    rc=health(s,o);if(rc)return rc;
++    if(s->host_irq&DCVS_ACK)return -3;
++    s->request_attempted=1;
++    rc=wr(s,o,A6XX_GMU_HOST2GMU_INTR_SET,DCVS_REQUEST);
++    if(!rc)for(unsigned us=0;;us+=100){
++        rc=health(s,o);if(rc)break;
++        if(s->host_irq&DCVS_ACK){s->acked=1;break;}
++        if(us==100000){rc=-4;break;}
++        if(o->delay_us(o->ctx,100)){rc=-2;break;}
++    }
++    /* Stock clears both response and DCVS request even on timeout. Here a
++     * fresh ownership/power/fault guard additionally prevents cleanup writes
++     * through an inaccessible domain. Keep boot request/DDR/memory regardless.
++     * A write callback may have committed before reporting failure. */
++    s->cleanup_error=health(s,o);
++    if(s->cleanup_error){s->abandoned_request=1;return rc?rc:s->cleanup_error;}
++    s->response_clear_attempted=1;
++    s->cleanup_error=wr(s,o,A6XX_GMU_GMU2HOST_INTR_CLR,DCVS_ACK);
++    if(!rc && !s->cleanup_error && s->acked){
++        /* Firmware return is a signed error word; UINT32_MAX can mean-1.
++         * Status-register all-ones heuristics must not discard this response. */
++        s->last_offset=DCVS_RETURN;
++        rc=o->read32(o->ctx,DCVS_RETURN,&s->firmware_return)?-2:0;
++        if(!rc)s->last_value=s->firmware_return;
++        if(!rc){s->return_valid=1;if(s->firmware_return)rc=-7;}
++    }
++    int guard=health(s,o);
++    if(!guard){
++        s->ack_after_clear=!!(s->host_irq&DCVS_ACK);
++        s->request_clear_attempted=1;
++        int clear=wr(s,o,A6XX_GMU_HOST2GMU_INTR_SET,DCVS_CLEAR);
++        if(!s->cleanup_error)s->cleanup_error=clear;
++    }else{
++        s->abandoned_request=1;
++        if(!s->cleanup_error)s->cleanup_error=guard;
++    }
++    return rc?rc:s->cleanup_error?s->cleanup_error:s->ack_after_clear?-3:s->service_pending?-6:0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_dcvs.h
+@@ -0,0 +1,27 @@
++#ifndef SWEET_GMU_DCVS_H
++#define SWEET_GMU_DCVS_H
++#include "sweet_gmu_postboot.h"
++#include "sweet_gmu_board_profile.h"
++/* Requires sole persistent owner/state, successful configuration, ACTIVE and
++ * retained boot request/DDR/mappings. The early-root adapter owns the opt-in
++ * one-shot call. No competing IRQ/RX writer may modify either
++ * interrupt SET/CLR register during this call; caller enforces global one-shot.
++ * An ACK reports acceptance, NOT measured Hz.
++ * On every outcome keep all power/memory until reboot. No reset or retry. */
++struct sweet_gmu_dcvs_state {
++    unsigned attempted, request_attempted, acked, return_valid;
++    unsigned response_clear_attempted, request_clear_attempted;
++    unsigned service_pending, ack_after_clear, abandoned_request;
++    int cleanup_error;
++    uint32_t firmware_return, host_irq, ao_irq, gx_status, last_offset, last_value;
++};
++/*0: stock DCVS response accepted and clear writes completed; -1 invalid/repeated,
++ *-2 I/O, -3 guard, -4 deadline, -5 hardware IRQ, -6 pending service, -7 firmware.
++ *ack_after_clear records a late/sticky response and rejects success with -3,
++ *after attempting the request-clear write. No retry is permitted. IRQ/GX
++ *fields are the last health sample BEFORE request clear, not post-clear state. */
++int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *,
++    const struct sweet_gmu_postboot_ops *,const struct sweet_gmu_postboot_state *,
++    const struct sweet_gmu_config_state *,const struct sweet_hfi_transport *,
++    const struct sweet_gmu_board_profile *);
++#endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -673,3 +673,4 @@
+ bsd/dev/sweet_smmu_k6a.c		standard
+ bsd/dev/sweet_hfi_config.c		standard
+ bsd/dev/sweet_gmu_board_profile.c		standard
++bsd/dev/sweet_gmu_dcvs.c		standard

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0153 against exact published0149 Git bytes before a full build.
+"""Check0150-0154 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -30,6 +30,12 @@ TARGETS['bsd/dev/sweet_gpu_probe.c']='xnu/gpu/sweet_gpu_probe.c'
 TARGETS.update({'bsd/dev/'+n:'xnu/gpu/'+n for n in NEW_NAMES})
 WIRING={'bsd/conf/files','bsd/dev/sweet_rpmh.c'}
 PATCHES+= (('xnu/patches/0153-sweet-gmu-configuration.patch',set(TARGETS)|WIRING),)
+DCVS_NAMES=('sweet_gmu_dcvs.c','sweet_gmu_dcvs.h')
+DCVS_TARGETS={'bsd/dev/'+n for n in DCVS_NAMES}
+NEW_TARGETS.update(DCVS_TARGETS)
+TARGETS.update({'bsd/dev/'+n:'xnu/gpu/'+n for n in DCVS_NAMES})
+PATCHES+= (('xnu/patches/0154-sweet-gmu-dcvs-request.patch',DCVS_TARGETS|{
+    'bsd/conf/files','bsd/dev/sweet_gpu_probe.c','iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 
 
 
@@ -51,14 +57,14 @@ def main():
             if not path.is_file() or path.read_bytes()!=blob(revision,canonical):
                 raise ValueError('actual builder tree missing or stale: '+target)
         files=(args.patched_tree/'bsd/conf/files').read_text(encoding='utf-8').splitlines()
-        for name in ('sweet_hfi_config','sweet_gmu_board_profile'):
+        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs'):
             if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
                 raise ValueError('actual builder missing unique compile entry: '+name)
         rpmh=(args.patched_tree/'bsd/dev/sweet_rpmh.c').read_text(encoding='utf-8')
         include='#include "sweet_rpmh_gpu_bcm_info.inc"'
         if rpmh.count(include)!=1 or rpmh.index(include)>rpmh.index('#endif /* ARM64_BOARD_CONFIG_SWEET */'):
             raise ValueError('BCM getter absent or outside SWEET conditional')
-        print('PASS actual builder tree:11 exact canonical blobs, compile entries and conditional BCM getter',revision)
+        print('PASS actual builder tree:',len(TARGETS),'exact canonical blobs, compile entries and conditional BCM getter',revision)
         return
     if args.build_directory is None:parser.error('build_directory or --patched-tree required')
     args.build_directory.mkdir(parents=True, exist_ok=True)
@@ -78,7 +84,7 @@ def main():
             stats = subprocess.check_output(command + ['--numstat', str(patch)], cwd=work, text=True)
             if {line.split('\t')[-1] for line in stats.splitlines()} != targets:
                 raise ValueError('unexpected patch target set: ' + name)
-            selected=command+(['--exclude='+p for p in sorted(WIRING)] if name.endswith('0153-sweet-gmu-configuration.patch') else [])
+            selected=command+['--exclude='+p for p in sorted(WIRING)]
             subprocess.run(selected + ['--check', str(patch)], cwd=work, check=True)
             subprocess.run(selected + [str(patch)], cwd=work, check=True)
             applied.append((patch,selected))
@@ -94,7 +100,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0153 exact published baseline, all11 canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0154 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

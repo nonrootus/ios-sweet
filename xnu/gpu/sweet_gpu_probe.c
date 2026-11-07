@@ -175,7 +175,7 @@ void
 sweet_gpu_probe(void)
 {
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
-    int requested_config = 0, selected_profile = 0;
+    int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
     vm_offset_t gcc;
     uint32_t state;
 
@@ -183,6 +183,10 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgmuhfi", &requested_hfi, sizeof(requested_hfi));
     PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
     PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
+    PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
+    if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+        printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
+    }
     if((requested_config || selected_profile) &&
         (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
         printf("SWEET GMU CONFIG: requires cfg=1 profile=167 hfi=1 start=1\n");return;
@@ -420,7 +424,12 @@ sweet_gpu_probe(void)
                                                         printf("SWEET GMU HFI: entry rc=%d\n",hfi_rc);
                                                         if(!hfi_rc && requested_config==1) {
                                                             extern int sweet_gpu_gmu_configure(unsigned);
-                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",sweet_gpu_gmu_configure((unsigned)selected_profile));
+                                                            int config_rc=sweet_gpu_gmu_configure((unsigned)selected_profile);
+                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
+                                                            if(!config_rc && requested_dcvs==1) {
+                                                                extern int sweet_gpu_gmu_dcvs_start(void);
+                                                                printf("SWEET GMU DCVS: entry rc=%d\n",sweet_gpu_gmu_dcvs_start());
+                                                            }
                                                         }
                                                     }
                                                 }

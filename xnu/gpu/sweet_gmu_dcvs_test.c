@@ -71,12 +71,12 @@ int main(void){
         assert(s.response_clear_attempted && s.request_clear_attempted && !s.cleanup_error && !s.abandoned_request);no_retry();
     }
     reset(8,0);assert(run()==-7 && s.return_valid && s.firmware_return==UINT32_MAX && writes==6);no_retry();
-    reset(9,0);assert(!run() && s.ack_after_clear && s.request_clear_attempted);no_retry();
+    reset(9,0);assert(run()==-3 && s.ack_after_clear && s.request_clear_attempted && s.return_valid);no_retry();
     for(unsigned gate=0;gate<8;gate++){
         reset(0,0);
         switch(gate){case 0:p.stage=SWEET_GMU_POST_READY;break;case 1:c.configured=0;break;case 2:t.tx_closed=0;break;case 3:t.poisoned=1;break;
         case 4:b.initial_gpu_index=2;break;case 5:b.max_requested_gpu_index=7;break;case 6:b.perf.gpu[1].vote^=1;break;case 7:p.session_words=0;break;}
         assert(run()==-3 && !writes);no_retry();
     }
-    printf("PASS offline/unlinked DCVS prototype: %u callback failures; six writes match pinned stock; timeout/error cleanup; staleACK/session/profile gates; no HFI/bootclear/retry\n",successful_calls);
+    printf("PASS DCVS helper: %u callback failures; six writes match pinned stock; timeout/error cleanup; stale/stickyACK/session/profile gates; no HFI/bootclear/retry\n",successful_calls);
 }

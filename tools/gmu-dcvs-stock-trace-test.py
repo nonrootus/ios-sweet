@@ -92,5 +92,5 @@ int main(void){
 subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g',str(work/'stock-trace.c'),'-o',str(work/'stock-trace')],check=True)
 result=subprocess.check_output([str(work/'stock-trace')],text=True);print(result)
 report={'input_sha256':{n:hashlib.sha256((stock/n).read_bytes()).hexdigest() for n in ('adreno_a6xx_gmu.c','a6xx_reg.h','kgsl_gmu_core.h','kgsl_hfi.h')},
-    'observed_model_trace':result,'hardware_access':False,'runtime_implementation':'not linked; reference evidence only'}
+    'observed_model_trace':result,'hardware_access':False,'runtime_implementation':'reference trace only; adapter integration checked separately'}
 (work/'stock-trace.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')

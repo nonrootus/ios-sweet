@@ -18,7 +18,7 @@ assert '__asm__' not in adapter
 tree=ast.parse((src/'sweet_gpu_smmu_probe_test.py').read_text())
 model=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n#include <cassert>'))
 model=model[:model.index('static void run()')]
-model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\nextern "C" {\n#include "sweet_gpu_hfi_table.h"\n}\nstatic bool post_active,arc_failure,post_timeout,post_compact_ack,bcm_failure;\nstatic uint32_t post_gx_status;')
+model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\nextern "C" {\n#include "sweet_gpu_hfi_table.h"\n}\nstatic bool post_active,arc_failure,post_timeout,post_compact_ack,bcm_failure,dcvs_timeout,dcvs_sticky;\nstatic uint32_t post_gx_status,dcvs_return;')
 model=model.replace('gmu[1024];','gmu_full[0x31000/4], pdc_cfg[0x10000/4], pdc_seq[0x10000/4];\nstatic uint32_t *gmu=gmu_full+0x14000/4;\nstatic uint8_t firmware[0x8000];\nstatic uint32_t hfi_words[0x5000/4];\nstatic bool released,fw_timeout,fw_missing,hold_fail,fw_corrupt,stale_init;\nstatic unsigned boot_writes;\nstatic uint32_t host_irq_fault;\nextern "C" {int idle_enable=0;}')
 model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };\nstatic uint32_t cfg_override_value, bus_values[3];\nstatic bool cfg_override;\nstatic unsigned bus_override_mask;\nstatic const unsigned bus_offsets[]={0x1303c,0x13000,0x13004};')
 model=model.replace('assert(p==allocated && p->refs);++unpins;','assert(p==allocated && p->refs && !p->latched);++unpins;')
@@ -75,12 +75,18 @@ model=model.replace('    assert(is_smmu(a)&&!(a&3));++writes;','''    assert(!(a
         assert(allocated && allocated->refs==1 && allocated->latched);++boot_writes;
         if(a==uintptr_t(gmu_full)+0x14000){assert(v==0);released=true;}
         if(a==uintptr_t(gmu_full)+0x14070 && stale_init)v=0xbabeface;
-        if(a==uintptr_t(gmu_full)+0x14644){gmu_full[0x14648/4]&=~v;return;}
+        if(a==uintptr_t(gmu_full)+0x14644){if(!(dcvs_sticky && v==(1u<<31)))gmu_full[0x14648/4]&=~v;return;}
         if(a==uintptr_t(gmu_full)+0x24c10){gmu_full[0x24c14/4]&=~v;return;}
         if(post_active){
             if(a==uintptr_t(gmu_full)+0x14650){
                 if(v==(1u<<22)){
                     if(!post_timeout){gmu_full[0x14648/4]|=1u<<30;gmu_full[0x14340/4]=post_gx_status;cc[3]=0;cc[4]=0x10000;}
+                }else if(v==(1u<<23)){
+                    assert(hfi_words[16]==212 && hfi_words[17]==212);
+                    assert(gmu_full[0x8ff0/4]==0 && gmu_full[0x8ff4/4]==0x30000001 && gmu_full[0x8ff8/4]==0x000ff0ff);
+                    if(!dcvs_timeout){gmu_full[0x8ffc/4]=dcvs_return;gmu_full[0x14648/4]|=1u<<31;}
+                }else if(v==(1u<<31)){
+                    assert(gmu_full[0x14650/4]==(1u<<23));
                 }else{
                     assert(v==1 && gmu_full[0x14600/4]==1);
                     unsigned r=hfi_words[16],w=hfi_words[29];uint32_t hdr=hfi_words[56+r];unsigned n=((hdr&255)==1 || post_compact_ack)?4:3;
@@ -97,13 +103,13 @@ model=model.replace('    assert(is_smmu(a)&&!(a&3));++writes;','''    assert(!(a
 model=model.replace('    assert(!live&&!allocated);','''    // Test harness only: simulate a complete device reset between cases.
     if(allocated){delete allocated;allocated=nullptr;live=0;}
     released=fw_timeout=fw_missing=hold_fail=fw_corrupt=stale_init=cfg_override=false;
-    cfg_override_value=post_gx_status=0;
+    cfg_override_value=post_gx_status=dcvs_return=0;
     bus_override_mask=0;memset(bus_values,0,sizeof(bus_values));
     boot_writes=host_irq_fault=0;idle_enable=0;
     memset(pdc_cfg,0,sizeof(pdc_cfg));memset(pdc_seq,0,sizeof(pdc_seq));
     for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*3+1);''',1)
 model=model.replace('memset(gmu,0,sizeof(gmu))','memset(gmu_full,0,sizeof(gmu_full))')
-model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attempted=config_attempted=0;post_active=arc_failure=post_timeout=post_compact_ack=bcm_failure=false;assert(!sweet_gpu_hfi_table_init(hfi_words,sizeof(hfi_words),0x60100000));gmu_full[0x14340/4]=0xc0;gmu_full[0x14604/4]=0x10000000;')
+model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attempted=config_attempted=dcvs_attempted=0;post_active=arc_failure=post_timeout=post_compact_ack=bcm_failure=dcvs_timeout=dcvs_sticky=false;assert(!sweet_gpu_hfi_table_init(hfi_words,sizeof(hfi_words),0x60100000));gmu_full[0x14340/4]=0xc0;gmu_full[0x14604/4]=0x10000000;')
 model+=r'''
 static int run(){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu));}
 static void once(){unsigned w=writes,m=maps,c=creates;assert(run()==-1);assert(w==writes&&m==maps&&c==creates);}
@@ -197,13 +203,44 @@ int main(){
   }
   post_writes=writes;assert(sweet_gpu_gmu_configure(167)==-1 && writes==post_writes);retained();
  }
+
+ reset();assert(sweet_gpu_gmu_dcvs_start()==-3 && !writes);
+ assert(sweet_gpu_gmu_dcvs_start()==-1);
+ for(unsigned mode=0;mode<10;mode++){
+  reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167));
+  unsigned prior_writes=writes;uint32_t prior_hfi[0x5000/4];memcpy(prior_hfi,hfi_words,sizeof(hfi_words));
+  if(mode==1)dcvs_timeout=true;
+  if(mode==2)dcvs_return=0xffffffff;
+  if(mode==3)gmu_full[0x14648/4]|=1u<<31;
+  if(mode==4)smmu[0x8058/4]|=2;
+  if(mode==5)idle_enable=1;
+  if(mode==6)probe.profile.initial_gpu_index=2;
+  if(mode==7)gmu_full[0x14648/4]|=4;
+  if(mode==8)probe.transport.poisoned=1;
+  if(mode==9)dcvs_sticky=true;
+  int rc=sweet_gpu_gmu_dcvs_start();
+  if(mode==0 && (rc || writes!=prior_writes+6))fprintf(stderr,"DCVS model rc=%d writes=%u delta=%u log=%s\n",rc,writes,writes-prior_writes,messages.c_str());
+  if(mode==0){
+   assert(!rc && writes==prior_writes+6 && probe.dcvs.acked && probe.dcvs.return_valid);
+   assert(!probe.dcvs.firmware_return && !probe.dcvs.cleanup_error && !probe.dcvs.abandoned_request);
+   assert(messages.find("SWEET GMU DCVS: done rc=0")!=std::string::npos);
+  }else if(mode==1)assert(rc==-4 && writes==prior_writes+6 && !probe.dcvs.acked);
+  else if(mode==2)assert(rc==-7 && writes==prior_writes+6 && probe.dcvs.firmware_return==0xffffffff);
+  else if(mode==9)assert(rc==-3 && writes==prior_writes+6 && probe.dcvs.ack_after_clear && probe.dcvs.request_clear_attempted);
+  else assert(rc && writes==prior_writes && !probe.dcvs.request_attempted);
+  if(mode<3)assert(probe.dcvs.response_clear_attempted && probe.dcvs.request_clear_attempted);
+  assert(!memcmp(prior_hfi,hfi_words,sizeof(hfi_words)) && probe.transport.tx_closed);
+  prior_writes=writes;assert(sweet_gpu_gmu_dcvs_start()==-1 && writes==prior_writes);
+  retained();
+ }
  reset();puts("PASS persistent adapter+real SMMU/CM3 helpers: full boot model, 27 power gates, faults/timeouts, latch before writes, no teardown/free or retry");
 }
 '''
 (work/'test.cpp').write_text(model)
 common=['-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g','-I',str(src)]
 objects=[]
-for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile'):
+for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile','sweet_gmu_dcvs'):
     obj=work/(name+'.o');subprocess.run(['gcc','-std=c11',*common,'-c',str(src/(name+'.c')),'-o',str(obj)],check=True);objects.append(str(obj))
 subprocess.run(['g++','-std=c++17',*common,'-I',str(work),str(work/'test.cpp'),*objects,'-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)

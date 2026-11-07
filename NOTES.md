@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+##0154 full build and temporary boot
+
+Full XNU CI42366861275 succeeded for c6171a99cde04de920eb98784e744257ed51d7e2.
+Exact source checks, downloaded kernel CRC/SHA and21binary markers passed.
+Local verification reproduced payload, compared10segments and Android boot
+parts, and checked explicit configuration/profile/DCVS flags. Temporary
+fastboot boot returned Sending/Booting OKAY at 2026-11-07T11:24:17.017148+00:00.
+No partition flash. Await owner iOS report and a fresh recovery log; no
+hardware DCVS acceptance or measured frequency is claimed yet. The later
+offline powerup-page serializer is not part of this compiled kernel.
+
 ## Offline A618 powerup register-list serialization
 
 Prepared sweet_a618_pwrup.c/.h and reproducibly imported profile for the

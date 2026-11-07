@@ -231,6 +231,9 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
     report_faults(s);
     IOLog("SWEET GMU BOOT: CM3_CFG valid=%u value=%08x; last_io=%u ok=%u value=%08x\n",
         s->boot.cm3_cfg_valid,s->boot.cm3_cfg,s->boot.last_io,s->boot.last_ok,s->boot.last_value);
+    IOLog("SWEET GMU BOOT: bus/cache read_mask=%x SYS_BUS=%08x ICACHE=%08x DCACHE=%08x (diagnostic only)\n",
+        s->boot.bus_cache_read_mask,s->boot.bus_cache_readback[SWEET_GMU_SYS_BUS],
+        s->boot.bus_cache_readback[SWEET_GMU_ICACHE],s->boot.bus_cache_readback[SWEET_GMU_DCACHE]);
     if (s->boot.mismatch_offset) IOLog("SWEET GMU BOOT: readback mismatch off=%x expected=%08x actual=%08x\n",
         s->boot.mismatch_offset,s->boot.mismatch_expected,s->boot.mismatch_actual);
     IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",

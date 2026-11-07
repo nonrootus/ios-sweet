@@ -19,7 +19,7 @@ tree=ast.parse((src/'sweet_gpu_smmu_probe_test.py').read_text())
 model=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n#include <cassert>'))
 model=model[:model.index('static void run()')]
 model=model.replace('gmu[1024];','gmu_full[0x31000/4], pdc_cfg[0x10000/4], pdc_seq[0x10000/4];\nstatic uint32_t *gmu=gmu_full+0x14000/4;\nstatic uint8_t firmware[0x8000];\nstatic uint32_t hfi_words[0x5000/4];\nstatic bool released,fw_timeout,fw_missing,hold_fail,fw_corrupt,stale_init;\nstatic unsigned boot_writes;\nstatic uint32_t host_irq_fault;\nextern "C" {int idle_enable=0;}')
-model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };\nstatic uint32_t cfg_override_value;\nstatic bool cfg_override;')
+model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };\nstatic uint32_t cfg_override_value, bus_values[3];\nstatic bool cfg_override;\nstatic unsigned bus_override_mask;\nstatic const unsigned bus_offsets[]={0x1303c,0x13000,0x13004};')
 model=model.replace('assert(p==allocated && p->refs);++unpins;','assert(p==allocated && p->refs && !p->latched);++unpins;')
 start=model.index('extern "C" uintptr_t ml_io_map(');end=model.index('\nstatic bool is_smmu',start)
 model=model[:start]+r'''
@@ -47,7 +47,8 @@ model=model.replace('    assert(!(a&3));','''    assert(!(a&3));
     if(released && a==uintptr_t(gmu_full)+0x14070 && !fw_timeout)gmu_full[0x14070/4]=0xbabeface;
     if(a==uintptr_t(gmu_full)+0x7000 && fw_corrupt)return gmu_full[0x7000/4]^1;
     if(released && a==uintptr_t(gmu_full)+0x14648)return host_irq_fault;
-    if(cfg_override && a==uintptr_t(gmu_full)+0x140b4)return cfg_override_value;''',1)
+    if(cfg_override && a==uintptr_t(gmu_full)+0x140b4)return cfg_override_value;
+    for(unsigned i=0;i<3;i++)if((bus_override_mask&(1u<<i)) && a==uintptr_t(gmu_full)+bus_offsets[i])return bus_values[i];''',1)
 model=model.replace('    assert(is_smmu(a)&&!(a&3));++writes;','''    assert(!(a&3));++writes;
     if(!is_smmu(a)) {
         assert(in_range(a,gmu_full,sizeof(gmu_full)) || in_range(a,pdc_cfg,sizeof(pdc_cfg)) || in_range(a,pdc_seq,sizeof(pdc_seq)));
@@ -60,6 +61,7 @@ model=model.replace('    assert(!live&&!allocated);','''    // Test harness only
     if(allocated){delete allocated;allocated=nullptr;live=0;}
     released=fw_timeout=fw_missing=hold_fail=fw_corrupt=stale_init=cfg_override=false;
     cfg_override_value=0;
+    bus_override_mask=0;memset(bus_values,0,sizeof(bus_values));
     boot_writes=host_irq_fault=0;idle_enable=0;
     memset(pdc_cfg,0,sizeof(pdc_cfg));memset(pdc_seq,0,sizeof(pdc_seq));
     for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*3+1);''',1)
@@ -89,6 +91,15 @@ int main(){
  reset();alloc_fail=true;assert(run()!=0&&!writes&&!live);
  reset();hold_fail=true;assert(run()!=0&&!boot_writes&&!released);retained();
  reset();cfg_override=true;cfg_override_value=0x4050;assert(run()==0 && probe.boot.cm3_cfg_valid && probe.boot.cm3_cfg==0x4050);retained();
+ reset();cfg_override=true;cfg_override_value=0x52;bus_override_mask=7;
+ assert(run()==0 && probe.boot.cm3_cfg==0x52 && probe.boot.bus_cache_read_mask==7);retained();
+ assert(messages.find("bus/cache read_mask=7 SYS_BUS=00000000 ICACHE=00000000 DCACHE=00000000 (diagnostic only)")!=std::string::npos);
+ for(unsigned i=0;i<3;i++)assert(gmu_full[bus_offsets[i]/4]==1);
+ for(unsigned i=0;i<3;i++){
+  reset();bus_override_mask=1u<<i;bus_values[i]=UINT32_MAX;
+  assert(run()==-2 && !released && allocated->latched);retained();
+  assert(probe.boot.bus_cache_read_mask==((1u<<(i+1))-1) && probe.boot.bus_cache_readback[i]==UINT32_MAX);
+ }
  reset();cfg_override=true;cfg_override_value=0x4252;assert(run()==-8 && !released && allocated->latched);retained();
  assert(probe.boot.last_io==1 && probe.boot.last_ok && probe.boot.last_value==0x4252);
  reset();cfg_override=true;cfg_override_value=UINT32_MAX;assert(run()==-2&&!released);retained();

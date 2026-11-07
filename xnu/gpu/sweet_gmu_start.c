@@ -47,7 +47,7 @@ static int configure_cm3(struct start_io *io,uint32_t value)
     /* Pinned stock restores 0x4052 to clear NMI before boot, without requiring
      * whole-register equality. kgsl_gmu.c names NONMASKINTR at bit9 and reads
      * this register before setting it. Other readback bits are not specified.
-     * 0146b stopped on equality here, but did not record the actual value. */
+     * 0146b stopped on equality here; 0147 recorded 0x52 with NMI clear. */
     if (wr(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,value) ||
         io->o->barrier(io->o->ctx) ||
         rd(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,&io->s->cm3_cfg)) return -2;
@@ -58,6 +58,21 @@ static int configure_cm3(struct start_io *io,uint32_t value)
 static int tcm_write(void *p,uint32_t off,uint32_t value)
 {
     return wr(p,SWEET_GMU_REG,off,value);
+}
+static int observe_bus_cache_write(struct start_io *io,uint32_t off,uint32_t value,unsigned index)
+{
+    /* Pinned a6xx_gmu_power_config writes 1 to these three registers without
+     * testing readback. On 0147 SYS_BUS_CONFIG read 0 after the stock write.
+     * Preserve stock order/values, record reads, and reject I/O/all-ones;
+     * neither 0 nor another read value proves the requested state took effect.
+     * Stock snapshots include ICACHE/DCACHE but omit SYS_BUS_CONFIG; their
+     * readback semantics are not interchangeable or specified by that list.
+     * This is not evidence that these registers are write-only/self-clearing. */
+    uint32_t *actual=&io->s->bus_cache_readback[index];
+    if (wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
+        rd(io,SWEET_GMU_REG,off,actual)) return -2;
+    io->s->bus_cache_read_mask|=1u<<index;
+    return *actual==UINT32_MAX ? -2 : 0;
 }
 static int irq_status(struct start_io *io)
 {
@@ -132,8 +147,18 @@ int sweet_gmu_cold_start(struct sweet_gmu_start_state *s,
         {A6XX_GMU_CX_GMU_WFI_CONFIG,0}
     };
     for (size_t i=0;i<sizeof(config)/sizeof(config[0]);i++) {
-        error=config[i].offset==A6XX_GMU_CM3_CFG ? configure_cm3(&io,config[i].value) :
-            sync_write(&io,config[i].offset,config[i].value);
+        switch (config[i].offset) {
+        case A6XX_GMU_CM3_CFG:
+            error=configure_cm3(&io,config[i].value);break;
+        case A6XX_GMU_SYS_BUS_CONFIG:
+            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_SYS_BUS);break;
+        case A6XX_GMU_ICACHE_CONFIG:
+            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_ICACHE);break;
+        case A6XX_GMU_DCACHE_CONFIG:
+            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_DCACHE);break;
+        default:
+            error=sync_write(&io,config[i].offset,config[i].value);break;
+        }
         if (error) return error;
     }
     if (o->check(o->ctx,1)) return -3;

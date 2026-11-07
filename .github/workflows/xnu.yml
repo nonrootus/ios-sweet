@@ -112,7 +112,9 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0145-sweet-gmu-bandwidth-handoff.patch"
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET BCM: ACK complete;" > /dev/null
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_start.c --exclude=bsd/dev/sweet_gmu_start.h --exclude=bsd/dev/sweet_gmu_start_profile.h --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0146-sweet-gmu-first-cold-start.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0147-sweet-cm3-config-readback.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_start.c --exclude=bsd/dev/sweet_gmu_start.h --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0147-sweet-cm3-config-readback.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0148-sweet-gmu-bus-cache-readback.patch"
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: bus/cache read_mask=" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: CM3_CFG valid=" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: readback mismatch off=" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: fresh CM3 init BABEFACE;" > /dev/null

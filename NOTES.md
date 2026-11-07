@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Current 0148 handoff - 2026-11-07
+
+0147 repeated device boot produced a complete log: CM3_CFG read0x52;
+SYS_BUS_CONFIG write1/read0 stopped the full-word comparison at phase6,
+rc-7 release0. iOS loaded; CM3 execution is not demonstrated.
+0148 preserves stock SYS_BUS/ICACHE/DCACHE write values/order but records
+readbacks as diagnostics, rejecting callback errors and allones. Other
+configuration comparisons, NMI/power/reset/fault checks, one-attempt and
+permanent memory retention stay strict. No GX/HFI startup is added.
+See docs/sweet-k6a-gpu.md for target evidence and test commands.
+Local sequencer/adaptor ASan/UBSan, stock16-write trace, target-header ARM64
+compiles and full126-148 patch/final-source checks passed. Full CI/device
+result pending. Source-only publication; no device captures or identifiers.
+
+The earlier publication inadvertently copied a private historical NOTES
+section containing a device serial. This amended source commit restores the
+previous public notes plus this concise handoff; no firmware code changed.
+
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

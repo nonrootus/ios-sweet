@@ -6,7 +6,37 @@ Metal support has been demonstrated. The user reports a working but laggy iOS
 interface on the 2026-10-27 nowait image. Preserve the currently running
 session and the working boot image while researching acceleration.
 
-## Verified status, 2026-11-06
+## Verified status, 2026-11-07
+
+0147 full CI42265225050 passed. Its first captured log had wrapped, so it
+contained no startup evidence. A repeat temporary boot produced a complete
+225606-byte log (flush40): firmware check0, prepare0/install0, phase6,
+CM3_CFG read0x52 with NMI clear. The next exact comparison stopped at
+SYS_BUS_CONFIG (GMU-relative0x1303c), write1/read0, rc=-7, release0.
+SMMU global0/FSR0x400/FAR0/syndrome0; no CM3 execution demonstrated.
+The user confirmed iOS loaded and returned the phone to recovery.
+
+0148 preserves the pinned stock SYS_BUS_CONFIG/ICACHE_CONFIG/DCACHE_CONFIG
+writes (all1, same order), but records their reads without equality gates.
+Read/write/barrier failures and allones still stop before release. The
+`bus/cache read_mask` says which reads completed, not whether the requested
+hardware configuration took effect. All other exact comparisons, NMI,
+power/reset/fault/fresh-result checks and permanent memory retention remain.
+The reason SYS_BUS reads0 is unknown: neither a successful callback nor the
+stock sequence proves that it is write-only, self-clearing, or applied.
+
+Primary target evidence: Xiaomi10c33d40 `adreno_a6xx_gmu.c:294-340` writes
+these three registers without testing readback; its snapshot range list at
+line50 includes ICACHE/DCACHE (0x1f400/0x1f401), but omits SYS_BUS (0x1f40f).
+That distinction does not document the bit semantics. `kgsl_gmu.c:1396` and
+`kgsl_gmu_core.c:223-243` give the conversion from GPU dwords to GMU-relative
+bytes: `(register - ((0x0506a000-0x05000000)/4))*4`. The resulting offsets
+0x1303c/0x13000/0x13004 match the profile and captured register resources.
+0148 local ASan/UBSan sequencer and composed adapter checks passed, including
+the measured readbacks, synthetic variants, allones and callback failures,
+strict adjacent-register mismatches, lifetime and fault handling. The stock
+16-write trace, target-header ARM64 compilation and full126-148 patch/final
+source checks passed. Full XNU CI and phone testing are pending.
 
 0146b reached CONFIG after firmware copy/check, SMMU prepare/install and
 complete 32 KiB TCM load/readback. It stopped before CM3 release: rc=-2,
@@ -19,10 +49,10 @@ was not logged. This does not establish firmware execution or acceleration.
 after the barrier. The bit comes from `kgsl_gmu.c`'s
 `GMU_CM3_CFG_NONMASKINTR_SHIFT` and its read/modify/write NMI path; semantics
 of the other readback bits are unspecified. All other register comparisons
-remain strict. New diagnostics retain the CFG value and exact mismatched
+remained strict in0147. New diagnostics retain the CFG value and exact mismatched
 offset/expected/actual values; rc=-7 means mismatch, rc=-8 means NMI set.
 The entry now requires `sweetgpucheck=1` and reports firmware-getter and
-reset/idle guard failures. Full kernel CI and device testing remain pending.
+reset/idle guard failures. Its full CI and device result are recorded above.
 
 `sweet_gmu_stock_config_test.py STOCK_CACHE BUILD_DIRECTORY` compiles the
 unchanged pinned stock firmware-start, power-config and CM3-start functions

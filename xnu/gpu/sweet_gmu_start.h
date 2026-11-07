@@ -17,6 +17,10 @@ enum sweet_gmu_start_stage {
     SWEET_GMU_START_CONFIG, SWEET_GMU_START_RELEASE,
     SWEET_GMU_START_READY
 };
+enum sweet_gmu_bus_cache_index {
+    SWEET_GMU_SYS_BUS, SWEET_GMU_ICACHE, SWEET_GMU_DCACHE,
+    SWEET_GMU_BUS_CACHE_COUNT
+};
 struct sweet_gmu_start_ops {
     void *ctx;
     int (*read32)(void *, unsigned region, uint32_t offset, uint32_t *);
@@ -37,6 +41,8 @@ struct sweet_gmu_start_state {
      * A successful write callback alone does not establish register state. */
     uint32_t last_io, last_ok, last_value, cm3_cfg, cm3_cfg_valid;
     uint32_t mismatch_offset, mismatch_expected, mismatch_actual;
+    /* Read completion only, not verification of buffer/cache configuration. */
+    uint32_t bus_cache_read_mask, bus_cache_readback[SWEET_GMU_BUS_CACHE_COUNT];
 };
 /* 0: fresh BABEFACE + postcheck. -1 invalid/repeated, -2 callback/I/O error,
  * -3 precondition/profile mismatch, -4 deadline, -5 TCM verification failure,

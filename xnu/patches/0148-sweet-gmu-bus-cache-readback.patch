@@ -1,0 +1,88 @@
+--- a/bsd/dev/sweet_gmu_start.c
++++ b/bsd/dev/sweet_gmu_start.c
+@@ -47,7 +47,7 @@
+     /* Pinned stock restores 0x4052 to clear NMI before boot, without requiring
+      * whole-register equality. kgsl_gmu.c names NONMASKINTR at bit9 and reads
+      * this register before setting it. Other readback bits are not specified.
+-     * 0146b stopped on equality here, but did not record the actual value. */
++     * 0146b stopped on equality here; 0147 recorded 0x52 with NMI clear. */
+     if (wr(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,value) ||
+         io->o->barrier(io->o->ctx) ||
+         rd(io,SWEET_GMU_REG,A6XX_GMU_CM3_CFG,&io->s->cm3_cfg)) return -2;
+@@ -58,6 +58,21 @@
+ static int tcm_write(void *p,uint32_t off,uint32_t value)
+ {
+     return wr(p,SWEET_GMU_REG,off,value);
++}
++static int observe_bus_cache_write(struct start_io *io,uint32_t off,uint32_t value,unsigned index)
++{
++    /* Pinned a6xx_gmu_power_config writes 1 to these three registers without
++     * testing readback. On 0147 SYS_BUS_CONFIG read 0 after the stock write.
++     * Preserve stock order/values, record reads, and reject I/O/all-ones;
++     * neither 0 nor another read value proves the requested state took effect.
++     * Stock snapshots include ICACHE/DCACHE but omit SYS_BUS_CONFIG; their
++     * readback semantics are not interchangeable or specified by that list.
++     * This is not evidence that these registers are write-only/self-clearing. */
++    uint32_t *actual=&io->s->bus_cache_readback[index];
++    if (wr(io,SWEET_GMU_REG,off,value) || io->o->barrier(io->o->ctx) ||
++        rd(io,SWEET_GMU_REG,off,actual)) return -2;
++    io->s->bus_cache_read_mask|=1u<<index;
++    return *actual==UINT32_MAX ? -2 : 0;
+ }
+ static int irq_status(struct start_io *io)
+ {
+@@ -132,8 +147,18 @@
+         {A6XX_GMU_CX_GMU_WFI_CONFIG,0}
+     };
+     for (size_t i=0;i<sizeof(config)/sizeof(config[0]);i++) {
+-        error=config[i].offset==A6XX_GMU_CM3_CFG ? configure_cm3(&io,config[i].value) :
+-            sync_write(&io,config[i].offset,config[i].value);
++        switch (config[i].offset) {
++        case A6XX_GMU_CM3_CFG:
++            error=configure_cm3(&io,config[i].value);break;
++        case A6XX_GMU_SYS_BUS_CONFIG:
++            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_SYS_BUS);break;
++        case A6XX_GMU_ICACHE_CONFIG:
++            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_ICACHE);break;
++        case A6XX_GMU_DCACHE_CONFIG:
++            error=observe_bus_cache_write(&io,config[i].offset,config[i].value,SWEET_GMU_DCACHE);break;
++        default:
++            error=sync_write(&io,config[i].offset,config[i].value);break;
++        }
+         if (error) return error;
+     }
+     if (o->check(o->ctx,1)) return -3;
+--- a/bsd/dev/sweet_gmu_start.h
++++ b/bsd/dev/sweet_gmu_start.h
+@@ -16,6 +16,10 @@
+     SWEET_GMU_START_PDC, SWEET_GMU_START_TCM,
+     SWEET_GMU_START_CONFIG, SWEET_GMU_START_RELEASE,
+     SWEET_GMU_START_READY
++};
++enum sweet_gmu_bus_cache_index {
++    SWEET_GMU_SYS_BUS, SWEET_GMU_ICACHE, SWEET_GMU_DCACHE,
++    SWEET_GMU_BUS_CACHE_COUNT
+ };
+ struct sweet_gmu_start_ops {
+     void *ctx;
+@@ -37,6 +41,8 @@
+      * A successful write callback alone does not establish register state. */
+     uint32_t last_io, last_ok, last_value, cm3_cfg, cm3_cfg_valid;
+     uint32_t mismatch_offset, mismatch_expected, mismatch_actual;
++    /* Read completion only, not verification of buffer/cache configuration. */
++    uint32_t bus_cache_read_mask, bus_cache_readback[SWEET_GMU_BUS_CACHE_COUNT];
+ };
+ /* 0: fresh BABEFACE + postcheck. -1 invalid/repeated, -2 callback/I/O error,
+  * -3 precondition/profile mismatch, -4 deadline, -5 TCM verification failure,
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -231,6 +231,9 @@
+     report_faults(s);
+     IOLog("SWEET GMU BOOT: CM3_CFG valid=%u value=%08x; last_io=%u ok=%u value=%08x\n",
+         s->boot.cm3_cfg_valid,s->boot.cm3_cfg,s->boot.last_io,s->boot.last_ok,s->boot.last_value);
++    IOLog("SWEET GMU BOOT: bus/cache read_mask=%x SYS_BUS=%08x ICACHE=%08x DCACHE=%08x (diagnostic only)\n",
++        s->boot.bus_cache_read_mask,s->boot.bus_cache_readback[SWEET_GMU_SYS_BUS],
++        s->boot.bus_cache_readback[SWEET_GMU_ICACHE],s->boot.bus_cache_readback[SWEET_GMU_DCACHE]);
+     if (s->boot.mismatch_offset) IOLog("SWEET GMU BOOT: readback mismatch off=%x expected=%08x actual=%08x\n",
+         s->boot.mismatch_offset,s->boot.mismatch_expected,s->boot.mismatch_actual);
+     IOLog("SWEET GMU BOOT: done rc=%d phase=%u held=%u release=%u init=%08x host_irq=%08x ao_irq=%08x pdc_before=%08x last=%u/%x\n",

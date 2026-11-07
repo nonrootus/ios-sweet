@@ -61,6 +61,8 @@ static unsigned eligible[1024],eligible_count;
 static enum sweet_gmu_start_stage current;
 static int bad_check,hold_fail,timeout,tcm_bad,stale,host_fault,ao_fault;
 static unsigned cfg_read_override,config_mismatch;static uint32_t cfg_read_value;
+static unsigned bus_read_override;static uint32_t bus_read_values[3];
+static const uint32_t bus_offsets[]={A6XX_GMU_SYS_BUS_CONFIG,A6XX_GMU_ICACHE_CONFIG,A6XX_GMU_DCACHE_CONFIG};
 static int hit(unsigned region,unsigned offset){
  ++calls;
  if(region || offset<0x3000 || offset>=0xb000 || offset==0x3000 || offset==0x7000 || offset==0xaffc){
@@ -78,7 +80,8 @@ static int read32(void *ctx,unsigned region,uint32_t off,uint32_t *v){
   *reg(region,off)=0xbabeface;
  *v=*reg(region,off);
  if(!region && off==A6XX_GMU_CM3_CFG && cfg_read_override)*v=cfg_read_value;
- if(!region && off==A6XX_GMU_HFI_SFR_ADDR && config_mismatch)*v^=1;
+ if(!region)for(unsigned i=0;i<3;i++)if(off==bus_offsets[i] && (bus_read_override&(1u<<i)))*v=bus_read_values[i];
+ if(!region && off==config_mismatch && config_mismatch)*v^=1;
  if(!region && off==0x7000 && tcm_bad)*v^=1;
  if(release_count && !region && off==A6XX_GMU_GMU2HOST_INTR_INFO)*v|=(unsigned)host_fault;
  if(release_count && !region && off==A6XX_GMU_AO_HOST_INTERRUPT_STATUS)*v|=(unsigned)ao_fault;
@@ -117,6 +120,7 @@ static void reset(void){
  calls=fail_at=write_count=hold_count=held=release_count=elapsed=pdc_count=eligible_count=0;
  current=SWEET_GMU_START_EMPTY;bad_check=-1;hold_fail=timeout=tcm_bad=stale=host_fault=ao_fault=0;
  cfg_read_override=config_mismatch=cfg_read_value=0;
+ bus_read_override=0;memset(bus_read_values,0,sizeof(bus_read_values));
  *reg(0,A6XX_GMU_CM3_SYSRESET)=1;
  for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*17+3);
 }
@@ -132,16 +136,33 @@ int main(void){
  for(unsigned i=0;i<n;i++){
   reset();fail_at=cuts[i];assert(run()!=0);
   assert(state.stage!=SWEET_GMU_START_READY && release_count<=1);
+  if(state.stage<=SWEET_GMU_START_CONFIG)assert(!release_count && !state.release_attempted);
   if(write_count)assert(held && state.held);
   before=write_count;assert(run()==-1 && before==write_count);
  }
  reset();hold_fail=1;assert(run()==-3 && !write_count && !state.held);
- /* Alternate values are synthetic, not measurements from 0146b. Only the
-  * stock NMI bit is a supported CFG predicate; other sync writes stay strict. */
- const uint32_t cfg_values[]={0,0x4050,0x4052,0x80000000};
+ /* CFG 0x52 and SYS_BUS 0 are actual 0147 observations; other alternate
+  * values are synthetic. Unrelated sync writes must remain strict. */
+ const uint32_t cfg_values[]={0,0x52,0x4050,0x4052,0x80000000};
  for(unsigned i=0;i<sizeof(cfg_values)/sizeof(cfg_values[0]);i++){
   reset();cfg_read_override=1;cfg_read_value=cfg_values[i];
   assert(!run() && state.cm3_cfg_valid && state.cm3_cfg==cfg_values[i]);
+ }
+ /* Three stock bus/cache writes keep order/value even when reads differ.
+  * A mock fresh BABEFACE proves model progression only, not hardware state. */
+ const uint32_t bus_values[]={0,1,0x80000000,0xfffffffe};
+ for(unsigned i=0;i<3;i++)for(unsigned j=0;j<sizeof(bus_values)/sizeof(bus_values[0]);j++){
+  reset();bus_read_override=1u<<i;bus_read_values[i]=bus_values[j];
+  assert(!run() && state.bus_cache_read_mask==7 && state.bus_cache_readback[i]==bus_values[j]);
+  for(unsigned k=0;k<3;k++)assert(*reg(0,bus_offsets[k])==1);
+ }
+ reset();cfg_read_override=1;cfg_read_value=0x52;bus_read_override=7;
+ assert(!run() && state.bus_cache_read_mask==7 && state.cm3_cfg==0x52);
+ for(unsigned i=0;i<3;i++){
+  reset();bus_read_override=1u<<i;bus_read_values[i]=UINT32_MAX;
+  assert(run()==-2 && !release_count && held && !state.mismatch_offset);
+  assert(state.bus_cache_read_mask==((1u<<(i+1))-1) && state.bus_cache_readback[i]==UINT32_MAX);
+  assert(state.last_offset==bus_offsets[i] && state.last_io==1 && state.last_ok);
  }
  const uint32_t cfg_bad[]={UINT32_MAX,1u<<9,0x4252};
  for(unsigned i=0;i<sizeof(cfg_bad)/sizeof(cfg_bad[0]);i++){
@@ -149,14 +170,26 @@ int main(void){
   assert(run()==(cfg_bad[i]==UINT32_MAX?-2:-8) && !release_count && held && state.cm3_cfg_valid);
   assert(state.last_offset==A6XX_GMU_CM3_CFG && state.last_io==1 && state.last_ok && state.last_value==cfg_bad[i]);
  }
- reset();config_mismatch=1;assert(run()==-7 && !release_count && held);
+ reset();config_mismatch=A6XX_GMU_HFI_SFR_ADDR;assert(run()==-7 && !release_count && held);
  assert(state.mismatch_offset==A6XX_GMU_HFI_SFR_ADDR && state.mismatch_expected==0x06018000 && state.mismatch_actual==0x06018001);
  assert(state.last_offset==A6XX_GMU_HFI_SFR_ADDR && state.last_io==1 && state.last_ok && state.last_value==0x06018001);
+ const uint32_t strict_config[][2]={
+  {A6XX_GMU_CM3_BOOT_CONFIG,2},{A6XX_GMU_HFI_QTBL_ADDR,0x60100000},
+  {A6XX_GMU_HFI_QTBL_INFO,1},{A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_MSG,0x60300000},
+  {A6XX_GMU_PWR_COL_INTER_FRAME_CTRL,0x09c40400},{A6XX_GMU_RPMH_CTRL,0xf11},
+  {A6XX_GMU_CX_GMU_WFI_CONFIG,0}};
+ for(unsigned i=0;i<sizeof(strict_config)/sizeof(strict_config[0]);i++){
+  reset();config_mismatch=strict_config[i][0];assert(run()==-7 && !release_count && held);
+  assert(state.mismatch_offset==strict_config[i][0] && state.mismatch_expected==strict_config[i][1]);
+  assert(state.mismatch_actual==(strict_config[i][1]^1));
+ }
  for(int p=0;p<3;p++){reset();bad_check=p;assert(run()==-3);if(!p)assert(!write_count);else assert(held);}
  reset();timeout=1;assert(run()==-4 && elapsed==100000 && state.release_attempted && held);
+ assert(state.bus_cache_read_mask==7);
  reset();tcm_bad=1;assert(run()==-5 && !release_count && held);
  reset();stale=1;assert(run()==-7 && !release_count && held);
  reset();host_fault=1u<<15;assert(run()==-6 && state.host_irq==(1u<<15) && held);
+ assert(state.bus_cache_read_mask==7);
  for(unsigned bit=0;bit<6;bit++)if(0x29u&(1u<<bit)){reset();ao_fault=1u<<bit;assert(run()==-6 && held);}
  reset();*reg(0,A6XX_GMU_RPMH_CTRL)=1u<<12;assert(run()==-3 && !write_count);
  reset();*reg(0,A6XX_GMU_GPU_NAP_CTRL)=1;assert(run()==-3 && !write_count);

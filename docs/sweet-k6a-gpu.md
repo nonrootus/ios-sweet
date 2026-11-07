@@ -61,6 +61,24 @@ match the actual sequencer in order and value, including preservation of
 three initial RPMH_CTRL variants. This complements the48-write PDC reference
 test; it does not validate register readback or actual firmware execution.
 
+`sweet_gmu_postboot_stock_test.py STOCK_CACHE BUILD_DIRECTORY` extracts the
+unchanged stock post-CM3 sequence with earlier initialization stubbed. Its16
+host-only success/timeout cases establish the reference OOB request bit22,
+ACK/ACK-clear bit30, primary/secondary ARC index order, SPTPRAC then HFI.
+Stock keeps the boot request asserted on success; acknowledging its response
+is a different operation. These traces are not a hardware adapter or evidence
+of working GX/HFI. The host uses the pinned kernel's `-fno-strict-overflow`
+because its preboot fence macro contains signed `1 << 31`; sanitizer errors
+are fatal, and the final ASan/UBSan run passed.
+
+When selecting a future power table, distinguish the sysfs power-level count
+from the internal count: pinned `kgsl_pwrctrl.c:772-783` returns internal count
+minus the final off entry. Both captured FDTs contain that zero-frequency
+entry. The recovery profile's sysfs7/default6 matches a table of8 entries and
+GMU index1, not index0. Original bin167 includes140MHz and9 entries; recovery
+bin167 removes140MHz and has8. The match is an inference about bin selection,
+not direct fuse verification; do not substitute recovery OPPs silently.
+
 0146 implements an opt-in first CM3 boot, ending at fresh BABEFACE before
 GX OOB, SPTPRAC or HFI initialization. `sweetgmustart=1` requires the existing
 power/clock/status flags, successful same-boot DDR handoff and `jtag=1 wfi=0`;

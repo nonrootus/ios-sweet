@@ -8,6 +8,53 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-07
 
+0148 reached fresh CM3 firmware readiness on the actual sweet_k6a: rc0,
+phase8, held1/release1, BABEFACE. The complete235500-byte log (flush17) has
+SMMU global0/FSR400/FAR0/syndrome0 and sampled host/ao error IRQ0.
+CM3_CFG read52; all three bus/cache reads were0 with read_mask7. The user
+confirmed iOS loaded and returned to recovery. GX/OOB and HFI were not
+started by that test; there is no evidence of GPU rendering yet.
+
+0149 adds a separate `sweetgmuhfi=1` entry, only after the successful first
+CM3 start in that boot. It requests GX through legacy OOB, requires GX status
+on before accessing the GX SPTPRAC register, then starts HFI and sends INIT
+and FW_VERSION. This deliberately uses the stock **ACTIVE / ifpc=0** path,
+not A618's default IFPC policy. The original cold-start checks still require
+GX collapsed; only the post-OOB guard permits its power state to change.
+The request, DDR votes, clocks and all mappings stay held until reboot on
+every outcome, including timeouts. Unlike stock's error path, no host boot
+request clear is attempted. No retry, reset, teardown or GPU submission exists.
+
+The boot rail profile is explicitly stock MIN_SVS, not a guessed speed bin.
+Pinned `gpucc-sdmmagpie.c` maps180MHz to VDD_GX_MIN and MIN_SVS; the regulator
+binding encodes this as48+1. Both captured FDTs link the clock's OPP provider
+to the GPU and contain no explicit `opp-microvolt` properties. Pinned
+`drivers/clk/clk.c` populates OPPs from the clock's voltage class. The adapter
+reads current GFX/MX cmd-db tables and computes indexes instead of hardcoding
+them. The private captured database gives2/2, packed00400202, matching the
+unchanged stock ARC calculation. This request does not program or measure a
+GPU frequency, establish actual voltage, or identify the active fuse bin.
+
+HFI success requires an actual matching sequence/header ACK, not an IRQ bit.
+The version register is read after INIT, as in stock; v2 stops before another
+legacy packet. ERR events stop with a distinct firmware error, DEBUG events
+are recorded and skipped within the same bounded deadline. No event text is
+logged. Polled transport leaves GIC/IRQ handling masked, acknowledges only the
+response bits, and keeps all error flags available for diagnosis. The result
+records queue indexes and health samples at1s and10s. Passing those samples
+does not establish long-term stability with incomplete HFI initialization.
+PERF/BW/TEST, GPU firmware/command submission and iOS acceleration are not
+started by0149. Full CI and actual-device outcome are not yet established.
+
+New host tests: `sweet_gmu_postboot_test.py STOCK_CACHE BUILD_DIR` validates
+register offsets against pinned headers and exercises the real sequencer,
+queue transport and packet codecs. `sweet_gmu_boot_vote_test.py STOCK_CACHE
+COMPOSED_RPMH DB_BIN BUILD_DIR` compiles the actual ARC accessor and stock
+dependency calculation against the private verified database. The generated
+fixture contains device data and must remain outside git. The persistent
+adapter test additionally verifies the live GX state transition, error paths
+and permanent retention using actual SMMU/CM3/HFI helpers.
+
 0147 full CI42265225050 passed. Its first captured log had wrapped, so it
 contained no startup evidence. A repeat temporary boot produced a complete
 225606-byte log (flush40): firmware check0, prepare0/install0, phase6,
@@ -36,7 +83,9 @@ bytes: `(register - ((0x0506a000-0x05000000)/4))*4`. The resulting offsets
 the measured readbacks, synthetic variants, allones and callback failures,
 strict adjacent-register mismatches, lifetime and fault handling. The stock
 16-write trace, target-header ARM64 compilation and full126-148 patch/final
-source checks passed. Full XNU CI and phone testing are pending.
+source checks passed. Full XNU CI42338621208 and required source/kernel checks
+passed for efb35f2. Verified image was sent with temporary fastboot boot OKAY;
+the fresh 0148 recovery log establishes CM3 initialization as recorded above.
 
 0146b reached CONFIG after firmware copy/check, SMMU prepare/install and
 complete 32 KiB TCM load/readback. It stopped before CM3 release: rc=-2,

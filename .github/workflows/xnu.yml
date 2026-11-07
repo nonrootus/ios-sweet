@@ -107,13 +107,16 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0142-sweet-command-db-snapshot.patch"
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CMDDB: end bytes=' > /dev/null
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0143-sweet-gmu-execution-memory-latch.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0144-sweet-rpmh-inventory-hfi-bandwidth.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files "$GITHUB_WORKSPACE/xnu/patches/0144-sweet-rpmh-inventory-hfi-bandwidth.patch"
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET TCS: end stable=" > /dev/null
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0145-sweet-gmu-bandwidth-handoff.patch"
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET BCM: ACK complete;" > /dev/null
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_start.c --exclude=bsd/dev/sweet_gmu_start.h --exclude=bsd/dev/sweet_gmu_start_profile.h --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0146-sweet-gmu-first-cold-start.patch"
-          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_start.c --exclude=bsd/dev/sweet_gmu_start.h --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0147-sweet-cm3-config-readback.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0148-sweet-gmu-bus-cache-readback.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_start.c --exclude=bsd/dev/sweet_gmu_start.h --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0147-sweet-cm3-config-readback.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0148-sweet-gmu-bus-cache-readback.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0149-sweet-gmu-gx-hfi-start.patch"
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU HFI: begin GX and initial INIT/VERSION;" > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU HFI: retained until reboot; PERF/BW/TEST" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: bus/cache read_mask=" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: CM3_CFG valid=" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU BOOT: readback mismatch off=" > /dev/null
@@ -125,6 +128,12 @@ jobs:
           for name in sweet_smmu_context.c sweet_smmu_context.h sweet_smmu_k6a.c sweet_smmu_k6a.h sweet_gpu_pte.c sweet_gpu_pte.h sweet_gpu_tables.c sweet_gpu_tables.h sweet_gpu_hfi_table.c sweet_gpu_hfi_table.h sweet_gmu_layout.c sweet_gmu_layout.h sweet_hfi_codec.c sweet_hfi_codec.h sweet_hfi_transport.c sweet_hfi_transport.h sweet_hfi_bw.c sweet_hfi_bw.h sweet_gpu_probe.c sweet_gmu_start.c sweet_gmu_start.h sweet_gmu_start_profile.h sweet_hfi_perf.c sweet_hfi_perf.h; do
             cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
           done
+          for name in sweet_gmu_postboot.c sweet_gmu_postboot.h sweet_gmu_postboot_profile.h sweet_gmu_arc.c sweet_gmu_arc.h; do
+            cmp "xnu/gpu/$name" "dxb/xnu/bsd/dev/$name"
+          done
+          grep -Fx $'bsd/dev/sweet_gmu_postboot.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          grep -Fx $'bsd/dev/sweet_gmu_arc.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
+          grep -Fx $'bsd/dev/sweet_hfi_bw.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
           grep -Fx $'bsd/dev/sweet_smmu_context.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
           grep -Fx $'bsd/dev/sweet_gmu_layout.c\t\tstandard' dxb/xnu/bsd/conf/files > /dev/null
           grep -Fx 'iokit/Kernel/arm/sweet_gmu_memory.cpp                            optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null

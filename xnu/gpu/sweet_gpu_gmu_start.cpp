@@ -1,6 +1,7 @@
 /* One-shot first firmware boot with permanently retained SID5 memory.
  * This is separate from the inactive SMMU diagnostic. No teardown, retry,
- * clock release, GX/OOB, HFI initialization or GPU submission after entry.
+ * clock release or GPU submission. A separate opt-in entry follows CM3 with
+ * GX/OOB and initial HFI messages, using this same permanent ownership.
  * Sole early root-device owner; jtag=1,wfi=0 and successful DDR handoff required.
  */
 #include "sweet_gmu_memory.h"
@@ -13,16 +14,24 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_smmu_k6a.h"
 #include "../../../bsd/dev/sweet_gmu_start.h"
 #include "../../../bsd/dev/sweet_gmu_start_profile.h"
+#include "../../../bsd/dev/sweet_gmu_postboot.h"
+#include "../../../bsd/dev/sweet_gmu_postboot_profile.h"
+#include "../../../bsd/dev/sweet_gmu_arc.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
 #include "sweet_gmu_start_profile.h"
+#include "sweet_gmu_postboot.h"
+#include "sweet_gmu_postboot_profile.h"
+#include "sweet_gmu_arc.h"
 #endif
 }
 
 struct persistent_gmu {
     uintptr_t gcc, cc, gmu, smmu, region[3];
     sweet_gmu_start_state boot;
+    sweet_gmu_postboot_state postboot;
+    sweet_hfi_transport transport;
     volatile uint32_t *hfi_cpu;
     uint32_t hfi_bytes;
     sweet_gmu_memory *memory;
@@ -35,6 +44,7 @@ struct persistent_gmu {
  * hardware failure. A failed attempt cannot be retried in the same boot. */
 static persistent_gmu probe;
 static unsigned attempted;
+static unsigned postboot_attempted;
 
 static uint32_t mmio_read(uintptr_t address)
 {
@@ -109,6 +119,9 @@ static int power_check(void *opaque, unsigned phase)
     if (!s->checked_power) IOLog("SWEET GMU BOOT: GMU clock=%08x root=%08x cfg=%08x\n", clock, root, cfg);
     if ((clock & 0x80000001u) != 1 || (root & 0x80000003u) ||
         cfg != 0x602) return -1;
+    /* Phase3 follows CM3 readiness and permits the GMU to power GX.
+     * Phases0-2 preserve the original cold-start collapsed-only guard. */
+    if (phase < 3) {
     uint32_t gx = mmio_read(s->cc + 0x00c);
     if (!s->checked_power) IOLog("SWEET GMU BOOT: GX=%08x (requires collapsed, software control)\n", gx);
     if ((gx & 0x80000007u) != 1) return -1;
@@ -117,12 +130,13 @@ static int power_check(void *opaque, unsigned phase)
     uint32_t gx_status = mmio_read(s->cc + 0x010);
     if (!s->checked_power) IOLog("SWEET GMU BOOT: GX completion=%08x\n", gx_status);
     if (gx_status == UINT32_MAX || (gx_status & 0x18000u) != 0x8000u) return -1;
+    }
     uint32_t reset=mmio_read(s->gmu),retention=mmio_read(s->gmu+0x730);
-    if (reset!=(phase==2 ? 0u : 1u) || retention!=(phase ? 1u : 0u)) {
+    if (reset!=(phase>=2 ? 0u : 1u) || retention!=(phase ? 1u : 0u)) {
         IOLog("SWEET GMU BOOT: reset guard phase=%u reset=%08x retention=%08x\n",phase,reset,retention);
         return -1;
     }
-    if (phase!=2) {
+    if (phase<2) {
         uint32_t busy=mmio_read(s->gmu+0x068),init=mmio_read(s->gmu+0x070);
         if (busy || init) {
             IOLog("SWEET GMU BOOT: inactive guard busy=%08x init=%08x\n",busy,init);
@@ -151,7 +165,7 @@ static int stopped(void *opaque) { return power_check(opaque,0); }
 static int boot_check(void *opaque, unsigned phase)
 {
     auto *s=static_cast<persistent_gmu *>(opaque);
-    if (phase>2 || idle_enable || power_check(s,phase) ||
+    if (phase>3 || idle_enable || power_check(s,phase) ||
         s->context.state!=SWEET_SMMU_CONTEXT_ACTIVE || !s->context.retained) return -1;
     uint32_t global,fsr,smr;
     if (read32(s,0x48,&global) || read32(s,0x8058,&fsr) ||
@@ -241,5 +255,61 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
         s->boot.fw_init,s->boot.host_irq,s->boot.ao_irq,s->boot.pdc_before,s->boot.last_region,s->boot.last_offset);
     if (!rc) IOLog("SWEET GMU BOOT: fresh CM3 init BABEFACE; GX OOB and HFI not started\n");
     IOLog("SWEET GMU BOOT: all mappings retained until reboot; no acceleration\n");
+    return rc;
+}
+
+extern "C" int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
+static int post_read(void *p,uint32_t off,uint32_t *value) { return boot_read(p,0,off,value); }
+static int post_write(void *p,uint32_t off,uint32_t value) { return boot_write(p,0,off,value); }
+static int post_check(void *p)
+{
+    auto *s=static_cast<persistent_gmu *>(p);
+    if(s->boot.stage!=SWEET_GMU_START_READY || !s->boot.held || !s->boot.release_attempted ||
+        !s->hfi_cpu || s->hfi_bytes!=0x5000 || boot_check(s,3))return -1;
+    return mmio_read(s->gmu+0x70)==0xbabeface ? 0 : -1;
+}
+static void hfi_barrier(void *p) { (void)complete(p); }
+static int hfi_doorbell(void *p)
+{
+    if(post_check(p))return -1;
+    return post_write(p,A6XX_GMU_HOST2GMU_INTR_SET,1) || complete(p) ? -1 : 0;
+}
+static void post_progress(void *,enum sweet_gmu_postboot_stage p)
+{
+    IOLog("SWEET GMU HFI: phase=%u; boot request and memory held until reboot\n",static_cast<unsigned>(p));
+}
+extern "C" int sweet_gpu_gmu_hfi_start(void)
+{
+    auto *s=&probe;
+    if(!__sync_bool_compare_and_swap(&postboot_attempted,0u,1u))return -1;
+    IOLog("SWEET GMU HFI: begin GX and initial INIT/VERSION; no GPU submission\n");
+    if(!attempted || boot_check(s,2) || post_check(s))return -3;
+    /* Resolve indexes from live read-only command DB. Select the pinned stock
+     * MIN_SVS boot voltage explicitly, without claiming a fuse/speed-bin or
+     * programming a clock rate. No voltage/current-rail read is inferred. */
+    uint16_t gfx[16]={0},mx[16]={0};unsigned ngfx=0,nmx=0;
+    uint32_t gfx_address=0,mx_address=0,vote=0;
+    int rc=sweet_rpmh_gpu_arc_info("gfx.lvl",&gfx_address,gfx,&ngfx);
+    if(!rc)rc=sweet_rpmh_gpu_arc_info("mx.lvl",&mx_address,mx,&nmx);
+    if(!rc)rc=sweet_gmu_arc_vote(gfx,ngfx,mx,nmx,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE,&vote);
+    IOLog("SWEET GMU HFI: boot ARC rc=%d gfx=%x mx=%x level_plus_one=%u packed=%08x\n",
+        rc,gfx_address,mx_address,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE,vote);
+    if(rc || gfx_address==mx_address || (gfx_address>>16)!=3 || (mx_address>>16)!=3)return -3;
+    s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0};
+    sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,post_progress};
+    rc=sweet_gmu_postboot(&s->postboot,&ops,&s->transport,vote);
+    report_faults(s);
+    auto &p=s->postboot;
+    IOLog("SWEET GMU HFI: done rc=%d phase=%u OOB=%u/%u SPTP=%u HFI=%u GX=%08x status=%08x wire=%08x fw=%08x\n",
+        rc,static_cast<unsigned>(p.stage),p.oob_issued,p.oob_ack,p.sptp_issued,p.hfi_issued,
+        p.gx_status,p.hfi_status,p.wire_version,p.firmware_version);
+    IOLog("SWEET GMU HFI: INIT=%u/%u VERSION=%u/%u err=%08x irq=%08x/%08x last=%x/%08x ack=%08x/%08x queues=%u/%u %u/%u\n",
+        p.init_sent,p.init_ack,p.version_sent,p.version_ack,p.firmware_error,p.host_irq,p.ao_irq,
+        p.last_offset,p.last_value,p.response_header,p.original_header,p.cmd_read,p.cmd_write,p.msg_read,p.msg_write);
+    IOLog("SWEET GMU HFI: DEBUG=%u event=%08x/%08x observations=%u\n",p.debug_messages,p.event_header,p.event_code,p.observed);
+    for(unsigned i=0;i<p.observed && i<2;i++)
+        IOLog("SWEET GMU HFI: observed %us irq=%08x/%08x GX=%08x HFI=%08x\n",
+            i ? 10u : 1u,p.samples[i][0],p.samples[i][1],p.samples[i][2],p.samples[i][3]);
+    IOLog("SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started\n");
     return rc;
 }

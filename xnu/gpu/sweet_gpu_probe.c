@@ -174,11 +174,15 @@ static void gmu_tcm_probe(vm_offset_t status, vm_offset_t gcc, vm_offset_t cc) {
 void
 sweet_gpu_probe(void)
 {
-    int enabled = 0, k6a = 0, requested_start = 0;
+    int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
     vm_offset_t gcc;
     uint32_t state;
 
     PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
+    PE_parse_boot_argn("sweetgmuhfi", &requested_hfi, sizeof(requested_hfi));
+    if(requested_hfi && (requested_hfi!=1 || requested_start!=1)) {
+        printf("SWEET GMU HFI: requires sweetgmuhfi=1 sweetgmustart=1\n");return;
+    }
     if (requested_start == 1) {
         const char *required[] = {"sweetgpuprobe", "sweetk6a", "sweetgmubw", "sweetgpucxon", "sweetgpuclk", "sweetgmuclock", "sweetgmustatus", "sweetgpucheck"};
         const char *conflicting[] = {"sweetgmuload", "sweetgpusmmuinit"};
@@ -400,7 +404,14 @@ sweet_gpu_probe(void)
                                             printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", bw_rc);
                                             if (requested_start == 1) {
                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
-                                                else printf("SWEET GMU BOOT: entry rc=%d\n", sweet_gpu_gmu_start(gcc, cc, gmu));
+                                                else {
+                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu);
+                                                    printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
+                                                    if(!start_rc && requested_hfi==1) {
+                                                        extern int sweet_gpu_gmu_hfi_start(void);
+                                                        printf("SWEET GMU HFI: entry rc=%d\n",sweet_gpu_gmu_hfi_start());
+                                                    }
+                                                }
                                                 return; /* no other GPU diagnostics after an attempted start */
                                             }
                                         }

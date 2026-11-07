@@ -2,7 +2,7 @@
 #define SWEET_GMU_ARC_H
 #include <stddef.h>
 #include <stdint.h>
-/* Offline computation only: raw cmd-db ARC tables, including zero padding.
+/* Pure computation only: raw cmd-db ARC tables, including zero padding.
  * The OPP value uses the stock regulator level+1 encoding, not microvolts.
  * Caller must select the actual chip's OPP/speed bin and validated resources.
  * No hardware access, power ownership, aggregation or rail voltage guarantee.

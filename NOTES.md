@@ -450,3 +450,16 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## A618 post-CM3 diagnostic 0149, 2026-11-07
+
+0148 reached fresh CM3 BABEFACE on sweet_k6a, rc0/phase8 with sampled SMMU
+and fatal IRQ checks clear. This is not GX, HFI or rendering success.
+0149 adds opt-in sweetgmuhfi=1: ACTIVE-profile GX boot OOB, guarded SPTPRAC,
+HFI CTRL, INIT/version ACKs and 1s/10s health samples. Memory, clocks and boot
+request remain held until reboot; no retry, cleanup or GPU submission.
+MIN_SVS boot voltage is source-derived; indexes come from live cmd-db tables.
+Host failure/queue/power/lifetime tests, stock reference trace, target-header
+ARM64 compiles and full126-149/final-source checks passed. Full XNU build and
+actual-device result are pending. Phone remains recovery while user is away.
+Do not leave this CPU-idle-disabled test running unattended.

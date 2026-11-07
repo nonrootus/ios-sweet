@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Verified0152 temporary boot - 2026-11-07
+
+Full Intel XNU CI42359475531 passed forf9ae97ddca30c8e7858105300cf7bb0a34be39e2.
+Exact preflight, Build and final source/kernel checks passed. CRC/SHA/markers,
+exact payload/10segments and boot parts verified before temporary fastboot
+boot, which returned OKAY. New recovery log/owner iOS outcome still pending.
+The later packet-preparation helper is unlinked and not in this image.
+No PERF/BW/TEST submission or GPU rendering claimed; no device files published.
+
+
 ## Offline HFI configuration preparation - 2026-11-07
 
 Added unlinked atomic PERF/BW/TEST packet preparation with explicit initial

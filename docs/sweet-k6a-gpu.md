@@ -61,8 +61,13 @@ sequence/error and missing VERSION payload cases; the offline summary uses
 the same identity mask. ASan/UBSan postboot4292callback failures, integrated
 adapter/lifetime tests, stock8192metadata variants and8offline summary groups
 passed. Full126-152 patch apply/reverse,38canonical sources and target-header
-ARM64 compilation passed. Full0152 CI and hardware result remain pending
-until separately recorded. HFI configuration and GPU rendering remain undone.
+ARM64 compilation passed. Full0152 Intel XNU
+[CI42359475531](https://github.com/nonrootus/ios-sweet/actions/runs/42359475531)
+passed for `f9ae97ddca30c8e7858105300cf7bb0a34be39e2`, including exact preflight
+and final source/kernel checks. The image passed CRC/SHA/markers, exact payload
+reproduction and all10kernel-segment/boot-part checks; temporary fastboot boot
+returned OKAY. Actual0152 INIT/VERSION and iOS outcome await the new recovery
+log and owner report. HFI configuration and GPU rendering remain undone.
 
 Claude independently agreed with removing the extra precondition and retaining
 the write/poll. Added its suggested settling, exactly-one-write and post-HFI

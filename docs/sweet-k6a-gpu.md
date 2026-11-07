@@ -1012,3 +1012,15 @@ firmware/ring/scratch mapping, initialization commands and start sequencing;
 the existing SID5 GMU mapping does not establish these GPU client mappings.
 No SQE/GPU workload, graphics acceleration or user-space API is implemented
 by the new prototype.0153 currently building contains no DCVS prototype.
+
+##0153 CI packaging correction
+
+Run42362646988 built an older kernel: upstream dxb silently skipped the whole
+0153 patch after CRLF context lines failed against LF rpmh.c and bsd/conf/files.
+The final mandatory verification caught this and failed. No image was built
+or booted from that run. Normalize the seven context CRs to LF; runtime code
+is unchanged. Reproduced old failure on LF inputs, then verified all13fixed
+targets forward/reverse and all11actual canonical files plus build wiring.
+The builder now runs mandatory actual-source verification immediately after
+patch application, before expensive compilation, and aborts on any mismatch.
+Full126-153/43source checks pass. New fullCI/runtime result remains pending.

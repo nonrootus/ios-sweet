@@ -35,15 +35,33 @@ PATCHES+= (('xnu/patches/0153-sweet-gmu-configuration.patch',set(TARGETS)|WIRING
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('build_directory', type=Path)
+    parser.add_argument('build_directory', type=Path, nargs='?')
     parser.add_argument('--revision', default='HEAD')
+    parser.add_argument('--patched-tree', type=Path,
+                        help='verify the actual full XNU tree immediately after builder patching')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(['git', 'rev-parse', '--verify', args.revision + '^{commit}'], cwd=repo, text=True).strip()
-    args.build_directory.mkdir(parents=True, exist_ok=True)
-
     def blob(commit, path):
         return subprocess.check_output(['git', 'show', commit + ':' + path], cwd=repo)
+
+    if args.patched_tree is not None:
+        for target,canonical in TARGETS.items():
+            path=args.patched_tree/target
+            if not path.is_file() or path.read_bytes()!=blob(revision,canonical):
+                raise ValueError('actual builder tree missing or stale: '+target)
+        files=(args.patched_tree/'bsd/conf/files').read_text(encoding='utf-8').splitlines()
+        for name in ('sweet_hfi_config','sweet_gmu_board_profile'):
+            if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
+                raise ValueError('actual builder missing unique compile entry: '+name)
+        rpmh=(args.patched_tree/'bsd/dev/sweet_rpmh.c').read_text(encoding='utf-8')
+        include='#include "sweet_rpmh_gpu_bcm_info.inc"'
+        if rpmh.count(include)!=1 or rpmh.index(include)>rpmh.index('#endif /* ARM64_BOARD_CONFIG_SWEET */'):
+            raise ValueError('BCM getter absent or outside SWEET conditional')
+        print('PASS actual builder tree:11 exact canonical blobs, compile entries and conditional BCM getter',revision)
+        return
+    if args.build_directory is None:parser.error('build_directory or --patched-tree required')
+    args.build_directory.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix='hfi-exact-', dir=args.build_directory) as scratch:
         work = Path(scratch)

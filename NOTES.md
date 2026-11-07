@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+##0153 CI packaging correction
+
+Run42362646988 built an older kernel: upstream dxb silently skipped the whole
+0153 patch after CRLF context lines failed against LF rpmh.c and bsd/conf/files.
+The final mandatory verification caught this and failed. No image was built
+or booted from that run. Normalize the seven context CRs to LF; runtime code
+is unchanged. Reproduced old failure on LF inputs, then verified all13fixed
+targets forward/reverse and all11actual canonical files plus build wiring.
+The builder now runs mandatory actual-source verification immediately after
+patch application, before expensive compilation, and aborts on any mismatch.
+Full126-153/43source checks pass. New fullCI/runtime result remains pending.
+
 ## Offline DCVS preparation alongside0153
 
 Added an unlinked one-shot DCVS prototype, with no driver caller or bootflag.

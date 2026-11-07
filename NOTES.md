@@ -473,3 +473,10 @@ and records queue indexes during health checks. Boot voltage request48 and
 selected ARC level64 are logged distinctly. Host fault/event/queue/lifetime
 tests and ARM64/full patch-source checks passed; hardware remains unverified.
 This supersedes0149 for the next device test. No boot while user is away.
+
+## Final0150 source audit
+
+Transport source blobs are normalized to LF in both local and build trees.
+Full126-150 apply/reverse and38canonical source checks passed. Previous
+CI runs42341729161 and42342506500 were cancelled as superseded. Full kernel
+build and hardware exchange validation remain pending; no unattended boot.

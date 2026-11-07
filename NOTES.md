@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Offline A618 powerup register-list serialization
+
+Prepared sweet_a618_pwrup.c/.h and reproducibly imported profile for the
+CP_ME_INIT register-list page. This is unlinked, has no caller/bootflag/MMIO,
+and is not included in0154. It serializes67 caller-supplied values, preserving
+stock IFPC38/shared28/A615extra1 order, the16byte cpu_gpu_lock header and
+134/76 DWORD lengths. It zeroes the remaining4KiB page and rejects invalid
+sizes/counts/overlap without altering output. Offsets are GPU-relative DWORD
+indices, not runtime addresses. Captured values and valid GPU mapping are
+still required; do not fill them with guessed zeros.
+
+The importer SHA-pins adreno_a6xx.c, adreno_a6xx.h, a6xx_reg.h and
+adreno-gpulist.h at Xiaomi10c33d40; A618 has no PERFCTRL_RETAIN extra list.
+Host ASan/UBSan compares the complete page to the unchanged stock
+a6xx_patch_pwrup_reglist function for10002 snapshots, all67 offsets,4096
+invalid capacities, counts, overlap and output canaries. All passed.
+Target-header ARM64 assembly generation passed. This proves format only,
+not initialized register contents, GPU access, CP execution or rendering.
+
 ## Opt-in one-shot DCVS request0154
 
 Actual0153b on sweet_k6a passed PERF/BW/TEST and clean0/1/10s configuration

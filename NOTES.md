@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Verified0151 build - 2026-11-07
+
+Full Intel XNU CI42357699877 passed for27c643ed47b882e0fb7c82c8a2ad968e29054c57.
+Exact patch preflight, full build and final source/kernel checks passed. The
+temporary image passed CRC/SHA/13markers, exact payload and10segment checks.
+Actual0151 hardware outcome is pending. Last phone log is0150's freshCM3,
+OOBACK and GX0x28, followed by the now-corrected unsupported SPTP precondition.
+Offline log summary now separates the stop stage from commands not attempted;
+eight test groups pass. Recovery frequencies match FDTbin167, but direct
+speed-bin query could not open KGSL due missing recovery SQE firmware; this
+is not fuse proof. See docs for exact scope. No device files published.
+
+
 ## Current 0151 handoff - 2026-11-07
 
 The0150 phone boot reached fresh CM3 BABEFACE and OOB request/ACK1/1.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only summary of SWEET 0148-0150 CM3/initial-HFI console evidence.
+"""Read-only summary of SWEET 0148-0151 CM3/initial-HFI console evidence.
 
 Accepts a SWEETLOG v1 binary capture or decoded UTF-8 text. This does not
 establish which image was booted, capture freshness, or GPU rendering.
@@ -20,6 +20,11 @@ N = r"[0-9]+"
 BOOT_BEGIN = "SWEET GMU BOOT: begin first CM3 boot; no teardown or retry"
 HFI_BEGIN = "SWEET GMU HFI: begin GX and initial INIT/VERSION; no GPU submission"
 HFI_END = "SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started"
+HFI_STAGES = ("empty", "preflight", "OOB request", "GX status", "SPTP power-on",
+              "HFI control", "INIT", "VERSION", "health observation", "initial HFI ready")
+HFI_ERRORS = {-1: "invalid or repeated call", -2: "I/O failure or all-ones read",
+              -3: "guard or protocol rejection", -4: "deadline expired",
+              -5: "error interrupt", -6: "queue or ACK error", -7: "firmware error"}
 FIELDS = {
     "cm3": (rf"SWEET GMU BOOT: done rc=(-?{N}) phase=({N}) held=({N}) release=({N}) init=({H}) host_irq=({H}) ao_irq=({H}) pdc_before=({H}) last=({N})/({H})",
             "rc phase held release init:x host_irq:x ao_irq:x pdc_before:x last_region last_offset:x"),
@@ -124,13 +129,17 @@ def analyze(text, meta):
         if not (hfi["rc"] == 0 and hfi["phase"] == 9 and
                 hfi["oob_issued"] == hfi["oob_ack"] == hfi["sptp_issued"] == hfi["hfi_issued"] == 1):
             issues.append("HFI stage/transition flags do not report success")
-        if (hfi["wire"] >> 28) >= 2 or (hfi["firmware"] >> 28) != 1 or ((hfi["firmware"] >> 16) & 0xfff) < 8:
+        if not ack["version_ack"]:
+            issues.append("VERSION exchange not completed; compatibility is unestablished")
+        elif (hfi["wire"] >> 28) >= 2 or (hfi["firmware"] >> 28) != 1 or ((hfi["firmware"] >> 16) & 0xfff) < 8:
             issues.append("unsupported legacy wire/firmware version")
-        if not all(ack[k] == 1 for k in ("init_sent", "init_ack", "version_sent", "version_ack")) or ack["error"]:
-            issues.append("INIT/VERSION ACK flags or firmware error inconsistent")
+        if not all(ack[k] == 1 for k in ("init_sent", "init_ack", "version_sent", "version_ack")):
+            issues.append("INIT/VERSION pair not both sent and acknowledged")
+        if ack["error"]:
+            issues.append("nonzero firmware error reported")
         # The actual codec checks ACK type2/id126. The echoed original header
         # carries sequence2; the outer ACK sequence is not part of that check.
-        if (ack["original_header"] != 0x00200201 or
+        if ack["version_ack"] and (ack["original_header"] != 0x00200201 or
                 (ack["response_header"] & 0xf00ff) != 0x2007e or
                 ((ack["response_header"] >> 8) & 255) < 4):
             issues.append("VERSION response/original header mismatch")
@@ -143,7 +152,9 @@ def analyze(text, meta):
         if not (0 <= ack["msg_read"] == ack["msg_write"] < 1024 and
                 0 <= events["dbg_read"] == events["dbg_write"] < 1024):
             issues.append("completion queue indexes are not empty/in range")
-        for row in [hfi] + found["sample"]:
+        if not hfi["hfi_issued"]:
+            issues.append("HFI activation not attempted")
+        for row in ([hfi] if hfi["hfi_issued"] else []) + found["sample"]:
             if row["gx"] & 0xdc != 8 or not row["status"] & 1:
                 issues.append("GX/SPTP/HFI status inconsistent")
                 break
@@ -162,7 +173,28 @@ def analyze(text, meta):
         state, code = "log_reports_cm3_only", 3
     else:
         state, code = "incomplete_or_inconsistent", 3
-    return {"profile": "sweet_k6a-0148-0150", "state": state, "exit_code": code,
+    progress = {"cm3_ready_reported": cm3_ready if cm3 else None,
+                "oob_ack_reported": bool(hfi["oob_ack"]) if hfi else None,
+                "gx_power_clock_on_reported": (not bool(hfi["gx"] & 0xc0)) if hfi and hfi["phase"] >= 3 and hfi["oob_ack"] else None,
+                "init_ack_reported": bool(ack["init_ack"]) if ack else None,
+                "version_ack_reported": bool(ack["version_ack"]) if ack else None,
+                "health_sample_seconds": [row["seconds"] for row in found["sample"]]}
+    failure = None
+    if hfi and hfi["rc"]:
+        failure = {"component": "post-CM3", "code": hfi["rc"], "phase": hfi["phase"],
+                   "stage": HFI_STAGES[hfi["phase"]] if hfi["phase"] < len(HFI_STAGES) else "unknown",
+                   "meaning": HFI_ERRORS.get(hfi["rc"], "unknown"), "not_attempted": []}
+        for label, record, field in (("SPTP power-on request", hfi, "sptp_issued"),
+                                     ("HFI control", hfi, "hfi_issued"),
+                                     ("INIT", ack, "init_sent"), ("VERSION", ack, "version_sent")):
+            if record and not record[field]:
+                failure["not_attempted"].append(label)
+        # Zero versions/ACKs at this point are unperformed work, not evidence
+        # of a rejected version or an actual malformed firmware response.
+    elif cm3 and cm3["rc"]:
+        failure = {"component": "CM3", "code": cm3["rc"], "phase": cm3["phase"]}
+    return {"profile": "sweet_k6a-0148-0151", "state": state, "exit_code": code,
+            "progress": progress, "failure": failure,
             "capture": meta, "issues": issues, "records": found,
             "scope": "CM3 and initial INIT/VERSION only; no proof of PERF/BW/TEST, GPU submission or rendering"}
 
@@ -183,6 +215,10 @@ def main():
         print(json.dumps(result, indent=2))
     else:
         print(result["state"])
+        if result["failure"]:
+            print("Recorded stop: " + json.dumps(result["failure"]))
+        if result["issues"]:
+            print("Requirements for initial HFI readiness not satisfied:")
         for issue in result["issues"]:
             print("- " + issue)
         print(result["scope"])

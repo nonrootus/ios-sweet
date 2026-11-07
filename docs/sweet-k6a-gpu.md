@@ -33,7 +33,11 @@ no new hardware capability is inferred from0x28. Fresh CM3/OOB/queue checks,
 failure handling and permanent holds are unchanged. Regression cases include
 0,8,0x28, persistent contradictory/off states and allones; the integrated
 adapter also exercises already-on states without skipping the power-on write.
-Full0151 CI and hardware outcome are pending until separately recorded.
+Full0151 Intel XNU CI [42357699877](https://github.com/nonrootus/ios-sweet/actions/runs/42357699877)
+passed for `27c643ed47b882e0fb7c82c8a2ad968e29054c57`, including exact patch
+preflight and final source/kernel checks. The packaged image passed CRC/SHA,
+required markers, exact payload reproduction and all10 kernel-segment checks.
+The actual0151 hardware outcome remains pending until a fresh recovery log.
 
 Claude independently agreed with removing the extra precondition and retaining
 the write/poll. Added its suggested settling, exactly-one-write and post-HFI
@@ -47,7 +51,7 @@ bit5 from reviewer recollection is used.
 ### Capture summary
 
 `python tools/gpu-log-summary.py CAPTURE.bin --json` reads a SWEETLOG v1
-capture or decoded UTF-8 text and summarizes the0148-0150 record format. It
+capture or decoded UTF-8 text and summarizes the0148-0151 record format. It
 checks bounded/complete binary capture, boot-session ambiguity, required
 completion/ACK/event records, queue indexes and both health samples. It never
 contacts a device and does not treat CM3 readiness as completed HFI or GPU
@@ -56,11 +60,14 @@ readiness; exit3 means insufficient evidence/CM3 only, exit4 an explicit
 nonzero completion, exit2 invalid input. Capture freshness and kernel source
 identity still require the separate boot record and artifact manifest.
 
-`python tools/gpu-log-summary-test.py` passed seven test groups including
+`python tools/gpu-log-summary-test.py` passed eight test groups including
 missing/out-of-order/duplicate records, version/ACK/queue contradictions,
 every reported failure code, malformed/truncated/wrapped binary input and
 invalid encoding. The actual0148 binary correctly reports CM3 only (exit3).
 Positive HFI fixtures are synthetic; no successful phone HFI log exists yet.
+The report also separates recorded progress and the actual stop stage from
+later work not attempted. In the0150 log, zero firmware-version/ACK fields do
+not establish incompatible firmware or a bad response: VERSION never started.
 
 ### Pinned HakiOS reference refresh
 
@@ -96,6 +103,30 @@ its140MHz rate is absent from the pinned clock source. Bin0's825MHz level416
 was also rejected because captured MX ends at384; stock clamps to its last
 MX entry, which is not evidence that this dependency is appropriate here.
 The current initial-HFI image does not submit any of these candidate tables.
+
+While0151 compiled, recovery sysfs reported `Adreno618v1`, seven GPU rates
+180/267/355/430/565/650/800MHz and `default_pwrlevel=6` (180MHz).
+KGSL's descending list and devfreq's ascending list agree. A fresh FDT capture
+has the same SHA256 as the earlier recovery FDT. Comparing every FDT bin and
+its initial index gives exactly one match, bin167; its entries and initial
+GMU GPU index1 agree with the offline candidate. This proves a recovery-driver
+table match, not a directly read fuse value or validated physical voltages.
+
+A bounded native ARM64 query for `KGSL_PROP_SPEED_BIN` was compiled against the
+[pinned Xiaomi UAPI](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/10c33d40a11ecdc75cc1dadb5bd07894bab05815/include/uapi/linux/msm_kgsl.h)
+(header SHA256143747705ad7e4d2d9490f3fc955ac55e1ad1a9c0cc78a64fbd3f0abc17b995d).
+It verified the24-byte AArch64 request layout and attempted an O_RDONLY open,
+but recovery returned EAGAIN before any ioctl. The filtered recovery kernel
+log records `request_firmware(a630_sqe.fw) failed: -11` at the same attempt.
+The temporary RAM helper was removed; no speed-bin value was obtained and no
+firmware search path or clock setting was changed. Earlier Python attempts
+could not import ctypes/array and never opened the GPU device.
+
+Recovery's OPP log includes encoded levels49/385/417, labelled "uV" by the
+vendor clock framework. They are not measured voltages. That framework logs
+only selected OPP entries (`clk.c:4133`), so the short log does not establish
+that intermediate OPPs are absent. Keep the complete PERF candidate inactive
+until the next protocol stage and profile inputs are independently validated.
 
 ### Next legacy HFI completion API (reviewed, not implemented)
 

@@ -55,6 +55,26 @@ class SummaryTest(unittest.TestCase):
         result = analyze(CM3)
         self.assertEqual(result["state"], "log_reports_cm3_only")
         self.assertEqual(result["exit_code"], 3)
+        self.assertIsNone(result["progress"]["gx_power_clock_on_reported"])
+
+    def test_early_gx_stop_does_not_claim_queue_or_version_failure(self):
+        # Synthetic0150-shaped stop. Register values are not a full device log.
+        text = CM3 + """SWEET GMU HFI: begin GX and initial INIT/VERSION; no GPU submission
+SWEET GMU HFI: done rc=-3 phase=3 OOB=1/1 SPTP=0 HFI=0 GX=00000028 status=00000000 wire=00000000 fw=00000000
+SWEET GMU HFI: INIT=0/0 VERSION=0/0 err=00000000 irq=00000000/00000000 last=14340/00000028 ack=00000000/00000000 queues=0/0 0/0
+SWEET GMU HFI: DEBUG=0 event=00000000/00000000 dbg_queue=0/0 observations=0
+SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started
+"""
+        result = analyze(text)
+        self.assertEqual(result["exit_code"], 4)
+        self.assertEqual(result["failure"]["stage"], "GX status")
+        self.assertEqual(result["failure"]["meaning"], "guard or protocol rejection")
+        self.assertEqual(result["failure"]["not_attempted"], ["SPTP power-on request", "HFI control", "INIT", "VERSION"])
+        self.assertTrue(result["progress"]["gx_power_clock_on_reported"])
+        self.assertFalse(result["progress"]["init_ack_reported"])
+        self.assertFalse(result["progress"]["version_ack_reported"])
+        self.assertNotIn("unsupported legacy wire/firmware version", result["issues"])
+        self.assertNotIn("VERSION response/original header mismatch", result["issues"])
 
     def test_every_completion_line_required(self):
         lines = GOOD.splitlines(keepends=True)

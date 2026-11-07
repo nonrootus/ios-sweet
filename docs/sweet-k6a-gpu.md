@@ -1024,3 +1024,22 @@ targets forward/reverse and all11actual canonical files plus build wiring.
 The builder now runs mandatory actual-source verification immediately after
 patch application, before expensive compilation, and aborts on any mismatch.
 Full126-153/43source checks pass. New fullCI/runtime result remains pending.
+
+## Offline CP initialization packet preparation
+
+sweet_a618_cp_init.c is an unlinked12word CP_ME_INIT encoder for the current
+32bit IOVA bring-up profile. It requires a nonzero page-aligned powerup-list
+address and preserves output on rejected input. This is encoding only: the
+caller must prepare/map the stock spinlock/register list, ring and firmware.
+No GPU MMIO, queue publication, start or rendering is implemented by it.
+
+ASan/UBSan comparison against unchanged pinned Xiaomi10c33d40 parity/type7/
+_set_ordinals functions passed all1048575 nonzero32bit page addresses,
+output canaries and malformed capacity/address cases. Both reference files
+are SHA256-pinned by the runner. Target-header ARM64 compilation passed.
+
+Recovery FDT confirms the common GPU SMMU controller describes gfx3d_user
+stream0, gfx3d_secure2, gmu_user4 and gmu_kernel5. Current retained runtime
+mapping is for GMU5; existing context helper intentionally permits only4/5.
+GPU memory needs separately reviewed client0 support, ownership/lifetime,
+and mapping before any CP start. No guard has been relaxed for this research.

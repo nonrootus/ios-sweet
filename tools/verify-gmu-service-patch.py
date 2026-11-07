@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0155 against exact published0149 Git bytes before a full build.
+"""Check0150-0156 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -45,6 +45,16 @@ PATCHES+= (('xnu/patches/0155-sweet-a618-inactive-prepare.patch',{
     PREP_TARGET,'bsd/dev/sweet_gpu_probe.c','iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 
 
+MAP_NAMES=('sweet_a618_address_space.c','sweet_a618_address_space.h','sweet_a618_pte.c','sweet_a618_pte.h')
+MAP_TARGETS={'bsd/dev/'+n for n in MAP_NAMES}|{'iokit/Kernel/arm/sweet_a618_mapping.inc'}
+NEW_TARGETS.update(MAP_TARGETS)
+TARGETS.update({'bsd/dev/'+n:'xnu/gpu/'+n for n in MAP_NAMES+('sweet_smmu_context.c','sweet_smmu_context.h')})
+TARGETS['iokit/Kernel/arm/sweet_a618_mapping.inc']='xnu/gpu/sweet_a618_mapping.inc'
+PATCHES+=(('xnu/patches/0156-sweet-a618-cold-context.patch',MAP_TARGETS|{
+    'bsd/dev/sweet_smmu_context.c','bsd/dev/sweet_smmu_context.h','bsd/dev/sweet_gpu_probe.c',
+    'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp',PREP_TARGET,'bsd/conf/files'}),)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build_directory', type=Path, nargs='?')
@@ -63,7 +73,7 @@ def main():
             if not path.is_file() or path.read_bytes()!=blob(revision,canonical):
                 raise ValueError('actual builder tree missing or stale: '+target)
         files=(args.patched_tree/'bsd/conf/files').read_text(encoding='utf-8').splitlines()
-        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs'):
+        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_pte','sweet_a618_address_space'):
             if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
                 raise ValueError('actual builder missing unique compile entry: '+name)
         rpmh=(args.patched_tree/'bsd/dev/sweet_rpmh.c').read_text(encoding='utf-8')
@@ -106,7 +116,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0155 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0156 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

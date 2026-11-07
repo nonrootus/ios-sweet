@@ -48,6 +48,19 @@ struct sweet_smmu_context {
 int sweet_smmu_context_install(struct sweet_smmu_context *,
     const struct sweet_smmu_context_ops *, unsigned bank, unsigned slot,
     unsigned sid, unsigned asid);
+/* Separate cold-only GPU attach: fixed CB1/slot1/SID0/ASID2, while the owned
+ * GMU CB0/slot0/SID5/ASID1 is installed BUT CM3 is still reset and GX collapsed.
+ * The ops must share the GMU owner's MMIO/barrier/quiescent callbacks. Caller
+ * reserves all remaining banks/slots and pins the GPU tree independently.
+ * Never call after starting CM3; never rerun board/global initialization.
+ * No live attach, global TLBI, ownership discovery, reset or removal here.
+ * Success proves register readback only, not a GPU transaction. */
+int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *,
+    const struct sweet_smmu_context_ops *, const struct sweet_smmu_context *gmu);
+/* Read-only exact pair/unused-bank register validation; no quiescence claim,
+ * cache operation, mutation, fault acknowledgement or DMA test. */
+int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
+    const struct sweet_smmu_context *gmu);
 int sweet_smmu_context_remove(struct sweet_smmu_context *);
 /* Separate inactive-only teardown for this controller when FAULT writes are
  * ignored. Only for the early-boot register test: no producer may have run

@@ -21,6 +21,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_board_profile.h"
 #include "../../../bsd/dev/sweet_gmu_dcvs.h"
 #include "../../../bsd/dev/sweet_a618_firmware.h"
+#include "../../../bsd/dev/sweet_a618_address_space.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
@@ -31,6 +32,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_board_profile.h"
 #include "sweet_gmu_dcvs.h"
 #include "sweet_a618_firmware.h"
+#include "sweet_a618_address_space.h"
 #endif
 }
 
@@ -48,7 +50,7 @@ struct persistent_gmu {
     sweet_smmu_k6a board;
     sweet_smmu_context context;
     uint32_t last_offset, last_value;
-    bool checked_power;
+    bool checked_power, cold_gpu_requested;
 };
 /* Static storage preserves callbacks and pinned allocations on any ambiguous
  * hardware failure. A failed attempt cannot be retried in the same boot. */
@@ -103,8 +105,11 @@ static int write32(void *opaque, uint32_t offset, uint32_t value)
 static int write64(void *opaque, uint32_t offset, uint64_t value)
 {
     auto *s = static_cast<persistent_gmu *>(opaque);
-    /* This diagnostic reserves only context bank 0 and its two TTBRs. */
-    if (!s->smmu || (offset != 0x8020 && offset != 0x8028)) return -1;
+    /* CB1 belongs only to the explicit cold GPU test, before CM3 release. */
+    bool gmu_ttbr=offset==0x8020 || offset==0x8028;
+    bool gpu_ttbr=s->cold_gpu_requested && !s->boot.release_attempted &&
+        (offset==0x9020 || offset==0x9028);
+    if (!s->smmu || (!gmu_ttbr && !gpu_ttbr)) return -1;
     s->last_offset = offset; s->last_value = static_cast<uint32_t>(value);
     mmio_write64(s->smmu + offset, value);
     return 0;
@@ -223,10 +228,11 @@ static void report_faults(persistent_gmu *s)
     IOLog("SWEET GMU BOOT: SMMU global=%08x fsr=%08x far=%08x%08x syndrome=%08x\n",
         global,fsr,farhi,farlo,syndrome);
 }
-extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
+static int a618_cold_prepare_and_attach(persistent_gmu *);
+extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu,unsigned gpu_mapping)
 {
-    if (!gcc || !cc || !gmu || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
-    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
+    if (!gcc || !cc || !gmu || gpu_mapping>1 || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
+    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;s->cold_gpu_requested=gpu_mapping==1;
     const void *firmware=nullptr;size_t bytes=0;
     IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
     if (idle_enable) { IOLog("SWEET GMU BOOT: CPU idle still enabled\n");return -3; }
@@ -253,6 +259,11 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
         rc,static_cast<unsigned>(s->context.state),s->context.retained,
         static_cast<unsigned long long>(s->context.root_pa));
     if (rc) return rc;
+    if(gpu_mapping) {
+        rc=a618_cold_prepare_and_attach(s);
+        IOLog("SWEET A618 COLD MAP: entry rc=%d; CM3 has not been released\n",rc);
+        if(rc)return rc;
+    }
     sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
     rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
     report_faults(s);
@@ -399,3 +410,5 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
 }
 
 #include "sweet_a618_prepare.inc"
+
+#include "sweet_a618_mapping.inc"

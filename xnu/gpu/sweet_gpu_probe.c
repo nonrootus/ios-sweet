@@ -18,7 +18,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
-extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t);
+extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
 void sweet_gpu_probe(void);
 extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
 extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
@@ -176,6 +176,7 @@ sweet_gpu_probe(void)
 {
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
+    int requested_mapping=0,requested_preparation=0;
     vm_offset_t gcc;
     uint32_t state;
 
@@ -184,6 +185,11 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
     PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
     PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
+    PE_parse_boot_argn("sweetgpumap",&requested_mapping,sizeof(requested_mapping));
+    PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
+    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
+        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
+    }
     if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
         printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
     }
@@ -416,7 +422,7 @@ sweet_gpu_probe(void)
                                             if (requested_start == 1) {
                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
                                                 else {
-                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu);
+                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,(unsigned)requested_mapping);
                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
                                                     if(!start_rc && requested_hfi==1) {
                                                         extern int sweet_gpu_gmu_hfi_start(void);
@@ -433,8 +439,13 @@ sweet_gpu_probe(void)
                                                                 int prepare=0;
                                                                 PE_parse_boot_argn("sweetgpuprep",&prepare,sizeof(prepare));
                                                                 if(!dcvs_rc && prepare==1) {
-                                                                    extern int sweet_gpu_a618_prepare(void);
-                                                                    printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
+                                                                    if(requested_mapping==1) {
+                                                                        extern int sweet_gpu_a618_mapping_verify(void);
+                                                                        printf("SWEET A618 MAP: entry rc=%d\n",sweet_gpu_a618_mapping_verify());
+                                                                    } else {
+                                                                        extern int sweet_gpu_a618_prepare(void);
+                                                                        printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
+                                                                    }
                                                                 }
                                                             }
                                                         }

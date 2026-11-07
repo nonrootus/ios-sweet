@@ -106,15 +106,15 @@ static int preflight(struct sweet_smmu_context *c)
     return 0;
 }
 
-int sweet_smmu_context_install(struct sweet_smmu_context *c,
+static int install_context(struct sweet_smmu_context *c,
     const struct sweet_smmu_context_ops *ops, unsigned bank, unsigned slot,
-    unsigned sid, unsigned asid)
+    unsigned sid, unsigned asid, uint64_t forbidden_root)
 {
     int rc;
     if (!c || !ops || !ops->read32 || !ops->write32 || !ops->write64 ||
         !ops->barrier || !ops->delay_us || !ops->quiescent || !ops->pin ||
         !ops->unpin || c->state != SWEET_SMMU_CONTEXT_EMPTY || c->retained ||
-        bank >= 5 || slot >= 5 || (sid != 4 && sid != 5) || !asid || asid > 255)
+        bank >= 5 || slot >= 5 || (sid != 0 && sid != 4 && sid != 5) || !asid || asid > 255)
         return SWEET_SMMU_CONTEXT_INVALID;
     c->ops = *ops;
     c->bank = bank; c->slot = slot; c->sid = sid; c->asid = asid;
@@ -123,7 +123,7 @@ int sweet_smmu_context_install(struct sweet_smmu_context *c,
     c->root_pa = 0;
     if (ops->pin(ops->ctx, &c->root_pa)) return SWEET_SMMU_CONTEXT_IO;
     c->retained = 1;
-    if (!c->root_pa || (c->root_pa & 4095) || c->root_pa >= (UINT64_C(1) << 36)) {
+    if (!c->root_pa || c->root_pa==forbidden_root || (c->root_pa & 4095) || c->root_pa >= (UINT64_C(1) << 36)) {
         ops->unpin(ops->ctx); c->retained = 0;
         return SWEET_SMMU_CONTEXT_INVALID;
     }
@@ -149,6 +149,98 @@ int sweet_smmu_context_install(struct sweet_smmu_context *c,
         (rc = write32(c, SMR(c), SMR_VALID | sid))) return rc;
     c->state = SWEET_SMMU_CONTEXT_ACTIVE;
     return 0;
+}
+
+int sweet_smmu_context_install(struct sweet_smmu_context *c,
+    const struct sweet_smmu_context_ops *ops, unsigned bank, unsigned slot,
+    unsigned sid, unsigned asid)
+{
+    if(sid!=4 && sid!=5)return SWEET_SMMU_CONTEXT_INVALID;
+    return install_context(c,ops,bank,slot,sid,asid,0);
+}
+
+/* Only read the known early owner's context; never infer ownership from a
+ * readable register. Ownership and all-producer quiescence are caller facts.
+ * Require every unused context disabled/empty, reserving ASID2 separately. */
+static int cold_gmu_preserved(const struct sweet_smmu_context *gmu)
+{
+    struct sweet_smmu_context c=*gmu;
+    uint32_t fsr,cr0;int rc;
+    if((rc=read32(&c,0,&cr0)))return rc;
+    if(cr0==UINT32_MAX || (cr0&0x40bu)!=0x402u)return SWEET_SMMU_CONTEXT_BUSY;
+    if((rc=expect(&c,0x800,SMR_VALID|5u)) ||
+        (rc=expect(&c,0xc00,S2CR_NSH)) ||
+        (rc=expect(&c,0x1800,1)) || (rc=expect(&c,0x1000,0x1f300)) ||
+        (rc=expect(&c,0x8000,SCTLR_VALUE)) ||
+        (rc=expect(&c,0x8004,0x70000000)) ||
+        (rc=expect(&c,0x8010,TCR2_VALUE)) || (rc=expect(&c,0x8030,TCR_VALUE)) ||
+        (rc=expect(&c,0x8020,(uint32_t)c.root_pa)) ||
+        (rc=expect(&c,0x8024,(uint32_t)(c.root_pa>>32)|(1u<<16))) ||
+        (rc=expect(&c,0x8028,0)) || (rc=expect(&c,0x802c,1u<<16)) ||
+        (rc=expect(&c,0x8038,0x44)) || (rc=expect(&c,0x803c,0)) ||
+        (rc=expect(&c,0x48,0)) || (rc=read32(&c,0x8058,&fsr))) return rc;
+    if(fsr & ~0x600u)return SWEET_SMMU_CONTEXT_IO;
+    for(unsigned i=2;i<5;i++){
+        uint32_t s2cr,base=0x8000+i*4096;
+        if((rc=expect(&c,0x800+4*i,0)) || (rc=read32(&c,0xc00+4*i,&s2cr)) ||
+            (rc=expect(&c,base,0)) || (rc=expect(&c,base+0x58,0))) return rc;
+        if(s2cr==UINT32_MAX || (s2cr&S2CR_TYPE_MASK)!=S2CR_FAULT)
+            return SWEET_SMMU_CONTEXT_BUSY;
+        for(unsigned off=0x20;off<=0x2c;off+=4)
+            if((rc=expect(&c,base+off,0)))return rc;
+    }
+    return 0;
+}
+int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *c,
+    const struct sweet_smmu_context_ops *ops,const struct sweet_smmu_context *gmu)
+{
+    if(!c || !ops || !gmu || c==gmu ||
+        gmu->state!=SWEET_SMMU_CONTEXT_ACTIVE || !gmu->retained ||
+        gmu->bank!=0 || gmu->slot!=0 || gmu->sid!=5 || gmu->asid!=1 ||
+        !gmu->root_pa || (gmu->root_pa&4095) || gmu->root_pa>=(UINT64_C(1)<<36) ||
+        !ops->quiescent || !ops->read32 ||
+        ops->ctx!=gmu->ops.ctx || ops->read32!=gmu->ops.read32 ||
+        ops->write32!=gmu->ops.write32 || ops->write64!=gmu->ops.write64 ||
+        ops->barrier!=gmu->ops.barrier || ops->delay_us!=gmu->ops.delay_us ||
+        ops->quiescent!=gmu->ops.quiescent)return SWEET_SMMU_CONTEXT_INVALID;
+    if(c->state!=SWEET_SMMU_CONTEXT_EMPTY || c->retained)return SWEET_SMMU_CONTEXT_INVALID;
+    if(ops->quiescent(ops->ctx))return SWEET_SMMU_CONTEXT_BUSY;
+    int rc=cold_gmu_preserved(gmu);if(rc)return rc;
+    uint32_t cr0;
+    if(ops->read32(ops->ctx,0,&cr0))return SWEET_SMMU_CONTEXT_IO;
+    rc=install_context(c,ops,1,1,0,2,gmu->root_pa);if(rc)return rc;
+    /* Even an error after installation keeps the independent GPU pool pinned. */
+    if(ops->quiescent(ops->ctx))rc=SWEET_SMMU_CONTEXT_BUSY;
+    else rc=cold_gmu_preserved(gmu);
+    if(!rc){uint32_t fsr;rc=read32(c,0x9058,&fsr);
+        if(!rc && (fsr&~0x600u))rc=SWEET_SMMU_CONTEXT_IO;}
+    if(!rc)rc=expect(c,0,cr0);
+    if(rc)c->state=SWEET_SMMU_CONTEXT_POISONED;
+    return rc;
+}
+
+int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
+    const struct sweet_smmu_context *gmu)
+{
+    if(!gpu || !gmu || gpu==gmu || gpu->state!=SWEET_SMMU_CONTEXT_ACTIVE ||
+        gmu->state!=SWEET_SMMU_CONTEXT_ACTIVE || !gpu->retained || !gmu->retained ||
+        gpu->bank!=1 || gpu->slot!=1 || gpu->sid!=0 || gpu->asid!=2 ||
+        gmu->bank!=0 || gmu->slot!=0 || gmu->sid!=5 || gmu->asid!=1 ||
+        !gpu->root_pa || !gmu->root_pa || gpu->root_pa==gmu->root_pa ||
+        !gpu->ops.read32 || !gmu->ops.read32 || gpu->ops.ctx!=gmu->ops.ctx ||
+        gpu->ops.read32!=gmu->ops.read32)return SWEET_SMMU_CONTEXT_INVALID;
+    struct sweet_smmu_context c=*gpu;int rc=cold_gmu_preserved(gmu);uint32_t fsr;
+    if(rc)return rc;
+    if((rc=expect(&c,0x804,SMR_VALID)) || (rc=expect(&c,0xc04,S2CR_NSH|1u)) ||
+        (rc=expect(&c,0x1804,1)) || (rc=expect(&c,0x1004,0x1f300)) ||
+        (rc=expect(&c,0x9000,SCTLR_VALUE)) || (rc=expect(&c,0x9004,0x70000000)) ||
+        (rc=expect(&c,0x9010,TCR2_VALUE)) || (rc=expect(&c,0x9030,TCR_VALUE)) ||
+        (rc=expect(&c,0x9020,(uint32_t)c.root_pa)) ||
+        (rc=expect(&c,0x9024,(uint32_t)(c.root_pa>>32)|(2u<<16))) ||
+        (rc=expect(&c,0x9028,0)) || (rc=expect(&c,0x902c,2u<<16)) ||
+        (rc=expect(&c,0x9038,0x44)) || (rc=expect(&c,0x903c,0)) ||
+        (rc=read32(&c,0x9058,&fsr)))return rc;
+    return (fsr&~0x600u)?SWEET_SMMU_CONTEXT_IO:0;
 }
 
 int sweet_smmu_context_remove(struct sweet_smmu_context *c)

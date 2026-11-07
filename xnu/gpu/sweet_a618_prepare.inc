@@ -27,9 +27,10 @@ static struct {
     uint32_t registers[a618_register_count];
     uintptr_t gpu;
     unsigned pages, buffers, reads, guards;
-    bool prepared;
+    bool prepared, storage_ready;
 } a618_preparation;
 static unsigned a618_prepare_attempted;
+static unsigned a618_storage_attempted;
 
 static int a618_prepare_guard(persistent_gmu *s)
 {
@@ -56,20 +57,20 @@ static int a618_prepare_guard(persistent_gmu *s)
     return bad?-3:0;
 }
 
-extern "C" int sweet_gpu_a618_prepare(void)
+static int a618_storage_prepare(bool legacy_log)
 {
-    if (!__sync_bool_compare_and_swap(&a618_prepare_attempted,0u,1u)) return -1;
-    auto *s=&probe; auto &a=a618_preparation;
-    if (a618_prepare_guard(s)) return -3;
-    IOLog("SWEET A618 PREP: begin inactive storage and raw register snapshot; no GPU writes\n");
+    auto &a=a618_preparation;
+    if(a.storage_ready)return 0;
+    if(!__sync_bool_compare_and_swap(&a618_storage_attempted,0u,1u))return -1;
+    const char *prefix=legacy_log?"SWEET A618 PREP:":"SWEET A618 COLD MEM:";
     const void *gmu=nullptr,*sqe=nullptr;size_t gmu_size=0,sqe_size=0;
     sweet_a618_firmware_view view={};
     if (sweet_gpu_firmware_get(0,&gmu,&gmu_size) ||
         sweet_gpu_firmware_get(1,&sqe,&sqe_size) || gmu_size!=0x8000 ||
         sqe_size!=a618_sqe_file_size ||
         sweet_a618_firmware_prepare(gmu,gmu_size,sqe,sqe_size,&view)) return -4;
-    IOLog("SWEET A618 PREP: SQE bytes=%lu version=%08x patch=%08x; header excluded\n",
-        static_cast<unsigned long>(view.sqe_payload_size),view.sqe_version_word,view.sqe_patch_word);
+    IOLog("%s SQE bytes=%lu version=%08x patch=%08x; header excluded\n",
+        prefix,static_cast<unsigned long>(view.sqe_payload_size),view.sqe_version_word,view.sqe_patch_word);
     /* Bounded allocations remain private and retained even on failure. No
      * device address exists yet; never fill a register with these host PAs.
      * Reserved powerup storage is NOT a valid initialized register list. */
@@ -96,9 +97,21 @@ extern "C" int sweet_gpu_a618_prepare(void)
                 if (bytes[k]!=expected) return -5;
             }
         }
-        IOLog("SWEET A618 PREP: buffer=%s pages=%u CPU verified; no IOVA assigned\n",
-            a618_buffer_names[b],a618_buffer_pages[b]);
+        IOLog("%s buffer=%s pages=%u CPU verified; no IOVA assigned\n",
+            prefix,a618_buffer_names[b],a618_buffer_pages[b]);
     }
+    a.storage_ready=true;
+    return 0;
+}
+
+extern "C" int sweet_gpu_a618_prepare(void)
+{
+    if (!__sync_bool_compare_and_swap(&a618_prepare_attempted,0u,1u)) return -1;
+    auto *s=&probe; auto &a=a618_preparation;
+    if (a618_prepare_guard(s)) return -3;
+    IOLog("SWEET A618 PREP: begin inactive storage and raw register snapshot; no GPU writes\n");
+    int storage_rc=a618_storage_prepare(true);
+    if(storage_rc)return storage_rc;
     if (a618_prepare_guard(s)) return -3;
     a.gpu=ml_io_map(a618_register_base,a618_register_size);
     if (!a.gpu) return -2;

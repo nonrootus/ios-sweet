@@ -1,0 +1,609 @@
+--- a/bsd/dev/sweet_smmu_context.c
++++ b/bsd/dev/sweet_smmu_context.c
+@@ -106,15 +106,15 @@
+     return 0;
+ }
+ 
+-int sweet_smmu_context_install(struct sweet_smmu_context *c,
++static int install_context(struct sweet_smmu_context *c,
+     const struct sweet_smmu_context_ops *ops, unsigned bank, unsigned slot,
+-    unsigned sid, unsigned asid)
++    unsigned sid, unsigned asid, uint64_t forbidden_root)
+ {
+     int rc;
+     if (!c || !ops || !ops->read32 || !ops->write32 || !ops->write64 ||
+         !ops->barrier || !ops->delay_us || !ops->quiescent || !ops->pin ||
+         !ops->unpin || c->state != SWEET_SMMU_CONTEXT_EMPTY || c->retained ||
+-        bank >= 5 || slot >= 5 || (sid != 4 && sid != 5) || !asid || asid > 255)
++        bank >= 5 || slot >= 5 || (sid != 0 && sid != 4 && sid != 5) || !asid || asid > 255)
+         return SWEET_SMMU_CONTEXT_INVALID;
+     c->ops = *ops;
+     c->bank = bank; c->slot = slot; c->sid = sid; c->asid = asid;
+@@ -123,7 +123,7 @@
+     c->root_pa = 0;
+     if (ops->pin(ops->ctx, &c->root_pa)) return SWEET_SMMU_CONTEXT_IO;
+     c->retained = 1;
+-    if (!c->root_pa || (c->root_pa & 4095) || c->root_pa >= (UINT64_C(1) << 36)) {
++    if (!c->root_pa || c->root_pa==forbidden_root || (c->root_pa & 4095) || c->root_pa >= (UINT64_C(1) << 36)) {
+         ops->unpin(ops->ctx); c->retained = 0;
+         return SWEET_SMMU_CONTEXT_INVALID;
+     }
+@@ -149,6 +149,98 @@
+         (rc = write32(c, SMR(c), SMR_VALID | sid))) return rc;
+     c->state = SWEET_SMMU_CONTEXT_ACTIVE;
+     return 0;
++}
++
++int sweet_smmu_context_install(struct sweet_smmu_context *c,
++    const struct sweet_smmu_context_ops *ops, unsigned bank, unsigned slot,
++    unsigned sid, unsigned asid)
++{
++    if(sid!=4 && sid!=5)return SWEET_SMMU_CONTEXT_INVALID;
++    return install_context(c,ops,bank,slot,sid,asid,0);
++}
++
++/* Only read the known early owner's context; never infer ownership from a
++ * readable register. Ownership and all-producer quiescence are caller facts.
++ * Require every unused context disabled/empty, reserving ASID2 separately. */
++static int cold_gmu_preserved(const struct sweet_smmu_context *gmu)
++{
++    struct sweet_smmu_context c=*gmu;
++    uint32_t fsr,cr0;int rc;
++    if((rc=read32(&c,0,&cr0)))return rc;
++    if(cr0==UINT32_MAX || (cr0&0x40bu)!=0x402u)return SWEET_SMMU_CONTEXT_BUSY;
++    if((rc=expect(&c,0x800,SMR_VALID|5u)) ||
++        (rc=expect(&c,0xc00,S2CR_NSH)) ||
++        (rc=expect(&c,0x1800,1)) || (rc=expect(&c,0x1000,0x1f300)) ||
++        (rc=expect(&c,0x8000,SCTLR_VALUE)) ||
++        (rc=expect(&c,0x8004,0x70000000)) ||
++        (rc=expect(&c,0x8010,TCR2_VALUE)) || (rc=expect(&c,0x8030,TCR_VALUE)) ||
++        (rc=expect(&c,0x8020,(uint32_t)c.root_pa)) ||
++        (rc=expect(&c,0x8024,(uint32_t)(c.root_pa>>32)|(1u<<16))) ||
++        (rc=expect(&c,0x8028,0)) || (rc=expect(&c,0x802c,1u<<16)) ||
++        (rc=expect(&c,0x8038,0x44)) || (rc=expect(&c,0x803c,0)) ||
++        (rc=expect(&c,0x48,0)) || (rc=read32(&c,0x8058,&fsr))) return rc;
++    if(fsr & ~0x600u)return SWEET_SMMU_CONTEXT_IO;
++    for(unsigned i=2;i<5;i++){
++        uint32_t s2cr,base=0x8000+i*4096;
++        if((rc=expect(&c,0x800+4*i,0)) || (rc=read32(&c,0xc00+4*i,&s2cr)) ||
++            (rc=expect(&c,base,0)) || (rc=expect(&c,base+0x58,0))) return rc;
++        if(s2cr==UINT32_MAX || (s2cr&S2CR_TYPE_MASK)!=S2CR_FAULT)
++            return SWEET_SMMU_CONTEXT_BUSY;
++        for(unsigned off=0x20;off<=0x2c;off+=4)
++            if((rc=expect(&c,base+off,0)))return rc;
++    }
++    return 0;
++}
++int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *c,
++    const struct sweet_smmu_context_ops *ops,const struct sweet_smmu_context *gmu)
++{
++    if(!c || !ops || !gmu || c==gmu ||
++        gmu->state!=SWEET_SMMU_CONTEXT_ACTIVE || !gmu->retained ||
++        gmu->bank!=0 || gmu->slot!=0 || gmu->sid!=5 || gmu->asid!=1 ||
++        !gmu->root_pa || (gmu->root_pa&4095) || gmu->root_pa>=(UINT64_C(1)<<36) ||
++        !ops->quiescent || !ops->read32 ||
++        ops->ctx!=gmu->ops.ctx || ops->read32!=gmu->ops.read32 ||
++        ops->write32!=gmu->ops.write32 || ops->write64!=gmu->ops.write64 ||
++        ops->barrier!=gmu->ops.barrier || ops->delay_us!=gmu->ops.delay_us ||
++        ops->quiescent!=gmu->ops.quiescent)return SWEET_SMMU_CONTEXT_INVALID;
++    if(c->state!=SWEET_SMMU_CONTEXT_EMPTY || c->retained)return SWEET_SMMU_CONTEXT_INVALID;
++    if(ops->quiescent(ops->ctx))return SWEET_SMMU_CONTEXT_BUSY;
++    int rc=cold_gmu_preserved(gmu);if(rc)return rc;
++    uint32_t cr0;
++    if(ops->read32(ops->ctx,0,&cr0))return SWEET_SMMU_CONTEXT_IO;
++    rc=install_context(c,ops,1,1,0,2,gmu->root_pa);if(rc)return rc;
++    /* Even an error after installation keeps the independent GPU pool pinned. */
++    if(ops->quiescent(ops->ctx))rc=SWEET_SMMU_CONTEXT_BUSY;
++    else rc=cold_gmu_preserved(gmu);
++    if(!rc){uint32_t fsr;rc=read32(c,0x9058,&fsr);
++        if(!rc && (fsr&~0x600u))rc=SWEET_SMMU_CONTEXT_IO;}
++    if(!rc)rc=expect(c,0,cr0);
++    if(rc)c->state=SWEET_SMMU_CONTEXT_POISONED;
++    return rc;
++}
++
++int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
++    const struct sweet_smmu_context *gmu)
++{
++    if(!gpu || !gmu || gpu==gmu || gpu->state!=SWEET_SMMU_CONTEXT_ACTIVE ||
++        gmu->state!=SWEET_SMMU_CONTEXT_ACTIVE || !gpu->retained || !gmu->retained ||
++        gpu->bank!=1 || gpu->slot!=1 || gpu->sid!=0 || gpu->asid!=2 ||
++        gmu->bank!=0 || gmu->slot!=0 || gmu->sid!=5 || gmu->asid!=1 ||
++        !gpu->root_pa || !gmu->root_pa || gpu->root_pa==gmu->root_pa ||
++        !gpu->ops.read32 || !gmu->ops.read32 || gpu->ops.ctx!=gmu->ops.ctx ||
++        gpu->ops.read32!=gmu->ops.read32)return SWEET_SMMU_CONTEXT_INVALID;
++    struct sweet_smmu_context c=*gpu;int rc=cold_gmu_preserved(gmu);uint32_t fsr;
++    if(rc)return rc;
++    if((rc=expect(&c,0x804,SMR_VALID)) || (rc=expect(&c,0xc04,S2CR_NSH|1u)) ||
++        (rc=expect(&c,0x1804,1)) || (rc=expect(&c,0x1004,0x1f300)) ||
++        (rc=expect(&c,0x9000,SCTLR_VALUE)) || (rc=expect(&c,0x9004,0x70000000)) ||
++        (rc=expect(&c,0x9010,TCR2_VALUE)) || (rc=expect(&c,0x9030,TCR_VALUE)) ||
++        (rc=expect(&c,0x9020,(uint32_t)c.root_pa)) ||
++        (rc=expect(&c,0x9024,(uint32_t)(c.root_pa>>32)|(2u<<16))) ||
++        (rc=expect(&c,0x9028,0)) || (rc=expect(&c,0x902c,2u<<16)) ||
++        (rc=expect(&c,0x9038,0x44)) || (rc=expect(&c,0x903c,0)) ||
++        (rc=read32(&c,0x9058,&fsr)))return rc;
++    return (fsr&~0x600u)?SWEET_SMMU_CONTEXT_IO:0;
+ }
+ 
+ int sweet_smmu_context_remove(struct sweet_smmu_context *c)
+--- a/bsd/dev/sweet_smmu_context.h
++++ b/bsd/dev/sweet_smmu_context.h
+@@ -48,6 +48,19 @@
+ int sweet_smmu_context_install(struct sweet_smmu_context *,
+     const struct sweet_smmu_context_ops *, unsigned bank, unsigned slot,
+     unsigned sid, unsigned asid);
++/* Separate cold-only GPU attach: fixed CB1/slot1/SID0/ASID2, while the owned
++ * GMU CB0/slot0/SID5/ASID1 is installed BUT CM3 is still reset and GX collapsed.
++ * The ops must share the GMU owner's MMIO/barrier/quiescent callbacks. Caller
++ * reserves all remaining banks/slots and pins the GPU tree independently.
++ * Never call after starting CM3; never rerun board/global initialization.
++ * No live attach, global TLBI, ownership discovery, reset or removal here.
++ * Success proves register readback only, not a GPU transaction. */
++int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *,
++    const struct sweet_smmu_context_ops *, const struct sweet_smmu_context *gmu);
++/* Read-only exact pair/unused-bank register validation; no quiescence claim,
++ * cache operation, mutation, fault acknowledgement or DMA test. */
++int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
++    const struct sweet_smmu_context *gmu);
+ int sweet_smmu_context_remove(struct sweet_smmu_context *);
+ /* Separate inactive-only teardown for this controller when FAULT writes are
+  * ignored. Only for the early-boot register test: no producer may have run
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -18,7 +18,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
+-extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t);
++extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
+ void sweet_gpu_probe(void);
+ extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
+ extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
+@@ -176,6 +176,7 @@
+ {
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
++    int requested_mapping=0,requested_preparation=0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+@@ -184,6 +185,11 @@
+     PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
+     PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
+     PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
++    PE_parse_boot_argn("sweetgpumap",&requested_mapping,sizeof(requested_mapping));
++    PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
++    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
++        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
++    }
+     if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+         printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
+     }
+@@ -416,7 +422,7 @@
+                                             if (requested_start == 1) {
+                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
+                                                 else {
+-                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu);
++                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,(unsigned)requested_mapping);
+                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
+                                                     if(!start_rc && requested_hfi==1) {
+                                                         extern int sweet_gpu_gmu_hfi_start(void);
+@@ -433,8 +439,13 @@
+                                                                 int prepare=0;
+                                                                 PE_parse_boot_argn("sweetgpuprep",&prepare,sizeof(prepare));
+                                                                 if(!dcvs_rc && prepare==1) {
+-                                                                    extern int sweet_gpu_a618_prepare(void);
+-                                                                    printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
++                                                                    if(requested_mapping==1) {
++                                                                        extern int sweet_gpu_a618_mapping_verify(void);
++                                                                        printf("SWEET A618 MAP: entry rc=%d\n",sweet_gpu_a618_mapping_verify());
++                                                                    } else {
++                                                                        extern int sweet_gpu_a618_prepare(void);
++                                                                        printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
++                                                                    }
+                                                                 }
+                                                             }
+                                                         }
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -21,6 +21,7 @@
+ #include "../../../bsd/dev/sweet_gmu_board_profile.h"
+ #include "../../../bsd/dev/sweet_gmu_dcvs.h"
+ #include "../../../bsd/dev/sweet_a618_firmware.h"
++#include "../../../bsd/dev/sweet_a618_address_space.h"
+ #else
+ #include "sweet_smmu_k6a.h"
+ #include "sweet_gmu_start.h"
+@@ -31,6 +32,7 @@
+ #include "sweet_gmu_board_profile.h"
+ #include "sweet_gmu_dcvs.h"
+ #include "sweet_a618_firmware.h"
++#include "sweet_a618_address_space.h"
+ #endif
+ }
+ 
+@@ -48,7 +50,7 @@
+     sweet_smmu_k6a board;
+     sweet_smmu_context context;
+     uint32_t last_offset, last_value;
+-    bool checked_power;
++    bool checked_power, cold_gpu_requested;
+ };
+ /* Static storage preserves callbacks and pinned allocations on any ambiguous
+  * hardware failure. A failed attempt cannot be retried in the same boot. */
+@@ -103,8 +105,11 @@
+ static int write64(void *opaque, uint32_t offset, uint64_t value)
+ {
+     auto *s = static_cast<persistent_gmu *>(opaque);
+-    /* This diagnostic reserves only context bank 0 and its two TTBRs. */
+-    if (!s->smmu || (offset != 0x8020 && offset != 0x8028)) return -1;
++    /* CB1 belongs only to the explicit cold GPU test, before CM3 release. */
++    bool gmu_ttbr=offset==0x8020 || offset==0x8028;
++    bool gpu_ttbr=s->cold_gpu_requested && !s->boot.release_attempted &&
++        (offset==0x9020 || offset==0x9028);
++    if (!s->smmu || (!gmu_ttbr && !gpu_ttbr)) return -1;
+     s->last_offset = offset; s->last_value = static_cast<uint32_t>(value);
+     mmio_write64(s->smmu + offset, value);
+     return 0;
+@@ -223,10 +228,11 @@
+     IOLog("SWEET GMU BOOT: SMMU global=%08x fsr=%08x far=%08x%08x syndrome=%08x\n",
+         global,fsr,farhi,farlo,syndrome);
+ }
+-extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu)
+-{
+-    if (!gcc || !cc || !gmu || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
+-    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;
++static int a618_cold_prepare_and_attach(persistent_gmu *);
++extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu,unsigned gpu_mapping)
++{
++    if (!gcc || !cc || !gmu || gpu_mapping>1 || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
++    auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;s->cold_gpu_requested=gpu_mapping==1;
+     const void *firmware=nullptr;size_t bytes=0;
+     IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
+     if (idle_enable) { IOLog("SWEET GMU BOOT: CPU idle still enabled\n");return -3; }
+@@ -253,6 +259,11 @@
+         rc,static_cast<unsigned>(s->context.state),s->context.retained,
+         static_cast<unsigned long long>(s->context.root_pa));
+     if (rc) return rc;
++    if(gpu_mapping) {
++        rc=a618_cold_prepare_and_attach(s);
++        IOLog("SWEET A618 COLD MAP: entry rc=%d; CM3 has not been released\n",rc);
++        if(rc)return rc;
++    }
+     sweet_gmu_start_ops boot_ops={s,boot_read,boot_write,complete,pause_us,boot_check,hold_memory,boot_progress};
+     rc=sweet_gmu_cold_start(&s->boot,&boot_ops,firmware,bytes);
+     report_faults(s);
+@@ -399,3 +410,5 @@
+ }
+ 
+ #include "sweet_a618_prepare.inc"
++
++#include "sweet_a618_mapping.inc"
+--- a/iokit/Kernel/arm/sweet_a618_prepare.inc
++++ b/iokit/Kernel/arm/sweet_a618_prepare.inc
+@@ -27,9 +27,10 @@
+     uint32_t registers[a618_register_count];
+     uintptr_t gpu;
+     unsigned pages, buffers, reads, guards;
+-    bool prepared;
++    bool prepared, storage_ready;
+ } a618_preparation;
+ static unsigned a618_prepare_attempted;
++static unsigned a618_storage_attempted;
+ 
+ static int a618_prepare_guard(persistent_gmu *s)
+ {
+@@ -56,20 +57,20 @@
+     return bad?-3:0;
+ }
+ 
+-extern "C" int sweet_gpu_a618_prepare(void)
++static int a618_storage_prepare(bool legacy_log)
+ {
+-    if (!__sync_bool_compare_and_swap(&a618_prepare_attempted,0u,1u)) return -1;
+-    auto *s=&probe; auto &a=a618_preparation;
+-    if (a618_prepare_guard(s)) return -3;
+-    IOLog("SWEET A618 PREP: begin inactive storage and raw register snapshot; no GPU writes\n");
++    auto &a=a618_preparation;
++    if(a.storage_ready)return 0;
++    if(!__sync_bool_compare_and_swap(&a618_storage_attempted,0u,1u))return -1;
++    const char *prefix=legacy_log?"SWEET A618 PREP:":"SWEET A618 COLD MEM:";
+     const void *gmu=nullptr,*sqe=nullptr;size_t gmu_size=0,sqe_size=0;
+     sweet_a618_firmware_view view={};
+     if (sweet_gpu_firmware_get(0,&gmu,&gmu_size) ||
+         sweet_gpu_firmware_get(1,&sqe,&sqe_size) || gmu_size!=0x8000 ||
+         sqe_size!=a618_sqe_file_size ||
+         sweet_a618_firmware_prepare(gmu,gmu_size,sqe,sqe_size,&view)) return -4;
+-    IOLog("SWEET A618 PREP: SQE bytes=%lu version=%08x patch=%08x; header excluded\n",
+-        static_cast<unsigned long>(view.sqe_payload_size),view.sqe_version_word,view.sqe_patch_word);
++    IOLog("%s SQE bytes=%lu version=%08x patch=%08x; header excluded\n",
++        prefix,static_cast<unsigned long>(view.sqe_payload_size),view.sqe_version_word,view.sqe_patch_word);
+     /* Bounded allocations remain private and retained even on failure. No
+      * device address exists yet; never fill a register with these host PAs.
+      * Reserved powerup storage is NOT a valid initialized register list. */
+@@ -96,9 +97,21 @@
+                 if (bytes[k]!=expected) return -5;
+             }
+         }
+-        IOLog("SWEET A618 PREP: buffer=%s pages=%u CPU verified; no IOVA assigned\n",
+-            a618_buffer_names[b],a618_buffer_pages[b]);
++        IOLog("%s buffer=%s pages=%u CPU verified; no IOVA assigned\n",
++            prefix,a618_buffer_names[b],a618_buffer_pages[b]);
+     }
++    a.storage_ready=true;
++    return 0;
++}
++
++extern "C" int sweet_gpu_a618_prepare(void)
++{
++    if (!__sync_bool_compare_and_swap(&a618_prepare_attempted,0u,1u)) return -1;
++    auto *s=&probe; auto &a=a618_preparation;
++    if (a618_prepare_guard(s)) return -3;
++    IOLog("SWEET A618 PREP: begin inactive storage and raw register snapshot; no GPU writes\n");
++    int storage_rc=a618_storage_prepare(true);
++    if(storage_rc)return storage_rc;
+     if (a618_prepare_guard(s)) return -3;
+     a.gpu=ml_io_map(a618_register_base,a618_register_size);
+     if (!a.gpu) return -2;
+--- /dev/null
++++ b/bsd/dev/sweet_a618_address_space.c
+@@ -0,0 +1,79 @@
++#include "sweet_a618_address_space.h"
++#include "sweet_gpu_pte.h"
++#define PAGE_SIZE 4096u
++#define ENTRIES 512u
++static int span(uintptr_t begin,size_t size,uintptr_t *end)
++{
++    if (!begin || !size || begin>UINTPTR_MAX-size) return -1;
++    *end=begin+size;return 0;
++}
++static int overlap(uintptr_t a,size_t an,uintptr_t b,size_t bn)
++{
++    uintptr_t ae,be;
++    return span(a,an,&ae) || span(b,bn,&be) || (a<be && b<ae);
++}
++int sweet_a618_address_space_page(unsigned index,uint32_t *iova,
++    enum sweet_a618_page_role *role)
++{
++    if (index>=SWEET_A618_DATA_PAGES || !iova || !role) return -1;
++    if(index<8){*iova=SWEET_A618_SQE_IOVA+index*PAGE_SIZE;*role=SWEET_A618_PAGE_SQE;}
++    else if(index<16){*iova=SWEET_A618_RING_IOVA+(index-8)*PAGE_SIZE;*role=SWEET_A618_PAGE_RING;}
++    else if(index==16){*iova=SWEET_A618_SCRATCH_IOVA;*role=SWEET_A618_PAGE_SCRATCH;}
++    else {*iova=SWEET_A618_PWRUP_IOVA;*role=SWEET_A618_PAGE_PWRUP;}
++    return 0;
++}
++static int prepare(const struct sweet_gpu_table_page t[3],const uint64_t pa[18],uint64_t leaves[18])
++{
++    if(!t || !pa || ((uintptr_t)t%_Alignof(struct sweet_gpu_table_page)) ||
++        ((uintptr_t)pa%_Alignof(uint64_t))) return -1;
++    uint64_t addresses[21];
++    for(unsigned i=0;i<3;i++){
++        uint64_t d;
++        if(!t[i].cpu || ((uintptr_t)t[i].cpu&4095u) || !t[i].pa ||
++            sweet_gpu_pte_table(t[i].pa,&d) ||
++            overlap((uintptr_t)t[i].cpu,PAGE_SIZE,(uintptr_t)t,3*sizeof(*t)) ||
++            overlap((uintptr_t)t[i].cpu,PAGE_SIZE,(uintptr_t)pa,18*sizeof(*pa))) return -1;
++        for(unsigned j=0;j<i;j++)
++            if(overlap((uintptr_t)t[i].cpu,PAGE_SIZE,(uintptr_t)t[j].cpu,PAGE_SIZE)) return -1;
++        addresses[i]=t[i].pa;
++    }
++    for(unsigned i=0;i<18;i++){
++        uint32_t va;enum sweet_a618_page_role role;
++        if(sweet_a618_address_space_page(i,&va,&role) ||
++            sweet_a618_pte_page(pa[i],role,&leaves[i])) return -1;
++        addresses[3+i]=pa[i];
++    }
++    for(unsigned i=0;i<21;i++)for(unsigned j=0;j<i;j++)
++        if(addresses[i]==addresses[j])return -1;
++    return 0;
++}
++static uint64_t expected(const struct sweet_gpu_table_page t[3],const uint64_t leaves[18],unsigned level,unsigned index)
++{
++    if(level==0)return index==1 ? t[1].pa|3u : 0;
++    if(level==1)return index==0 ? t[2].pa|3u : 0;
++    for(unsigned i=0;i<18;i++){
++        uint32_t va;enum sweet_a618_page_role role;
++        (void)sweet_a618_address_space_page(i,&va,&role);
++        if(((va>>12)&511u)==index)return leaves[i];
++    }
++    return 0;
++}
++int sweet_a618_address_space_build(const struct sweet_gpu_table_page t[3],const uint64_t pa[18])
++{
++    uint64_t leaves[18];
++    if(prepare(t,pa,leaves))return -1;
++    for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
++        if(t[level].cpu[i])return -1;
++    /* No callbacks or fallible operations after the first store. */
++    for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
++        t[level].cpu[i]=expected(t,leaves,level,i);
++    return 0;
++}
++int sweet_a618_address_space_check(const struct sweet_gpu_table_page t[3],const uint64_t pa[18])
++{
++    uint64_t leaves[18];
++    if(prepare(t,pa,leaves))return -1;
++    for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
++        if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_address_space.h
+@@ -0,0 +1,29 @@
++#ifndef SWEET_A618_ADDRESS_SPACE_H
++#define SWEET_A618_ADDRESS_SPACE_H
++#include "sweet_gpu_tables.h"
++#include "sweet_a618_pte.h"
++#define SWEET_A618_DATA_PAGES 18u
++#define SWEET_A618_TABLE_PAGES 3u
++/* Software-chosen 32-bit IOVAs, not physical addresses or discovered offsets.
++ * One 2MiB window; leave its first page and all gaps unmapped.
++ * The root covers4GiB, with only the18 explicitly owned data pages present. */
++#define SWEET_A618_SQE_IOVA UINT32_C(0x40001000)
++#define SWEET_A618_RING_IOVA UINT32_C(0x40010000)
++#define SWEET_A618_SCRATCH_IOVA UINT32_C(0x40020000)
++#define SWEET_A618_PWRUP_IOVA UINT32_C(0x40021000)
++/* tables[0/1/2] are owned distinct L1/L2/L3 CPU/PA pages; data_pa is SQE8,
++ * ring8,scratch1,pwrup1. All21PAs must be distinct,nonzero,4KiB,<2^36.
++ * Caller owns/pins every page and serializes access. CPU table pages must not
++ * alias each other or argument storage. Build requires all tables zero and
++ * leaves them unchanged on input/precondition failure. No MMIO/cache/TLB.
++ * Check verifies the complete fixed tree, including every unmapped entry.
++ * Before attaching: clean L3,L2,L1 through canonical pointers, complete a
++ * barrier, establish separate SID0 ownership and retain until device reset.
++ * The reserved powerup page remains invalid until hardware initialization. */
++int sweet_a618_address_space_build(const struct sweet_gpu_table_page tables[3],
++    const uint64_t data_pa[SWEET_A618_DATA_PAGES]);
++int sweet_a618_address_space_check(const struct sweet_gpu_table_page tables[3],
++    const uint64_t data_pa[SWEET_A618_DATA_PAGES]);
++int sweet_a618_address_space_page(unsigned index,uint32_t *iova,
++    enum sweet_a618_page_role *role);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_a618_pte.c
+@@ -0,0 +1,17 @@
++#include "sweet_a618_pte.h"
++#include "sweet_gpu_pte.h"
++/* Xiaomi10c33d40 io-pgtable-arm.c ARM_LPAE_PTE_XN, paired with
++ * kgsl_iommu.c _get_protection_flags. Preserve the working GMU helpers. */
++#define A618_PAGE_XN (UINT64_C(3) << 53)
++int sweet_a618_pte_page(uint64_t pa,enum sweet_a618_page_role role,uint64_t *out)
++{
++    uint64_t descriptor;
++    if (!out || !pa || role<SWEET_A618_PAGE_SQE || role>SWEET_A618_PAGE_PWRUP)
++        return -1;
++    int read_only=role==SWEET_A618_PAGE_SQE || role==SWEET_A618_PAGE_RING;
++    int privileged=role==SWEET_A618_PAGE_SCRATCH || role==SWEET_A618_PAGE_PWRUP;
++    if (sweet_gpu_pte_page_access(pa,read_only,privileged,&descriptor)) return -1;
++    if (role!=SWEET_A618_PAGE_SQE) descriptor |= A618_PAGE_XN;
++    *out=descriptor;
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_pte.h
+@@ -0,0 +1,21 @@
++#ifndef SWEET_A618_PTE_H
++#define SWEET_A618_PTE_H
++#include <stdint.h>
++/* Offline/unlinked GPU-client policy. No IOVA assignment or table mutation.
++ * Requires a future separately owned SID0 tree and MAIR[0]=Normal-NC.
++ * Current sweet_gpu_table_publish_inactive rejects XN descriptors; do not
++ * insert these into the existing GMU tree or assume they can be published.
++ * The caller must prove PA belongs to a pinned allocation, not an MMIO page.
++ */
++enum sweet_a618_page_role {
++    SWEET_A618_PAGE_SQE=0,
++    SWEET_A618_PAGE_RING=1,
++    SWEET_A618_PAGE_SCRATCH=2,
++    SWEET_A618_PAGE_PWRUP=3
++};
++/* Format only:4KiB,nonzero36-bit PA. On error leaves *out unchanged.
++ * SQE:read-only/unprivileged/executable; ring:read-only/unprivileged/XN;
++ * scratch/pwrup:read-write/privileged/XN. XN sets both PXN and UXN.
++ */
++int sweet_a618_pte_page(uint64_t pa,enum sweet_a618_page_role role,uint64_t *out);
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_mapping.inc
+@@ -0,0 +1,92 @@
++/*0156: install the GPU translation context BEFORE releasing CM3, with GX
++ * collapsed and every producer stopped by the existing cold-boot guard.
++ * Never reinitialize the controller or attach beside an executing GMU.
++ * All storage and both contexts remain retained until device reset.
++ */
++static struct {
++    sweet_gpu_memory *memory;
++    sweet_gpu_table_page tables[3];
++    sweet_smmu_context context;
++    bool published, pinned;
++    unsigned observations;
++} a618_mapping;
++static unsigned a618_mapping_attempted, a618_mapping_verify_attempted;
++static int a618_pin_tables(void *opaque,uint64_t *root)
++{
++    auto *s=static_cast<persistent_gmu *>(opaque);auto &m=a618_mapping;
++    if(!root || m.pinned || !m.published || stopped(s) ||
++        sweet_a618_address_space_check(m.tables,a618_preparation.physical))return -1;
++    m.pinned=true;*root=m.tables[0].pa;return 0;
++}
++static void a618_unpin_before_write(void *)
++{
++    /* The context helper invokes this only before any attempted MMIO write.
++     * Allocations still stay retained; this is not a teardown/free path. */
++    a618_mapping.pinned=false;
++}
++static int a618_cold_prepare_and_attach(persistent_gmu *s)
++{
++    if(!__sync_bool_compare_and_swap(&a618_mapping_attempted,0u,1u))return -1;
++    auto &m=a618_mapping;auto &a=a618_preparation;
++    if(stopped(s) || s->boot.release_attempted)return -3;
++    IOLog("SWEET A618 COLD MAP: begin; CM3 reset and GX collapsed\n");
++    int rc=a618_storage_prepare(false);if(rc)return rc;
++    m.memory=sweet_gpu_memory_create_nc(SWEET_A618_TABLE_PAGES);
++    if(!m.memory)return -5;
++    for(unsigned i=0;i<SWEET_A618_TABLE_PAGES;i++){
++        void *cpu=nullptr;uint64_t pa=0;
++        if(sweet_gpu_memory_page(m.memory,i,&cpu,&pa))return -5;
++        m.tables[i]={static_cast<uint64_t *>(cpu),pa};
++    }
++    if(sweet_a618_address_space_build(m.tables,a.physical) ||
++        sweet_a618_address_space_check(m.tables,a.physical))return -5;
++    /* Fixed three-level tree: complete children before the parent root. */
++    for(unsigned i=3;i;i--)if(sweet_gpu_memory_clean(m.memory,i-1))return -5;
++    if(complete(s) || sweet_a618_address_space_check(m.tables,a.physical))return -5;
++    m.published=true;
++    IOLog("SWEET A618 COLD MAP: tree root=%llx tables=3 data=18 SQE=%08x ring=%08x scratch=%08x pwrup=%08x; powerup contents still reserved\n",
++        static_cast<unsigned long long>(m.tables[0].pa),SWEET_A618_SQE_IOVA,SWEET_A618_RING_IOVA,
++        SWEET_A618_SCRATCH_IOVA,SWEET_A618_PWRUP_IOVA);
++    sweet_smmu_context_ops ops={s,read32,write32,write64,complete,pause_us,stopped,a618_pin_tables,a618_unpin_before_write};
++    rc=sweet_smmu_gpu_cold_install(&m.context,&ops,&s->context);
++    IOLog("SWEET A618 COLD MAP: install rc=%d state=%u retained=%u bank=%u slot=%u SID=%u ASID=%u root=%llx\n",
++        rc,static_cast<unsigned>(m.context.state),m.context.retained,m.context.bank,m.context.slot,
++        m.context.sid,m.context.asid,static_cast<unsigned long long>(m.context.root_pa));
++    if(!rc)rc=sweet_smmu_gpu_context_check(&m.context,&s->context);
++    IOLog("SWEET A618 COLD MAP: pair rc=%d; no global reset, CP writes or producer release\n",rc);
++    return rc;
++}
++
++extern "C" int sweet_gpu_a618_mapping_verify(void)
++{
++    if(!__sync_bool_compare_and_swap(&a618_mapping_verify_attempted,0u,1u))return -1;
++    auto *s=&probe;auto &m=a618_mapping;auto &a=a618_preparation;
++    if(!a618_mapping_attempted || !m.published || !m.pinned || !a.storage_ready ||
++        a.pages!=18 || a.buffers!=4 || m.context.state!=SWEET_SMMU_CONTEXT_ACTIVE ||
++        a618_prepare_guard(s))return -3;
++    IOLog("SWEET A618 MAP: begin retained cold context check; no GPU command submission\n");
++    if(sweet_a618_address_space_check(m.tables,a.physical))return -5;
++    a.gpu=ml_io_map(a618_register_base,a618_register_size);if(!a.gpu)return -2;
++    for(unsigned i=0;i<a618_register_count;i++){
++        if(a618_prepare_guard(s))return -3;
++        uint32_t value=mmio_read(a.gpu+a618_snapshot_regs[i].dword*4);
++        a.registers[i]=value;
++        IOLog("SWEET A618 MAP: reg=%s value=%08x\n",a618_snapshot_regs[i].name,value);
++        if(value==UINT32_MAX)return -2;
++    }
++    const unsigned seconds[3]={0,1,10};
++    for(unsigned i=0;i<3;i++){
++        if(i)for(unsigned ms=0;ms<(seconds[i]-seconds[i-1])*1000;ms++)IODelay(1000);
++        if(a618_prepare_guard(s) || sweet_smmu_gpu_context_check(&m.context,&s->context))return -3;
++        uint32_t global=0,gmu_fsr=0,gpu_fsr=0,farlo=0,farhi=0;
++        if(read32(s,0x48,&global) || read32(s,0x8058,&gmu_fsr) || read32(s,0x9058,&gpu_fsr) ||
++            read32(s,0x9060,&farlo) || read32(s,0x9064,&farhi))return -2;
++        if(global || (gmu_fsr&~0x600u) || (gpu_fsr&~0x600u))return -3;
++        ++m.observations;
++        IOLog("SWEET A618 MAP: observed %us global=%08x GMU_FSR=%08x GPU_FSR=%08x GPU_FAR=%08x%08x\n",
++            seconds[i],global,gmu_fsr,gpu_fsr,farhi,farlo);
++    }
++    IOLog("SWEET A618 MAP: done rc=0 tables=3 data=18 observations=%u SID=0 bank=1; both contexts retained\n",m.observations);
++    IOLog("SWEET A618 MAP: register acceptance only; GPU transaction, valid powerup list, SQE and rendering not started\n");
++    return 0;
++}
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -674,3 +674,5 @@
+ bsd/dev/sweet_hfi_config.c		standard
+ bsd/dev/sweet_gmu_board_profile.c		standard
+ bsd/dev/sweet_gmu_dcvs.c		standard
++bsd/dev/sweet_a618_pte.c		standard
++bsd/dev/sweet_a618_address_space.c		standard

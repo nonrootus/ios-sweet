@@ -1,5 +1,20 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Current sweet_k6a configuration test: 0153b
+
+Full XNU CI42364489199 succeeded for source
+c0b72da1a1b1dfb60b38a8ff619c7202d876caa3 on 2026-11-07. Exact preflight,
+actual patched-source/build wiring checks and final kernel checks passed.
+The selective kernel artifact passed CRC/SHA256 and all17 required markers.
+Local packaging reproduced the payload and independently compared10 kernel
+segments, Android boot parts and configuration/profile flags.
+
+Temporary fastboot boot at10:55UTC returned Sending/Booting OKAY. No
+partitions flashed. iOS boot and GMU configuration are not yet verified:
+await the owner report and a fresh recovery log for PERF/BW/TEST responses
+and retained-session observations. This kernel has no DCVS/CP prototype
+integration and does not implement GPU rendering.
+
 ## Offline CP initialization packet preparation
 
 sweet_a618_cp_init.c is an unlinked12word CP_ME_INIT encoder for the current
@@ -29,7 +44,8 @@ is unchanged. Reproduced old failure on LF inputs, then verified all13fixed
 targets forward/reverse and all11actual canonical files plus build wiring.
 The builder now runs mandatory actual-source verification immediately after
 patch application, before expensive compilation, and aborts on any mismatch.
-Full126-153/43source checks pass. New fullCI/runtime result remains pending.
+Full126-153/43source checks pass. Corrected fullCI succeeded; runtime result
+remains pending as recorded in the current test section above.
 
 ## Offline DCVS preparation alongside0153
 
@@ -55,7 +71,7 @@ a6xx_microcode_load and a6xx_rb_start. SQE requires its own GPU-visible
 firmware/ring/scratch mapping, initialization commands and start sequencing;
 the existing SID5 GMU mapping does not establish these GPU client mappings.
 No SQE/GPU workload, graphics acceleration or user-space API is implemented
-by the new prototype.0153 currently building contains no DCVS prototype.
+by the new prototype. The booted0153b kernel contains no DCVS prototype.
 
 ## Configuration continuation0153 (prepared, hardware pending)
 

@@ -8,6 +8,25 @@ session and the working boot image while researching acceleration.
 
 ## Verified status, 2026-11-07
 
+`tools/gpu-perf-table.py FDT CMD_DB STOCK_CACHE --speed-bin N --output JSON
+--header HEADER` now resolves a complete offline legacy PERF candidate. It
+checks the four pinned clock/regulator source hashes, the A618 identity and
+clock OPP consumer phandles, requires an explicit bin, preserves the off
+entry, converts Hz to kHz, and derives GX/CX-to-MX ARC dependencies. It rejects
+unsupported frequencies or dependencies instead of silently replacing them.
+The outputs contain captured device data and must stay outside git. There is
+no hardware caller, active-fuse verification or automatic clock change.
+
+For the captured recovery FDT, explicit bin167 produced eight GPU entries
+including off and two GMU entries. `sweet_hfi_perf_profile_test.py STOCK_CACHE
+FDT CMD_DB BIN BUILD_DIR` compared every calculated vote and the complete
+43-word packet with the unchanged pinned stock ARC and PERF functions under
+ASan/UBSan; it passed. The original Android bin167 was correctly rejected:
+its140MHz rate is absent from the pinned clock source. Bin0's825MHz level416
+was also rejected because captured MX ends at384; stock clamps to its last
+MX entry, which is not evidence that this dependency is appropriate here.
+The current initial-HFI image does not submit any of these candidate tables.
+
 0148 reached fresh CM3 firmware readiness on the actual sweet_k6a: rc0,
 phase8, held1/release1, BABEFACE. The complete235500-byte log (flush17) has
 SMMU global0/FSR400/FAR0/syndrome0 and sampled host/ao error IRQ0.

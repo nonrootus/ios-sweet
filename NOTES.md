@@ -480,3 +480,13 @@ Transport source blobs are normalized to LF in both local and build trees.
 Full126-150 apply/reverse and38canonical source checks passed. Previous
 CI runs42341729161 and42342506500 were cancelled as superseded. Full kernel
 build and hardware exchange validation remain pending; no unattended boot.
+
+## Offline performance-profile resolver, 2026-11-07
+
+Added explicit-bin PERF candidate resolution from captured FDT/command DB and
+four hash-pinned stock clock/regulator files. Generated device-derived output
+stays private. All votes and the whole packet for the selected recovery
+profile match unchanged stock ARC/PERF code under ASan/UBSan. Unsupported
+140MHz/source mismatch and unsupported MX dependency are rejected. No runtime
+caller or active-fuse proof. GPU kernel CI42342878712 remains pinned to96f6626;
+these offline tools do not change its runtime code. Phone remains recovery.

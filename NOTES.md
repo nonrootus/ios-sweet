@@ -9,11 +9,13 @@ The selective kernel artifact passed CRC/SHA256 and all17 required markers.
 Local packaging reproduced the payload and independently compared10 kernel
 segments, Android boot parts and configuration/profile flags.
 
-Temporary fastboot boot at10:55UTC returned Sending/Booting OKAY. No
-partitions flashed. iOS boot and GMU configuration are not yet verified:
-await the owner report and a fresh recovery log for PERF/BW/TEST responses
-and retained-session observations. This kernel has no DCVS/CP prototype
-integration and does not implement GPU rendering.
+Temporary fastboot boot at10:55UTC returned Sending/Booting OKAY. The owner
+confirmed iOS loaded and recovery; a fresh complete log confirms profile167
+binding, all PERF/BW/TEST ACKs with error0, configuration rc0/phase15, sealed
+TX and clean observations at0/1/10seconds. CMD212/212, MSG20/20, DBG0/0;
+host/AO IRQ0, GX28, HFI1 and no SMMU fault bits. No partitions flashed.
+This proves configuration exchange and bounded health. This kernel has no
+DCVS/CP prototype integration and does not implement GPU rendering.
 
 ## Offline CP initialization packet preparation
 

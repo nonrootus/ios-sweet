@@ -1,5 +1,31 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Offline DCVS preparation alongside0153
+
+Added an unlinked one-shot DCVS prototype, with no driver caller or bootflag.
+It requires a successful retained configuration session and explicit index1,
+requests ATLEAST180MHz with BW unchanged, retains the host DDR floor and boot
+OOB, and bounds the response to100ms. Return0 reports request acceptance,
+not measured frequency. Source/exact six-write trace from pinned Xiaomi
+10c33d40 passes success/timeout/firmware-error cases. The prototype passes
+ASan/UBSan33callback failures, stale ACK/profile/session gates, pending service
+events during ACK/poll, raw firmwareFFFFFFFF, sticky ACK diagnostics, and
+cleanup write ordering. Target-header ARM64 compilation passed.
+
+Claude review corrections: pending service bits are retained for reporting
+but do not suppress DCVS cleanup after publication; DCVS_RETURN is a raw
+firmware error word, not a status-register all-ones heuristic. Fatal power/
+SMMU/IRQ guards still suppress unsafe cleanup and record abandonment. No
+retry or boot-request clear. Global serialization and one persistent state
+must be enforced by the future adapter. No hardware integration yet.
+
+Next source reference: pinned adreno_a6xx.c functions a6xx_start,
+a6xx_microcode_load and a6xx_rb_start. SQE requires its own GPU-visible
+firmware/ring/scratch mapping, initialization commands and start sequencing;
+the existing SID5 GMU mapping does not establish these GPU client mappings.
+No SQE/GPU workload, graphics acceleration or user-space API is implemented
+by the new prototype.0153 currently building contains no DCVS prototype.
+
 ## Configuration continuation0153 (prepared, hardware pending)
 
 Actual0152 completed INIT/VERSION with firmware1.17/wire0, clean1s/10s

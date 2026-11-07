@@ -23,6 +23,14 @@ static unsigned calls,fail_at,elapsed,nwrites,doorbells,timeout_stage,corrupt_ac
 static int doorbell_fail;
 static unsigned gx_powered;
 static unsigned event_kind,stale_sptp,observe_fault;
+static unsigned early_debug,late_event,late_queue,late_sent;
+static void enqueue_event(unsigned queue,unsigned id){
+ unsigned header=6+12*queue,w=table[header+11],base=56+1024*queue;
+ uint32_t words[]={id|0x400|(1u<<16),0x4321,0,0};
+ for(unsigned i=0;i<4;i++)table[base+(w+i)%1024]=words[i];
+ table[header+11]=(w+4)%1024;
+ mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]|=queue==1?1u:4u;
+}
 static int callback(void){return ++calls==fail_at ? -1:0;}
 static int read32(void *p,uint32_t off,uint32_t *v){(void)p;assert(!(off&3)&&off<sizeof(mmio));*v=mmio[off/4];return callback();}
 static int write32(void *p,uint32_t off,uint32_t v){
@@ -33,13 +41,14 @@ static int write32(void *p,uint32_t off,uint32_t v){
   if(timeout_stage!=1){mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]|=SWEET_GMU_BOOT_ACK;
    if(timeout_stage!=2){gx_powered=1;mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]=stale_sptp?8:0;}}
  }else if(off==A6XX_GMU_GMU2HOST_INTR_CLR){
-  assert(v==SWEET_GMU_BOOT_ACK || v==1);mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]&=~v;
+  assert(v==SWEET_GMU_BOOT_ACK || v==1 || v==4);mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]&=~v;
  }else if(off==A6XX_GMU_GX_SPTPRAC_POWER_CONTROL){
   assert(gx_powered && s.oob_ack && s.sptp_issued && v==0x778000);
   if(timeout_stage!=3)mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]|=8;
  }else if(off==A6XX_GMU_HFI_CTRL_INIT){
   assert(gx_powered && (mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]&8) && s.hfi_issued && v==1);
   if(timeout_stage!=4)mmio[A6XX_GMU_HFI_CTRL_STATUS/4]=1;
+  if(early_debug)enqueue_event(2,early_debug);
  }else mmio[off/4]=v;
  return callback(); // failure can be AFTER the write
 }
@@ -47,6 +56,7 @@ static int barrier(void *p){(void)p;return callback();}
 static void dma_barrier(void *p){(void)p;}
 static int delay(void *p,unsigned us){(void)p;assert(us==100 || us==100000);elapsed+=us;
  if(observe_fault && elapsed>=1000000)mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]|=1u<<15;
+ if(late_event && !late_sent && elapsed>=1000000){enqueue_event(late_queue,late_event);late_sent=1;}
  return callback();}
 static int check(void *p){(void)p;if(late_fault && s.stage>=late_fault)return -1;return callback();}
 static int doorbell(void *p){
@@ -82,7 +92,7 @@ static struct sweet_hfi_transport transport;
 static void reset(void){
  memset(&s,0,sizeof(s));memset(mmio,0,sizeof(mmio));memset(trace,0,sizeof(trace));
  calls=fail_at=elapsed=nwrites=doorbells=timeout_stage=corrupt_ack=late_fault=gx_powered=0;doorbell_fail=0;
- event_kind=stale_sptp=observe_fault=0;
+ event_kind=stale_sptp=observe_fault=early_debug=late_event=late_queue=late_sent=0;
  assert(!sweet_gpu_hfi_table_init(table,sizeof(table),0x60100000));
  mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]=0xc0;
  mmio[A6XX_GMU_HFI_VERSION_INFO/4]=0x10000000;
@@ -126,6 +136,16 @@ int main(void){
  reset();mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]=1;assert(run()==-3 && !s.init_ack && !nwrites);
  reset();stale_sptp=1;assert(run()==-3 && s.oob_ack && !s.sptp_issued);
  reset();observe_fault=1;assert(run()==-5 && s.version_ack && s.stage==SWEET_GMU_POST_OBSERVE && !s.observed);
+ reset();early_debug=101;assert(!run() && s.debug_messages==1 && s.dbg_read==4 && s.dbg_write==4);
+ reset();early_debug=100;assert(run()==-7 && s.firmware_error==0x4321 && !s.init_sent);
+ for(unsigned queue=1;queue<=2;queue++){
+  reset();late_event=100;late_queue=queue;
+  assert(run()==-7 && s.version_ack && s.stage==SWEET_GMU_POST_OBSERVE && !s.observed && s.firmware_error==0x4321);
+  reset();late_event=101;late_queue=queue;
+  assert(!run() && s.debug_messages==1 && s.observed==2);
+ }
+ reset();event_kind=2;timeout_stage=6;assert(run()==-4 && s.init_ack && !s.version_ack);
+ assert((s.response_header&255)==126 && (s.original_header&255)==0 && (s.event_header&255)==101);
  printf("PASS postboot model: %u callback failures, six deadlines, strict ACK/version/table guards, IRQs, no retry/host-request clear\n",success_calls);
 }
 '''

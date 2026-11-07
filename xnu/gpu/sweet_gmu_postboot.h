@@ -33,10 +33,11 @@ struct sweet_gmu_postboot_state {
     uint32_t vote, gx_status, hfi_status, wire_version, firmware_version;
     uint32_t host_irq, ao_irq, firmware_error, response_header, original_header;
     uint32_t last_offset, last_value;
-    uint32_t cmd_read, cmd_write, msg_read, msg_write;
+    uint32_t cmd_read, cmd_write, msg_read, msg_write, dbg_read, dbg_write;
     uint32_t debug_messages, event_header, event_code;
     unsigned observed;
-    uint32_t samples[2][4]; /* at1s/10s: hostIRQ, AOIRQ, GX status, HFI status */
+    /* at1s/10s: hostIRQ, AOIRQ, GX, HFI, msg read/write, debug read/write */
+    uint32_t samples[2][8];
 };
 /* packed_vote is calculated from validated live cmd-db ARC tables for the
  * explicitly selected stock boot voltage, NOT the reverse frequency index.

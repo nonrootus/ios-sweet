@@ -16,4 +16,7 @@ int sweet_hfi_send(struct sweet_hfi_transport *, const uint32_t *, size_t);
 /* Polled receive; no IRQ sleep/recheck protocol. An empty queue rearms rx_req.
  * 0 message, 1 empty/incomplete, -1 invalid; outputs unchanged on failure. */
 int sweet_hfi_receive(struct sweet_hfi_transport *, uint32_t *, size_t, size_t *);
+/* Same bounded polled receive for MSG=1 or DBG=2; CMD/DSP are rejected. */
+int sweet_hfi_receive_queue(struct sweet_hfi_transport *, unsigned queue,
+    uint32_t *, size_t, size_t *);
 #endif

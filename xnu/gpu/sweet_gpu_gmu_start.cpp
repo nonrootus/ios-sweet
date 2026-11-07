@@ -292,8 +292,8 @@ extern "C" int sweet_gpu_gmu_hfi_start(void)
     int rc=sweet_rpmh_gpu_arc_info("gfx.lvl",&gfx_address,gfx,&ngfx);
     if(!rc)rc=sweet_rpmh_gpu_arc_info("mx.lvl",&mx_address,mx,&nmx);
     if(!rc)rc=sweet_gmu_arc_vote(gfx,ngfx,mx,nmx,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE,&vote);
-    IOLog("SWEET GMU HFI: boot ARC rc=%d gfx=%x mx=%x level_plus_one=%u packed=%08x\n",
-        rc,gfx_address,mx_address,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE,vote);
+    IOLog("SWEET GMU HFI: boot ARC rc=%d gfx=%x mx=%x requested_level=%u selected_level=%u packed=%08x\n",
+        rc,gfx_address,mx_address,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE-1,vote>>16,vote);
     if(rc || gfx_address==mx_address || (gfx_address>>16)!=3 || (mx_address>>16)!=3)return -3;
     s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0};
     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,post_progress};
@@ -306,10 +306,12 @@ extern "C" int sweet_gpu_gmu_hfi_start(void)
     IOLog("SWEET GMU HFI: INIT=%u/%u VERSION=%u/%u err=%08x irq=%08x/%08x last=%x/%08x ack=%08x/%08x queues=%u/%u %u/%u\n",
         p.init_sent,p.init_ack,p.version_sent,p.version_ack,p.firmware_error,p.host_irq,p.ao_irq,
         p.last_offset,p.last_value,p.response_header,p.original_header,p.cmd_read,p.cmd_write,p.msg_read,p.msg_write);
-    IOLog("SWEET GMU HFI: DEBUG=%u event=%08x/%08x observations=%u\n",p.debug_messages,p.event_header,p.event_code,p.observed);
+    IOLog("SWEET GMU HFI: DEBUG=%u event=%08x/%08x dbg_queue=%u/%u observations=%u\n",
+        p.debug_messages,p.event_header,p.event_code,p.dbg_read,p.dbg_write,p.observed);
     for(unsigned i=0;i<p.observed && i<2;i++)
-        IOLog("SWEET GMU HFI: observed %us irq=%08x/%08x GX=%08x HFI=%08x\n",
-            i ? 10u : 1u,p.samples[i][0],p.samples[i][1],p.samples[i][2],p.samples[i][3]);
+        IOLog("SWEET GMU HFI: observed %us irq=%08x/%08x GX=%08x HFI=%08x MSG=%u/%u DBG=%u/%u\n",
+            i ? 10u : 1u,p.samples[i][0],p.samples[i][1],p.samples[i][2],p.samples[i][3],
+            p.samples[i][4],p.samples[i][5],p.samples[i][6],p.samples[i][7]);
     IOLog("SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started\n");
     return rc;
 }

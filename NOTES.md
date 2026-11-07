@@ -463,3 +463,13 @@ Host failure/queue/power/lifetime tests, stock reference trace, target-header
 ARM64 compiles and full126-149/final-source checks passed. Full XNU build and
 actual-device result are pending. Phone remains recovery while user is away.
 Do not leave this CPU-idle-disabled test running unattended.
+
+## Service-queue correction0150, 2026-11-07
+
+Implementation review found that asynchronous DBG records can appear before
+INIT and firmware ERR events can arrive after VERSION. 0150 reads MSG/DBG
+queues separately, classifies early/late events, preserves ACK diagnostics
+and records queue indexes during health checks. Boot voltage request48 and
+selected ARC level64 are logged distinctly. Host fault/event/queue/lifetime
+tests and ARM64/full patch-source checks passed; hardware remains unverified.
+This supersedes0149 for the next device test. No boot while user is away.

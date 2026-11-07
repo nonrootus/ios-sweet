@@ -24,6 +24,14 @@ int main(void){
  assert(sweet_hfi_receive(&t,out,3,&n)==-1 && memory[h+8]==0);
  memory[h+10]=0;memory[h+11]=1;memory[q]=msg[0];n=99;
  assert(sweet_hfi_receive(&t,out,3,&n)==1 && n==99 && memory[h+10]==0);
+ unsigned dh=6+24,dq=56+2048;memory[dh+10]=1023;memory[dh+11]=2;
+ memory[dq+1023]=msg[0];memory[dq]=33;memory[dq+1]=44;
+ assert(!sweet_hfi_receive_queue(&t,2,out,3,&n) && n==3 && out[1]==33 && out[2]==44 && memory[dh+10]==2);
+ n=99;out[0]=0xdeadbeef;before=s.barriers;
+ assert(sweet_hfi_receive_queue(&t,0,out,3,&n)==-1);
+ assert(sweet_hfi_receive_queue(&t,3,out,3,&n)==-1);
+ assert(n==99 && out[0]==0xdeadbeef && s.barriers==before);
+ memory[dh+8]=0;assert(sweet_hfi_receive_queue(&t,2,out,3,&n)==1 && memory[dh+8]==1 && n==99);
  s.fail=1;assert(sweet_hfi_send(&t,msg,3)==-2 && t.poisoned);
  assert(sweet_hfi_send(&t,msg,3)==-1);free(memory);return 0;
 }

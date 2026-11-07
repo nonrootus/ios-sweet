@@ -26,11 +26,12 @@ int sweet_hfi_send(struct sweet_hfi_transport *t, const uint32_t *msg, size_t co
     if(t->doorbell(t->ctx)){t->poisoned=1;return -2;}
     return 0;
 }
-int sweet_hfi_receive(struct sweet_hfi_transport *t, uint32_t *out, size_t cap, size_t *count) {
+int sweet_hfi_receive_queue(struct sweet_hfi_transport *t, unsigned queue,
+    uint32_t *out, size_t cap, size_t *count) {
     unsigned read,write,available,n,index;
     volatile uint32_t *h,*q;
-    if (!valid(t) || !out || !count) return -1;
-    h=t->words+QHEADER_WORD+QHEADER_SIZE;q=t->words+FIRST_QUEUE_WORD+QWORDS;
+    if (!valid(t) || !out || !count || (queue!=1 && queue!=2)) return -1;
+    h=t->words+QHEADER_WORD+queue*QHEADER_SIZE;q=t->words+FIRST_QUEUE_WORD+queue*QWORDS;
     if(h[0]!=1 || h[3]!=QWORDS) return -1;
     read=h[10];write=h[11];t->barrier(t->ctx);
     if(read>=QWORDS || write>=QWORDS) return -1;
@@ -48,4 +49,7 @@ int sweet_hfi_receive(struct sweet_hfi_transport *t, uint32_t *out, size_t cap, 
     for(unsigned i=0;i<n;i++){out[i]=q[index];index=(index+1)%QWORDS;}
     t->barrier(t->ctx);h[10]=index;t->barrier(t->ctx);*count=n;
     return 0;
+}
+int sweet_hfi_receive(struct sweet_hfi_transport *t, uint32_t *out, size_t cap, size_t *count) {
+    return sweet_hfi_receive_queue(t,1,out,cap,count);
 }

@@ -51,8 +51,9 @@ static void queue_snapshot(struct sweet_gmu_postboot_state *s,struct sweet_hfi_t
     t->barrier(t->ctx);
     s->cmd_read=t->words[16];s->cmd_write=t->words[17];
     s->msg_read=t->words[28];s->msg_write=t->words[29];
+    s->dbg_read=t->words[40];s->dbg_write=t->words[41];
 }
-static int fresh_table(struct sweet_hfi_transport *t)
+static int fresh_table(struct sweet_hfi_transport *t,int initial)
 {
     static const uint32_t table[6]={0,54,6,12,4,4};
     static const uint32_t type[4]={0x0a00,0x0a04,0x2805,0x1401};
@@ -62,9 +63,45 @@ static int fresh_table(struct sweet_hfi_transport *t)
         volatile uint32_t *h=t->words+6+12*i;
         if(h[0]!=(i!=3) || h[1]!=0x601000e0u+4096*i || h[2]!=type[i] ||
             h[3]!=1024 || h[4] || h[5] || h[6]!=1 || h[7]!=1 ||
-            h[8]>1 || h[9]>1 || h[10] || h[11])return -3;
+            h[8]>1 || h[9]>1 || h[10]>=1024 || h[11]>=1024)return -3;
+        /* Firmware may already publish debug records after HFI CTRL. Never
+         * discard them or require its producer-owned indexes to stay zero. */
+        if((initial || i!=2) && (h[10] || h[11]))return -3;
     }
     return 0;
+}
+static int event(struct sweet_gmu_postboot_state *s,const uint32_t *response,size_t words)
+{
+    unsigned id=response[0]&255u,type=(response[0]>>16)&15u;
+    s->event_header=response[0];s->event_code=words>1 ? response[1] : 0;
+    if(type>=2)return -6;
+    if(id==100){if(words<2)return -6;s->firmware_error=s->event_code;return -7;}
+    if(id!=101 || words!=4)return -6;
+    ++s->debug_messages;return 0;
+}
+static int drain_events(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_postboot_ops *o,
+    struct sweet_hfi_transport *t,unsigned queue)
+{
+    unsigned consumed=0;uint32_t irq=queue==1 ? 1u : 4u;
+    /* One queue holds1024 words; cap work even if firmware keeps refilling. */
+    for(unsigned n=0;n<1024;n++){
+        uint32_t response[255];size_t words=0;
+        int rc=sweet_hfi_receive_queue(t,queue,response,255,&words);
+        queue_snapshot(s,t);
+        if(rc<0)return -6;
+        if(rc){
+            uint32_t r=queue==1 ? s->msg_read : s->dbg_read;
+            uint32_t w=queue==1 ? s->msg_write : s->dbg_write;
+            if(r!=w)return -6; /* incomplete packet, not an empty queue */
+            if(consumed || (s->host_irq&irq)){
+                rc=write_reg(s,o,A6XX_GMU_GMU2HOST_INTR_CLR,irq);if(rc)return rc;
+            }
+            return 0;
+        }
+        rc=event(s,response,words);if(rc)return rc;
+        ++consumed;
+    }
+    return -6;
 }
 static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_postboot_ops *o,
     struct sweet_hfi_transport *t,const uint32_t *cmd,size_t n,int version)
@@ -77,23 +114,21 @@ static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_po
         uint32_t response[255];size_t words=0,payload_words=0;
         const uint32_t *payload=0;
         rc=check(s,o);if(rc)return rc;
+        rc=drain_events(s,o,t,2);if(rc)return rc;
         rc=sweet_hfi_receive(t,response,255,&words);
         queue_snapshot(s,t);
         if(rc<0)return -6;
         if(!rc){
-            s->response_header=response[0];
-            s->original_header=words>1 ? response[1] : 0;
             unsigned id=response[0]&255u,type=(response[0]>>16)&15u;
             if(type<2 && (id==100 || id==101)){
-                s->event_header=response[0];s->event_code=words>1 ? response[1] : 0;
-                if(id==100){if(words<2)return -6;s->firmware_error=s->event_code;return -7;}
-                if(words!=4)return -6;
-                ++s->debug_messages;
+                rc=event(s,response,words);if(rc)return rc;
                 /* Leave the ACK deadline bounded even if debug events stream.
                  * This first diagnostic records events without logging their
                  * potentially private text or treating DEBUG as an ACK. */
                 goto next_poll;
             }
+            s->response_header=response[0];
+            s->original_header=words>1 ? response[1] : 0;
             rc=sweet_hfi_response(response,words,(uint8_t)cmd[0],(uint16_t)(cmd[0]>>20),
                 &s->firmware_error,&payload,&payload_words);
             if(rc==2)return -7;
@@ -121,7 +156,7 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
     if(!(vote>>16) || !(vote&255) || (vote&255)>15 || !((vote>>8)&255) || ((vote>>8)&255)>15)return -3;
     int rc=check(s,o);if(rc)return rc;
     if(s->host_irq&(SWEET_GMU_BOOT_ACK|1))return -3; /* reject stale completion */
-    rc=fresh_table(t);if(rc)return rc;
+    rc=fresh_table(t,1);if(rc)return rc;
     rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
     if(s->hfi_status&1)return -3;
     phase(s,o,SWEET_GMU_POST_OOB);
@@ -153,7 +188,8 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
     phase(s,o,SWEET_GMU_POST_INIT);
     rc=check(s,o);if(rc)return rc;
     if(s->host_irq&1)return -3;
-    rc=fresh_table(t);if(rc)return rc;
+    rc=fresh_table(t,0);if(rc)return rc;
+    rc=drain_events(s,o,t,2);if(rc)return rc;
     if(sweet_hfi_v1_init(cmd,5,1,0x60200000,0x4000,1))return -3;
     rc=exchange(s,o,t,cmd,5,0);if(rc)return rc;
     phase(s,o,SWEET_GMU_POST_VERSION);
@@ -163,18 +199,25 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
     if(sweet_hfi_v1_version(cmd,5,2))return -3;
     rc=exchange(s,o,t,cmd,2,1);if(rc)return rc;
     if((s->firmware_version>>28)!=1 || ((s->firmware_version>>16)&0xfff)<8)return -3;
-    /* This intentionally stops before PERF/BW/TEST. Observe its incomplete
-     * initialization for10s; passing is not a persistent stability guarantee. */
+    /* This intentionally stops before PERF/BW/TEST. Poll health and consume
+     * service events for10s; passing is not a persistent stability guarantee. */
     phase(s,o,SWEET_GMU_POST_OBSERVE);
     for(unsigned n=1;n<=100;n++){
         if(o->delay_us(o->ctx,100000))return -2;
         rc=check(s,o);if(rc)return rc;
+        if(s->host_irq&2)return -6; /* no side-message protocol in this test */
+        rc=drain_events(s,o,t,1);if(rc)return rc;
+        rc=drain_events(s,o,t,2);if(rc)return rc;
+        rc=check(s,o);if(rc)return rc;
+        if(s->host_irq&7)return -6; /* new unexamined events cannot count as quiet */
         rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
         if(!(s->hfi_status&1))return -3;
         if(n==10 || n==100){
             unsigned i=s->observed++;
             s->samples[i][0]=s->host_irq;s->samples[i][1]=s->ao_irq;
             s->samples[i][2]=s->gx_status;s->samples[i][3]=s->hfi_status;
+            s->samples[i][4]=s->msg_read;s->samples[i][5]=s->msg_write;
+            s->samples[i][6]=s->dbg_read;s->samples[i][7]=s->dbg_write;
         }
     }
     phase(s,o,SWEET_GMU_POST_READY);return 0;

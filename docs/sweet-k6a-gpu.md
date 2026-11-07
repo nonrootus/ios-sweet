@@ -55,6 +55,23 @@ fixture contains device data and must remain outside git. The persistent
 adapter test additionally verifies the live GX state transition, error paths
 and permanent retention using actual SMMU/CM3/HFI helpers.
 
+0150 follows implementation review: the polled transport now reads MSG and
+DBG queues separately. Firmware may populate DBG during HFI CTRL startup;
+only its static layout and bounded indexes are required at that point.
+Queued ERR events stop the test, DEBUG events are counted, and ACK diagnostics
+cannot be overwritten by them. The10s observation consumes both event queues
+and rejects unread/unknown side messages; it no longer relies only on fatal
+interrupt bits. Samples record MSG/DBG indexes. Work per drain is bounded.
+The firmware request is level48; the observed command database rounds it up
+to the first supported primary level64 and dependent MX level192 (indexes2/2).
+These are firmware level encodings, not measured voltages. The selected level
+is now logged separately from the request. Power checks remain before IRQ
+reads, because diagnostic priority does not justify accessing unpowered MMIO.
+Host sequencer tests passed1073 callback failure points plus early/late errors
+on both event queues, debug records before INIT and delayed DEBUG processing.
+The composed adapter, MSG/DBG wrap/bounds tests, ARM64 compiles and full
+126-150 patch/final-source checks passed. Hardware outcome remains unverified.
+
 0147 full CI42265225050 passed. Its first captured log had wrapped, so it
 contained no startup evidence. A repeat temporary boot produced a complete
 225606-byte log (flush40): firmware check0, prepare0/install0, phase6,

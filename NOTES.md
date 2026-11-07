@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Current 0151 handoff - 2026-11-07
+
+The0150 phone boot reached fresh CM3 BABEFACE and OOB request/ACK1/1.
+GX status0x28 had the SPTPRAC-on bit already set, so the port's extra
+off-to-on precondition stopped rc-3 before SPTP/HFI writes. The owner
+confirmed iOS loaded and returned to recovery. No INIT/VERSION occurred.
+
+0151 removes only that unsupported precondition, retaining the stock power-on
+write, bounded full-status poll, fresh-session guards and permanent holds.
+The deliberate profile is ACTIVE; default A618 IFPC follows a different path.
+Claude review agreed; tests cover already-on, settling, contradictory states,
+post-HFI power loss and exactly one write. Host3219callbackfaults, integrated
+adapter, stock16traces, ARM64 compile and full126-151 source checks passed.
+Preflight now reconstructs0150+0151 from immutable published0149 and compares
+all5 exact canonical Git blobs, then reverses to the original baseline.
+Full0151 CI and actual hardware outcome pending. No device files published.
+
+
 ## Current 0150 handoff - 2026-11-07
 
 Full Intel XNU CI42344518565 PASSED for cdcc69b4001ea9adea3f639fd2bfb39ff9c75171,

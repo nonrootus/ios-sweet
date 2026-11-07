@@ -172,7 +172,9 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
     rc=write_reg(s,o,A6XX_GMU_GMU2HOST_INTR_CLR,SWEET_GMU_BOOT_ACK);if(rc)return rc;
     phase(s,o,SWEET_GMU_POST_GX);
     rc=poll(s,o,A6XX_GMU_SPTPRAC_PWR_CLK_STATUS,SWEET_GMU_GX_OFF,0,100000,&s->gx_status);if(rc)return rc;
-    if(s->gx_status&SWEET_GMU_SPTP_ON)return -3; /* require fresh SPTP transition */
+    /* Fresh CM3/OOB may already leave SPTPRAC on (0150 observed0x28).
+     * Stock still writes POWERON and polls; it does not require an off->on
+     * edge here. Preserve that write and the complete bounded status check. */
     /* Only now may we touch this GX-domain register. OOB remains asserted. */
     phase(s,o,SWEET_GMU_POST_SPTP);s->sptp_issued=1;
     rc=write_reg(s,o,A6XX_GMU_GX_SPTPRAC_POWER_CONTROL,SWEET_GMU_SPTP_CONTROL);if(rc)return rc;

@@ -124,6 +124,7 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0148-sweet-gmu-bus-cache-readback.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c --exclude=bsd/dev/sweet_gmu_postboot.h --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0149-sweet-gmu-gx-hfi-start.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0150-sweet-gmu-service-queue-health.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0151-sweet-gmu-sptp-already-on.patch"
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'dbg_queue=%u/%u observations=%u' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU HFI: begin GX and initial INIT/VERSION;" > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET GMU HFI: retained until reboot; PERF/BW/TEST" > /dev/null

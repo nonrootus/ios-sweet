@@ -10,13 +10,39 @@ session and the working boot image while researching acceleration.
 
 Full Intel XNU CI [42344518565](https://github.com/nonrootus/ios-sweet/actions/runs/42344518565)
 passed for `cdcc69b4001ea9adea3f639fd2bfb39ff9c75171`, including exact
-0149-baseline/0150 preflight and final source/kernel verification. The prepared
-temporary0150 image is **unbooted**. Its kernel has been checked by CRC/SHA256,
+0149-baseline/0150 preflight and final source/kernel verification. Its kernel
+has been checked by CRC/SHA256,
 13 required markers, exact payload reconstruction and independent comparison
 of all10 Mach-O segments (zero chained fixups), plus the boot shim and DTB.
-This is build/package validation, not a new hardware result. The last phone
-result remains0148 CM3 readiness below. Do not leave this `wfi=0` diagnostic
-running unattended; phone remains in recovery while the owner is away.
+The owner then returned and the temporary0150 boot received fastboot OKAY;
+the owner confirmed iOS loaded and returned to recovery. The new complete
+145624-byte persistent log (flush7, no wrap) shows fresh CM3 BABEFACE and
+OOB request/ACK1/1. GX status becomes0x28, so GX power/clock-off bits are clear
+and SPTPRAC-on bit3 is already set. The sequencer stopped rc-3, phase3 at its
+extra "require fresh SPTP transition" check, before any SPTPRAC write or HFI
+initialization. Host/AO error IRQs are0; SMMU global0/FSR400/FAR0/syndrome0.
+No INIT/VERSION or rendering occurred. Do not leave this `wfi=0` diagnostic
+running unattended; phone is back in recovery.
+
+0151 removes only that unsupported SPTPRAC off-to-on precondition. Pinned
+Xiaomi `adreno_a6xx_gmu.c:a6xx_gmu_sptprac_enable` (lines759-781) always issues
+the power-on command and polls bit3; its call after the graphics-rail request
+(lines1096-1115) does not require bit3 to start clear. The explicit write and
+bounded full GX/SPTP status check remain. No meaning is assigned to bit5 and
+no new hardware capability is inferred from0x28. Fresh CM3/OOB/queue checks,
+failure handling and permanent holds are unchanged. Regression cases include
+0,8,0x28, persistent contradictory/off states and allones; the integrated
+adapter also exercises already-on states without skipping the power-on write.
+Full0151 CI and hardware outcome are pending until separately recorded.
+
+Claude independently agreed with removing the extra precondition and retaining
+the write/poll. Added its suggested settling, exactly-one-write and post-HFI
+SPTP-loss cases. The port deliberately selects the stock ACTIVE/IFPC-off path;
+default A618 Android uses IFPC and skips this manual SPTP call. Our post-write
+`(status & 0xdc) == 8` check is stricter than stock's bit3-only startup poll,
+combining its separate GX/SPTP-on predicates. The continuous check assumes
+ACTIVE and must be reconsidered before enabling IFPC. No interpretation of
+bit5 from reviewer recollection is used.
 
 ### Capture summary
 
@@ -134,8 +160,8 @@ response bits, and keeps all error flags available for diagnosis. The result
 records queue indexes and health samples at1s and10s. Passing those samples
 does not establish long-term stability with incomplete HFI initialization.
 PERF/BW/TEST, GPU firmware/command submission and iOS acceleration are not
-started by0149. Full CI for0149+0150 now passed as recorded above; the
-actual-device outcome is not yet established.
+started by0149. Full CI for0149+0150 passed; the0150 phone run reached GX/OOB
+but stopped at the extra SPTPRAC precondition as recorded above.
 
 New host tests: `sweet_gmu_postboot_test.py STOCK_CACHE BUILD_DIR` validates
 register offsets against pinned headers and exercises the real sequencer,

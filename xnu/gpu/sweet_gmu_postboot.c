@@ -132,7 +132,11 @@ static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_po
             rc=sweet_hfi_response(response,words,(uint8_t)cmd[0],(uint16_t)(cmd[0]>>20),
                 &s->firmware_error,&payload,&payload_words);
             if(rc==2)return -7;
-            if(rc || response[1]!=cmd[0] || (version && payload_words<1))return -6;
+            /* Legacy firmware may omit size/type in the echoed request
+             * (0151 INIT: sent00100500, echoed00100000). The codec already
+             * checks command ID and sequence, plus outer ACK framing/error.
+             * Stock receive_ack_cmd matches sequence, not the whole header. */
+            if(rc || (version && payload_words<1))return -6;
             if(version){s->firmware_version=payload[0];s->version_ack=1;}
             else s->init_ack=1;
             /* Polled reader never sleeps on an IRQ. Clear only MSGQ bit0,

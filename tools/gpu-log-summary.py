@@ -138,8 +138,9 @@ def analyze(text, meta):
         if ack["error"]:
             issues.append("nonzero firmware error reported")
         # The actual codec checks ACK type2/id126. The echoed original header
-        # carries sequence2; the outer ACK sequence is not part of that check.
-        if ack["version_ack"] and (ack["original_header"] != 0x00200201 or
+        # carries command1/sequence2; its size/type and outer ACK sequence are
+        # not identity. Legacy firmware may omit the echoed request size.
+        if ack["version_ack"] and ((ack["original_header"] & 0xfff000ff) != 0x00200001 or
                 (ack["response_header"] & 0xf00ff) != 0x2007e or
                 ((ack["response_header"] >> 8) & 255) < 4):
             issues.append("VERSION response/original header mismatch")

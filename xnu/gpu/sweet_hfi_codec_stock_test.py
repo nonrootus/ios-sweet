@@ -122,6 +122,19 @@ int main(void){
  receive_ack_cmd(&g,ack,&pending);
  assert(!faults && !memcmp(pending.results,ack,sizeof(ack)));
  response(ack,4,H2F_MSG_FW_VER,17,0);
+ /* The phone's0151 INIT echo omits size. Stock only compares sequence;
+  * our decoder additionally requires command ID. Preserve outer framing. */
+ for(unsigned id=0;id<=1;id++)for(unsigned meta=0;meta<=0xfff;meta++){
+  uint32_t sent=MSG_HDR_SET_SEQNUM(CMD_MSG_HDR(id,id?8:20),id?2:1);
+  uint32_t compact[]={CREATE_MSG_HDR(F2H_MSG_ACK,16,HFI_V1_MSG_ACK),
+      (sent&0xfff000ffu)|(meta<<8),0,STOCK_VERSION};
+  struct pending_cmd p={.sent_hdr=sent};
+  receive_ack_cmd(&g,compact,&p);
+  assert(!faults && !memcmp(p.results,compact,sizeof(compact)));
+  response(compact,4,id,id?2:1,0);
+  response(compact,4,id,id?1:2,1);
+  response(compact,4,id^1,id?2:1,1);
+ }
  ack[2]=9;receive_ack_cmd(&g,ack,&pending);
  assert(pending.results[2]==9);response(ack,4,H2F_MSG_FW_VER,17,2);ack[2]=0;
  response(ack,4,H2F_MSG_FW_VER,18,1);response(ack,4,H2F_MSG_INIT,17,1);
@@ -161,7 +174,7 @@ int main(void){
  assert(sweet_hfi_v1_init(out,5,4096,0,0,0)==-1);
  assert(sweet_hfi_v1_version(out,1,0)==-1 && sweet_hfi_v1_version(out,2,4096)==-1);
  assert(!memcmp(out,saved,sizeof(out)));
- puts("PASS stock INIT/version functions, A618 version profile, all 4096 sequences, header bounds, ACK layout/type/ID/sequence/error/truncation");
+ puts("PASS stock INIT/version functions, all 4096 sequences, 8192 echoed-metadata variants against stock receive_ack_cmd, ACK identity/error/truncation");
 }
 '''
 (build / 'test.c').write_text(code)

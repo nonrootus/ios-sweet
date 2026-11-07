@@ -23,7 +23,7 @@ static unsigned calls,fail_at,elapsed,nwrites,doorbells,timeout_stage,corrupt_ac
 static int doorbell_fail;
 static unsigned gx_powered;
 static unsigned event_kind,gx_after_oob,observe_fault;
-static unsigned sptp_settle,sptp_lost;
+static unsigned sptp_settle,sptp_lost,echo_mode;
 static unsigned early_debug,late_event,late_queue,late_sent;
 static void enqueue_event(unsigned queue,unsigned id){
  unsigned header=6+12*queue,w=table[header+11],base=56+1024*queue;
@@ -71,20 +71,23 @@ static int doorbell(void *p){
  else assert(table[57+read]==0x10080000);
  if(doorbell_fail)return -1;
  if(timeout_stage==5+id)return 0;
- unsigned n=id==1?4:3,w=table[29];
+ unsigned n=(id==1 || echo_mode)?4:3,w=table[29];
  if(event_kind && id==0){
   unsigned event[]={((event_kind==1?100u:101u)|0x400u|(1u<<16)),0x1234,0x5678,0};
   for(unsigned i=0;i<4;i++)table[56+1024+(w+i)%1024]=event[i];
   w=(w+4)%1024;
  }
  uint32_t ack[4]={126u|(2u<<16)|(n<<8),hdr,0,0x10080001};
+ if(echo_mode)ack[1]&=0xfff000ffu;
+ if(echo_mode==2)ack[1]|=0x000fff00u; // echoed metadata is not identity
  if(corrupt_ack==1)ack[1]^=1u<<20;
  if(corrupt_ack==2)ack[2]=0x123;
  if(corrupt_ack==3)ack[0]^=1;
- if(corrupt_ack==4)ack[1]^=1u<<8;
+ if(corrupt_ack==4)ack[1]^=1u; // wrong original command ID
  if(corrupt_ack==5)ack[0]=(ack[0]&~0xff00u)|0x100;
  if(corrupt_ack==6 && id==1)ack[3]=0x10070000;
  if(corrupt_ack==7 && id==1)ack[3]=0x20080000;
+ if(corrupt_ack==8 && id==1){n=3;ack[0]=(ack[0]&~0xff00u)|0x300;}
  for(unsigned i=0;i<n;i++)table[56+1024+(w+i)%1024]=ack[i];
  table[29]=(w+n)%1024;table[16]=write;
  mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]|=1;
@@ -96,7 +99,7 @@ static void reset(void){
  memset(&s,0,sizeof(s));memset(mmio,0,sizeof(mmio));memset(trace,0,sizeof(trace));
  calls=fail_at=elapsed=nwrites=doorbells=timeout_stage=corrupt_ack=late_fault=gx_powered=0;doorbell_fail=0;
  event_kind=gx_after_oob=observe_fault=early_debug=late_event=late_queue=late_sent=0;
- sptp_settle=sptp_lost=0;
+ sptp_settle=sptp_lost=echo_mode=0;
  assert(!sweet_gpu_hfi_table_init(table,sizeof(table),0x60100000));
  mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]=0xc0;
  mmio[A6XX_GMU_HFI_VERSION_INFO/4]=0x10000000;
@@ -115,7 +118,17 @@ int main(void){
  assert(nwrites==sizeof(expected)/sizeof(expected[0]) && !memcmp(trace,expected,sizeof(expected)));once();
  for(unsigned i=1;i<=success_calls;i++){reset();fail_at=i;assert(run()!=0);once();}
  for(unsigned i=1;i<=6;i++){reset();timeout_stage=i;assert(run()==-4);assert(elapsed==(i==3?10000:100000));once();}
- for(unsigned i=1;i<=7;i++){reset();corrupt_ack=i;assert(run()!=0);once();}
+ for(unsigned i=1;i<=8;i++){reset();corrupt_ack=i;assert(run()!=0);once();}
+ // Actual0151 INIT ACK has four words and omits request size. Exercise that
+ // through both exchanges; a VERSION without its required payload still fails.
+ for(unsigned mode=1;mode<=2;mode++){
+  reset();echo_mode=mode;gx_after_oob=0x28;assert(!run());
+  assert(s.init_ack && s.version_ack && s.cmd_read==7 && s.msg_read==8 && s.msg_write==8);
+  assert(s.original_header==(mode==1?0x00200001u:0x002fff01u));once();
+  for(unsigned i=1;i<=8;i++){reset();echo_mode=mode;corrupt_ack=i;assert(run()!=0);once();}
+ }
+ reset();echo_mode=1;assert(!run());unsigned compact_calls=calls;
+ for(unsigned i=1;i<=compact_calls;i++){reset();echo_mode=1;fail_at=i;assert(run()!=0);once();}
  reset();doorbell_fail=1;assert(run()==-6 && transport.poisoned && s.init_sent && !s.init_ack && !s.version_sent);once();
  reset();mmio[A6XX_GMU_GMU2HOST_INTR_INFO/4]=SWEET_GMU_BOOT_ACK;assert(run()==-3&&!nwrites);
  reset();mmio[A6XX_GMU_HFI_CTRL_STATUS/4]=1;assert(run()==-3&&!nwrites);
@@ -175,7 +188,7 @@ int main(void){
  }
  reset();event_kind=2;timeout_stage=6;assert(run()==-4 && s.init_ack && !s.version_ack);
  assert((s.response_header&255)==126 && (s.original_header&255)==0 && (s.event_header&255)==101);
- printf("PASS postboot model: %u callback failures across three OOB states, six deadlines, already-on SPTP, contradictory/off/allones rejection, strict ACK/version/table guards, IRQs, no retry/host-request clear\n",3*success_calls);
+ printf("PASS postboot model: %u callback failures, six deadlines, already-on SPTP, compact/full ACK echoes, wrong command/sequence/error/missing VERSION payload, IRQs, no retry/host-request clear\n",3*success_calls+compact_calls);
 }
 '''
 (work/'test.c').write_text(program)

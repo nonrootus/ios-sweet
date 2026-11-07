@@ -37,7 +37,32 @@ Full0151 Intel XNU CI [42357699877](https://github.com/nonrootus/ios-sweet/actio
 passed for `27c643ed47b882e0fb7c82c8a2ad968e29054c57`, including exact patch
 preflight and final source/kernel checks. The packaged image passed CRC/SHA,
 required markers, exact payload reproduction and all10 kernel-segment checks.
-The actual0151 hardware outcome remains pending until a fresh recovery log.
+The owner confirmed0151 iOS loaded and returned to recovery. Its new complete
+168742-byte log (flush8, no wrap) shows CM3 readiness, OOB1/1, SPTP1 and HFI1,
+GX0x28 and HFI status1. INIT was consumed (CMD5/5), and a four-word response
+was consumed (MSG4/4), with headers `0002047e/00100000` and error0. The local
+sequencer stopped rc-6 at INIT because it required the echoed request header
+to equal the sent `00100500`, including size. VERSION was not attempted.
+
+0152 removes that redundant equality. The existing codec still checks outer
+ACK type2/id126, packet bounds, original command ID/sequence, firmware error
+and the required VERSION payload. Pinned stock
+[`receive_ack_cmd`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/10c33d40a11ecdc75cc1dadb5bd07894bab05815/drivers/gpu/msm/kgsl_hfi.c#L254-L280)
+matches only the original sequence; it does not require an echoed size/type.
+The phone's omitted INIT size is observed; an equivalent VERSION response
+remains a test fixture until measured. Local command-ID and outer-ID guards
+are deliberate additions to stock behavior. No hardware writes or ownership
+rules change. The stock code and logged error path identify the old equality
+as the rejection; raw trailing response payload was not recorded.
+
+Claude independently agreed with this diagnosis. Added compact/full echoes,
+all8192 INIT/VERSION echoed-metadata variants against stock, wrong command/
+sequence/error and missing VERSION payload cases; the offline summary uses
+the same identity mask. ASan/UBSan postboot4292callback failures, integrated
+adapter/lifetime tests, stock8192metadata variants and8offline summary groups
+passed. Full126-152 patch apply/reverse,38canonical sources and target-header
+ARM64 compilation passed. Full0152 CI and hardware result remain pending
+until separately recorded. HFI configuration and GPU rendering remain undone.
 
 Claude independently agreed with removing the extra precondition and retaining
 the write/poll. Added its suggested settling, exactly-one-write and post-HFI

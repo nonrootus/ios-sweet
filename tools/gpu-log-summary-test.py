@@ -11,7 +11,8 @@ spec.loader.exec_module(summary)
 
 # Synthetic console records in the current adapter's format, NOT a phone log.
 # ACK 0x2047e uses the codec's actual type2/id126; echoed VERSION seq2/header
-# 0x200201 matches sweet_hfi_v1_version. Outer ACK sequence is not checked.
+# 0x200201 matches sweet_hfi_v1_version. Echoed size/type and outer ACK sequence
+# are not command identity; legacy firmware may omit the request size.
 CM3 = """Darwin Kernel Version fixture
 SWEET GMU BOOT: begin first CM3 boot; no teardown or retry
 SWEET GMU BOOT: done rc=0 phase=8 held=1 release=1 init=babeface host_irq=00000000 ao_irq=00000000 pdc_before=00000000 last=0/24c14
@@ -49,6 +50,10 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(result["capture"]["source_identity"], "not established")
         self.assertIn("no proof", result["scope"])
         self.assertEqual(analyze(GOOD.replace("0002047e", "abc2047e"))["exit_code"], 0)
+        for header in ("00200001", "002fff01"):
+            self.assertEqual(analyze(GOOD.replace("00200201", header))["exit_code"], 0)
+        compact = GOOD.replace("00200201", "00200001").replace("7/7 7/7", "7/7 8/8").replace("MSG=7/7", "MSG=8/8")
+        self.assertEqual(analyze(compact)["exit_code"], 0)  # two synthetic four-word ACKs
         self.assertEqual(analyze(GOOD.replace("\n", "\r\n"))["exit_code"], 0)
 
     def test_cm3_does_not_imply_hfi(self):
@@ -99,7 +104,7 @@ SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started
             ("wire=10000000", "wire=20000000"), ("fw=10080001", "fw=10070001"),
             ("fw=10080001", "fw=20080001"), ("0002047e", "000204ff"),
             ("0002047e", "0001047e"), ("0002047e", "0002037e"),
-            ("00200201", "00300201"), ("queues=7/7", "queues=5/7"),
+            ("00200201", "00300201"), ("00200201", "00200000"), ("queues=7/7", "queues=5/7"),
             ("7/7 7/7", "7/7 6/7"), ("dbg_queue=0/0", "dbg_queue=0/4"),
             ("observations=2", "observations=1"), ("observed 10s", "observed 1s"),
             ("GX=00000008", "GX=000000c8"), ("status=00000001", "status=00000000"),

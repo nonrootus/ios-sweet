@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Legacy ACK identity fix0152 - 2026-11-07
+
+Actual0151 phone log reached HFI status1 and consumed INIT(CMD5/5). Firmware
+returned a four-word ACK0002047e/00100000, error0; our whole-header equality
+rejected the omitted request size. VERSION was not attempted. Owner reports
+iOS loaded and recovery.0152 removes that equality only; codec identity,
+framing/error/payload checks and all power/memory/no-retry rules remain.
+Claude agrees. ASan/UBSan4292callbackfailures, integrated lifetime tests,
+stock8192metadata variants/4096sequences,8summary groups, full126-152 chain
+and ARM64 target-header compile passed. Exact preflight/fullCI/runtime outcome
+pending until separately recorded. No device files published. No acceleration.
+
+
 ## Verified0151 build - 2026-11-07
 
 Full Intel XNU CI42357699877 passed for27c643ed47b882e0fb7c82c8a2ad968e29054c57.

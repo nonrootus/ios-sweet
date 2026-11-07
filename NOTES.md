@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Offline HFI configuration preparation - 2026-11-07
+
+Added unlinked atomic PERF/BW/TEST packet preparation with explicit initial
+GPU/BW indexes and boot-vote matching. Synthetic and private captured-profile
+ASan/UBSan tests and target-header ARM64 compile passed. Fresh recovery BW
+matches the earlier table; pinned stock query and wire-ABI tests passed.
+No runtime sender, kernel patch or device files in this change.0152 Intel CI
+42359475531 compiles f9ae97ddca30c8e7858105300cf7bb0a34be39e2; this source-only
+update does not change that image. Hardware0152 outcome remains pending.
+
+
 ## Legacy ACK identity fix0152 - 2026-11-07
 
 Actual0151 phone log reached HFI status1 and consumed INIT(CMD5/5). Firmware

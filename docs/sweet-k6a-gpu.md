@@ -153,6 +153,32 @@ only selected OPP entries (`clk.c:4133`), so the short log does not establish
 that intermediate OPPs are absent. Keep the complete PERF candidate inactive
 until the next protocol stage and profile inputs are independently validated.
 
+### Atomic configuration packet preparation
+
+`sweet_hfi_config_prepare` prepares PERF43/BW160/TEST2 with sequences3/4/5
+before any publication. It validates both tables, explicit nonzero initial
+GPU/BW indexes and agreement with the boot ARC vote, then commits the whole
+output. Failure leaves the caller's output unchanged. Equal votes at distinct
+GPU frequencies are accepted only with an explicit selected index. Input and
+output overlap is rejected. This is an offline helper, currently unlinked
+from XNU: there is no queue sender, hardware caller or new boot flag.
+
+`python3 xnu/gpu/sweet_hfi_config_test.py BUILD_DIR` builds and runs its
+ASan/UBSan synthetic bounds, aliasing, table, wire-order and atomic-output
+tests. Optional `PERF_JSON BW_JSON CONSISTENCY_JSON` arguments also validate
+common input identities and prepare the captured board profile. Both modes
+passed, as did target-header ARM64 compilation. Generated private fixture
+sources and device reports remain outside git.
+
+The newly captured recovery FDT reconstructs the same12DDR/2CNOC rows and
+resource mapping as the earlier0142 report. Stock query and160-word packet
+comparisons passed for this input. Recovery bin167's initial DT level6 is
+180MHz, GMU GPU index1, bandwidth row4 (bounds3..4). The PERF and BW reports
+share the same FDT/cmd-db identities; all205 prepared packet words match the
+separately validated codecs. This establishes offline input consistency,
+not an active fuse read, firmware acceptance or physical voltage validation.
+None of these packets is sent by the0152 diagnostic image.
+
 ### Next legacy HFI completion API (reviewed, not implemented)
 
 The next transaction must explicitly continue the same one-shot session:

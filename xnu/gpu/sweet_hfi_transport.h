@@ -10,9 +10,13 @@ struct sweet_hfi_transport {
     void *ctx;
     void (*barrier)(void *);
     int (*doorbell)(void *);
-    unsigned poisoned;
+    unsigned poisoned; /* ambiguous doorbell: prohibit further TX, retain RX */
+    unsigned tx_closed; /* final command published; RX remains available */
 };
 int sweet_hfi_send(struct sweet_hfi_transport *, const uint32_t *, size_t);
+/* Seal TX before exposing the final packet's write index/doorbell. Invalid or
+ * full-queue refusal publishes nothing and does not seal. No reopen API. */
+int sweet_hfi_send_final(struct sweet_hfi_transport *, const uint32_t *, size_t);
 /* Polled receive; no IRQ sleep/recheck protocol. An empty queue rearms rx_req.
  * 0 message, 1 empty/incomplete, -1 invalid; outputs unchanged on failure. */
 int sweet_hfi_receive(struct sweet_hfi_transport *, uint32_t *, size_t, size_t *);

@@ -90,7 +90,7 @@ int main(void) {
     assert(!memcmp(output+1,&expected,sizeof(expected))); /* unused zeroed */
     uint32_t *memory=calloc(1,SWEET_HFI_V1_BYTES);assert(memory);
     struct sim sim={.memory=memory};
-    struct sweet_hfi_transport tx={memory,SWEET_HFI_V1_BYTES,&sim,fence,bell,0};
+    struct sweet_hfi_transport tx={memory,SWEET_HFI_V1_BYTES,&sim,fence,bell,0,0};
     for(unsigned start=0;start<1024;start++) {
         assert(!sweet_gpu_hfi_table_init(memory,SWEET_HFI_V1_BYTES,0x60100000));
         memory[16]=start;memory[17]=start;

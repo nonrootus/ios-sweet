@@ -1,5 +1,38 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Configuration continuation0153 (prepared, hardware pending)
+
+Actual0152 completed INIT/VERSION with firmware1.17/wire0, clean1s/10s
+observations, CMD7/7, MSG8/8, GX28, HFI1 and no SMMU faults. Owner confirms
+iOS loaded and recovery. This verifies initial communication only.
+
+0153 continues that same retained session with PERF43/BW160/TEST2 words,
+sequence3/4/5. All packets are validated before the first submission. Each
+command records attempt/publication/ACK, compact response identity, error and
+queue indexes. A bounded pre-send wait permits delayed CMD retirement after
+an ACK. TEST permanently seals command TX before publication; diagnostics RX
+remains available after an ambiguous doorbell. No retry, reset or teardown.
+
+Explicit sweetgmucfg=1 sweetgmuprofile=167 requires the prior start/HFI flags.
+The recovery-matched profile is an operator selection, not fuse identification.
+All GPU/GMU ARC votes are recomputed from live gfx/cx/mx tables. All five BCM
+addresses, units and metadata must match before submission. Complete tables
+are preserved; initial GPUindex1=180MHz/BWrow4, maximum permitted future
+frequency request index1. This code does not yet issue a frequency request.
+Configuration ACK completion is distinguished from later0/1/10s health checks.
+Post-TEST HFI status is recorded without assuming it stays1. Host DDR floor,
+boot OOB, ACTIVE policy and memory remain held through reboot. The configured
+idle interval is a bring-up test, not a stock-exercised operating state.
+
+ASan/UBSan: integrated adapter lifetime/profile/5commands; configuration988
+callback failures plus30per-command failure cases; initial HFI4324callback
+failures and6deadlines; sealed transport RX/TX; actual read-only ARC/BCM
+getters against the private captured database and all205 packet words passed.
+Full126-153 patch chain, reverse checks and43canonical sources passed.
+Full CI and actual configuration/runtime result remain pending. RegisterDCVS,
+SQE execution and user-space rendering are still separate unfinished work.
+No firmware/device dump/root image is included in the source change.
+
 ## Verified0152 temporary boot - 2026-11-07
 
 Full Intel XNU CI42359475531 passed forf9ae97ddca30c8e7858105300cf7bb0a34be39e2.

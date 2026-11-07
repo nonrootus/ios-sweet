@@ -66,8 +66,14 @@ ARM64 compilation passed. Full0152 Intel XNU
 passed for `f9ae97ddca30c8e7858105300cf7bb0a34be39e2`, including exact preflight
 and final source/kernel checks. The image passed CRC/SHA/markers, exact payload
 reproduction and all10kernel-segment/boot-part checks; temporary fastboot boot
-returned OKAY. Actual0152 INIT/VERSION and iOS outcome await the new recovery
-log and owner report. HFI configuration and GPU rendering remain undone.
+returned OKAY. The owner confirmed iOS loaded and recovery; the new complete
+154999-byte log (flush11, no wrap) reports initial HFI rc0/phase9, INIT1/1 and
+VERSION1/1. Firmware is `10110000` (major1/minor17), wire version0 uses the legacy
+protocol. CMD7/7, MSG8/8 and DBG0/0 are empty; ACK`0012047e/00200001` confirms
+the compact VERSION echo too. Both1s/10s observations show GX0x28/HFI1 and no
+host/AO error IRQs or events. SMMU global0/FSR400/FAR0/syndrome0. This verifies
+the initial exchange on this phone. Full HFI configuration and rendering
+remain undone; the health samples establish only their bounded observation.
 
 Claude independently agreed with removing the extra precondition and retaining
 the write/poll. Added its suggested settling, exactly-one-write and post-HFI
@@ -81,7 +87,7 @@ bit5 from reviewer recollection is used.
 ### Capture summary
 
 `python tools/gpu-log-summary.py CAPTURE.bin --json` reads a SWEETLOG v1
-capture or decoded UTF-8 text and summarizes the0148-0151 record format. It
+capture or decoded UTF-8 text and summarizes the0148-0152 record format. It
 checks bounded/complete binary capture, boot-session ambiguity, required
 completion/ACK/event records, queue indexes and both health samples. It never
 contacts a device and does not treat CM3 readiness as completed HFI or GPU
@@ -94,7 +100,8 @@ identity still require the separate boot record and artifact manifest.
 missing/out-of-order/duplicate records, version/ACK/queue contradictions,
 every reported failure code, malformed/truncated/wrapped binary input and
 invalid encoding. The actual0148 binary correctly reports CM3 only (exit3).
-Positive HFI fixtures are synthetic; no successful phone HFI log exists yet.
+Positive HFI unit fixtures are synthetic. The actual0152 capture also passes
+with initial HFI readiness; its separate boot record establishes source/freshness.
 The report also separates recorded progress and the actual stop stage from
 later work not attempted. In the0150 log, zero firmware-version/ACK fields do
 not establish incompatible firmware or a bad response: VERSION never started.
@@ -209,7 +216,7 @@ post-TEST observations from configuration rejection: stock does not assert
 HFI_CTRL_STATUS after TEST, and immediately proceeds to register DCVS and DDR
 handoff. A diagnostic CONFIGURED stop would not prove that whole stock path,
 GPU command execution or rendering. No completion API or hardware caller has
-been added yet; current0150 still ends after initial INIT/VERSION observation.
+been added yet; current0152 still ends after initial INIT/VERSION observation.
 
 0148 reached fresh CM3 firmware readiness on the actual sweet_k6a: rc0,
 phase8, held1/release1, BABEFACE. The complete235500-byte log (flush17) has
@@ -946,3 +953,36 @@ potential way to supply firmware while preserving the existing UFS root and
 avoiding a multi-gigabyte reflash. The bundle format has no kernel reader yet,
 and adding it to a boot image has not been tested; do not claim the firmware
 is available in the kernel until that integration and a device test pass.
+
+## Configuration continuation0153 (prepared, hardware pending)
+
+Actual0152 completed INIT/VERSION with firmware1.17/wire0, clean1s/10s
+observations, CMD7/7, MSG8/8, GX28, HFI1 and no SMMU faults. Owner confirms
+iOS loaded and recovery. This verifies initial communication only.
+
+0153 continues that same retained session with PERF43/BW160/TEST2 words,
+sequence3/4/5. All packets are validated before the first submission. Each
+command records attempt/publication/ACK, compact response identity, error and
+queue indexes. A bounded pre-send wait permits delayed CMD retirement after
+an ACK. TEST permanently seals command TX before publication; diagnostics RX
+remains available after an ambiguous doorbell. No retry, reset or teardown.
+
+Explicit sweetgmucfg=1 sweetgmuprofile=167 requires the prior start/HFI flags.
+The recovery-matched profile is an operator selection, not fuse identification.
+All GPU/GMU ARC votes are recomputed from live gfx/cx/mx tables. All five BCM
+addresses, units and metadata must match before submission. Complete tables
+are preserved; initial GPUindex1=180MHz/BWrow4, maximum permitted future
+frequency request index1. This code does not yet issue a frequency request.
+Configuration ACK completion is distinguished from later0/1/10s health checks.
+Post-TEST HFI status is recorded without assuming it stays1. Host DDR floor,
+boot OOB, ACTIVE policy and memory remain held through reboot. The configured
+idle interval is a bring-up test, not a stock-exercised operating state.
+
+ASan/UBSan: integrated adapter lifetime/profile/5commands; configuration988
+callback failures plus30per-command failure cases; initial HFI4324callback
+failures and6deadlines; sealed transport RX/TX; actual read-only ARC/BCM
+getters against the private captured database and all205 packet words passed.
+Full126-153 patch chain, reverse checks and43canonical sources passed.
+Full CI and actual configuration/runtime result remain pending. RegisterDCVS,
+SQE execution and user-space rendering are still separate unfinished work.
+No firmware/device dump/root image is included in the source change.

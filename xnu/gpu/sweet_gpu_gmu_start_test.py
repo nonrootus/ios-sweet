@@ -18,7 +18,7 @@ assert '__asm__' not in adapter
 tree=ast.parse((src/'sweet_gpu_smmu_probe_test.py').read_text())
 model=next(n.value for n in ast.walk(tree) if isinstance(n,ast.Constant) and isinstance(n.value,str) and n.value.startswith('\n#include <cassert>'))
 model=model[:model.index('static void run()')]
-model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\nextern "C" {\n#include "sweet_gpu_hfi_table.h"\n}\nstatic bool post_active,arc_failure,post_timeout,post_compact_ack;\nstatic uint32_t post_gx_status;')
+model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\nextern "C" {\n#include "sweet_gpu_hfi_table.h"\n}\nstatic bool post_active,arc_failure,post_timeout,post_compact_ack,bcm_failure;\nstatic uint32_t post_gx_status;')
 model=model.replace('gmu[1024];','gmu_full[0x31000/4], pdc_cfg[0x10000/4], pdc_seq[0x10000/4];\nstatic uint32_t *gmu=gmu_full+0x14000/4;\nstatic uint8_t firmware[0x8000];\nstatic uint32_t hfi_words[0x5000/4];\nstatic bool released,fw_timeout,fw_missing,hold_fail,fw_corrupt,stale_init;\nstatic unsigned boot_writes;\nstatic uint32_t host_irq_fault;\nextern "C" {int idle_enable=0;}')
 model=model.replace('struct sweet_gmu_memory { unsigned refs; };','struct sweet_gmu_memory { unsigned refs; bool latched; };\nstatic uint32_t cfg_override_value, bus_values[3];\nstatic bool cfg_override;\nstatic unsigned bus_override_mask;\nstatic const unsigned bus_offsets[]={0x1303c,0x13000,0x13004};')
 model=model.replace('assert(p==allocated && p->refs);++unpins;','assert(p==allocated && p->refs && !p->latched);++unpins;')
@@ -42,6 +42,15 @@ extern "C" int sweet_gmu_memory_begin_execution(sweet_gmu_memory *p,volatile uin
  assert(p==allocated && p->refs==1 && !p->latched);if(hold_fail)return -1;
  p->latched=true;*h=hfi_words;*n=sizeof(hfi_words);return 0;
 }
+extern "C" int sweet_rpmh_gpu_bcm_info(const char *name,uint32_t *a,uint32_t *u,uint32_t *m){
+ if(bcm_failure)return -1;
+ const char *names[]={"MC0","SH0","ACV","SH2","SN15"};
+ const uint32_t addresses[]={0x50000,0x5003c,0x5000c,0x50034,0x5007c};
+ const uint32_t units[]={1770000,2090000,1,2090000,530000};
+ const uint32_t metas[]={0x10,0x10020,0xb0000,0x10008,0x30008};
+ for(unsigned i=0;i<5;i++)if(!strcmp(name,names[i])){*a=addresses[i];*u=units[i];*m=metas[i];return 0;}
+ assert(false);return -1;
+}
 static bool in_range(uintptr_t a,uint32_t *p,size_t n){return a>=uintptr_t(p)&&a<uintptr_t(p)+n;}
 extern "C" int sweet_rpmh_gpu_arc_info(const char *name,uint32_t *address,uint16_t out[16],unsigned *count){
  if(arc_failure)return -1;
@@ -49,6 +58,7 @@ extern "C" int sweet_rpmh_gpu_arc_info(const char *name,uint32_t *address,uint16
  static const uint16_t mx[]={0,16,192,320,384};
  memset(out,0,32);*count=16;
  if(!strcmp(name,"gfx.lvl")){*address=0x30010;memcpy(out,gfx,sizeof(gfx));}
+ else if(!strcmp(name,"cx.lvl")){*address=0x30020;memcpy(out,gfx,sizeof(gfx));}
  else {assert(!strcmp(name,"mx.lvl"));*address=0x30000;memcpy(out,mx,sizeof(mx));}
  return 0;
 }
@@ -93,7 +103,7 @@ model=model.replace('    assert(!live&&!allocated);','''    // Test harness only
     memset(pdc_cfg,0,sizeof(pdc_cfg));memset(pdc_seq,0,sizeof(pdc_seq));
     for(unsigned i=0;i<sizeof(firmware);i++)firmware[i]=(uint8_t)(i*3+1);''',1)
 model=model.replace('memset(gmu,0,sizeof(gmu))','memset(gmu_full,0,sizeof(gmu_full))')
-model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attempted=0;post_active=arc_failure=post_timeout=post_compact_ack=false;assert(!sweet_gpu_hfi_table_init(hfi_words,sizeof(hfi_words),0x60100000));gmu_full[0x14340/4]=0xc0;gmu_full[0x14604/4]=0x10000000;')
+model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attempted=config_attempted=0;post_active=arc_failure=post_timeout=post_compact_ack=bcm_failure=false;assert(!sweet_gpu_hfi_table_init(hfi_words,sizeof(hfi_words),0x60100000));gmu_full[0x14340/4]=0xc0;gmu_full[0x14604/4]=0x10000000;')
 model+=r'''
 static int run(){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu));}
 static void once(){unsigned w=writes,m=maps,c=creates;assert(run()==-1);assert(w==writes&&m==maps&&c==creates);}
@@ -170,13 +180,30 @@ int main(){
  assert(sweet_gpu_gmu_hfi_start()==-3 && writes==post_writes);retained();
  reset();assert(!run());post_active=true;smmu[0x8058/4]|=2;post_writes=writes;
  assert(sweet_gpu_gmu_hfi_start()==-3 && writes==post_writes);retained();
+ reset();assert(sweet_gpu_gmu_configure(167)==-3&&!writes);assert(sweet_gpu_gmu_configure(167)==-1);
+ for(unsigned mode=0;mode<4;mode++){
+  reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start());post_writes=writes;
+  if(mode==1)bcm_failure=true;
+  if(mode==2)arc_failure=true;
+  int config_rc=sweet_gpu_gmu_configure(mode==3?168:167);
+  if(mode){assert(config_rc && writes==post_writes && !probe.config.attempted);}
+  else{
+   assert(!config_rc && probe.config.configured && probe.config.observed==3 && probe.transport.tx_closed);
+   assert(probe.postboot.stage==SWEET_GMU_CONFIG_READY && probe.postboot.next_sequence==6);
+   for(unsigned i=0;i<5;i++)assert(probe.postboot.exchange[i].acked);
+   assert(probe.postboot.cmd_read==212 && probe.postboot.cmd_write==212);
+   assert(messages.find("configured=1 next=6 TXclosed=1")!=std::string::npos);
+  }
+  post_writes=writes;assert(sweet_gpu_gmu_configure(167)==-1 && writes==post_writes);retained();
+ }
  reset();puts("PASS persistent adapter+real SMMU/CM3 helpers: full boot model, 27 power gates, faults/timeouts, latch before writes, no teardown/free or retry");
 }
 '''
 (work/'test.cpp').write_text(model)
 common=['-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g','-I',str(src)]
 objects=[]
-for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table'):
+for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile'):
     obj=work/(name+'.o');subprocess.run(['gcc','-std=c11',*common,'-c',str(src/(name+'.c')),'-o',str(obj)],check=True);objects.append(str(obj))
 subprocess.run(['g++','-std=c++17',*common,'-I',str(work),str(work/'test.cpp'),*objects,'-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)

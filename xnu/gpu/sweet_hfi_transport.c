@@ -6,14 +6,14 @@
 #define QHEADER_SIZE 12u
 static int valid(struct sweet_hfi_transport *t) {
     if (!t || !t->words || ((uintptr_t)t->words&3u) || t->bytes<SWEET_HFI_V1_BYTES ||
-        !t->barrier || !t->doorbell || t->poisoned) return 0;
+        !t->barrier || !t->doorbell) return 0;
     if (t->words[1]!=54 || t->words[2]!=6 || t->words[3]!=12 || t->words[4]!=4) return 0;
     return 1;
 }
-int sweet_hfi_send(struct sweet_hfi_transport *t, const uint32_t *msg, size_t count) {
+static int send_packet(struct sweet_hfi_transport *t, const uint32_t *msg, size_t count, int final) {
     unsigned read,write,used,index;
     volatile uint32_t *h,*q;
-    if (!valid(t) || !msg || !count || count>255 || ((msg[0]>>8)&255u)!=count) return -1;
+    if (!valid(t) || t->poisoned || t->tx_closed || !msg || !count || count>255 || ((msg[0]>>8)&255u)!=count) return -1;
     h=t->words+QHEADER_WORD;q=t->words+FIRST_QUEUE_WORD;
     if(h[0]!=1 || h[3]!=QWORDS) return -1;
     read=h[10];write=h[11];t->barrier(t->ctx);
@@ -22,9 +22,17 @@ int sweet_hfi_send(struct sweet_hfi_transport *t, const uint32_t *msg, size_t co
     if(count>QWORDS-used-1) return 1;
     index=write;
     for(size_t i=0;i<count;i++){q[index]=msg[i];index=(index+1)%QWORDS;}
-    t->barrier(t->ctx);h[11]=index;t->barrier(t->ctx);
+    t->barrier(t->ctx);
+    if(final)t->tx_closed=1;
+    h[11]=index;t->barrier(t->ctx);
     if(t->doorbell(t->ctx)){t->poisoned=1;return -2;}
     return 0;
+}
+int sweet_hfi_send(struct sweet_hfi_transport *t,const uint32_t *msg,size_t count) {
+    return send_packet(t,msg,count,0);
+}
+int sweet_hfi_send_final(struct sweet_hfi_transport *t,const uint32_t *msg,size_t count) {
+    return send_packet(t,msg,count,1);
 }
 int sweet_hfi_receive_queue(struct sweet_hfi_transport *t, unsigned queue,
     uint32_t *out, size_t cap, size_t *count) {

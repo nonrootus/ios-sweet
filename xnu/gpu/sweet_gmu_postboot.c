@@ -29,6 +29,7 @@ static int check(struct sweet_gmu_postboot_state *s, const struct sweet_gmu_post
     rc=read_reg(s,o,A6XX_GMU_AO_HOST_INTERRUPT_STATUS,&s->ao_irq);
     if(rc)return rc;
     if((s->host_irq&(1u<<15)) || (s->ao_irq&0x29u))return -5;
+    if(s->stage>=SWEET_GMU_POST_INIT && (s->host_irq&2u))return -6;
     if(s->stage>=SWEET_GMU_POST_HFI){
         rc=read_reg(s,o,A6XX_GMU_SPTPRAC_PWR_CLK_STATUS,&s->gx_status);if(rc)return rc;
         if((s->gx_status&(SWEET_GMU_GX_OFF|SWEET_GMU_SPTP_ON|SWEET_GMU_SPTP_OFF))!=SWEET_GMU_SPTP_ON)return -3;
@@ -104,12 +105,35 @@ static int drain_events(struct sweet_gmu_postboot_state *s,const struct sweet_gm
     return -6;
 }
 static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_postboot_ops *o,
-    struct sweet_hfi_transport *t,const uint32_t *cmd,size_t n,int version)
+    struct sweet_hfi_transport *t,const uint32_t *cmd,size_t n,unsigned kind)
 {
+    static const unsigned ids[5]={0,1,4,3,5};
+    static const unsigned sizes[5]={5,2,43,160,2};
+    static const unsigned positions[6]={0,5,7,50,210,212};
+    if(kind>=5 || n!=sizes[kind] || s->next_sequence!=kind+1 ||
+        cmd[0]!=((kind+1)<<20 | (uint32_t)n<<8 | ids[kind]))return -3;
+    struct sweet_gmu_exchange_state *e=&s->exchange[kind];
+    if(e->attempted)return -3;
     int rc=check(s,o);if(rc)return rc;
+    /* ACK publication need not imply the producer has already made its CMD
+     * read index visible. Wait boundedly before reusing the command queue. */
+    for(unsigned us=0;;us+=100){
+        rc=check(s,o);if(rc)return rc;
+        queue_snapshot(s,t);
+        e->cmd_before_read=s->cmd_read;e->cmd_before_write=s->cmd_write;
+        if(s->cmd_write!=positions[kind] || s->cmd_read>positions[kind])return -3;
+        if(s->cmd_read==positions[kind])break;
+        if(us==100000)return -4;
+        if(o->delay_us(o->ctx,100))return -2;
+    }
     /* Mark before publishing: an unsuccessful doorbell can still have fired. */
-    if(version)s->version_sent=1;else s->init_sent=1;
-    if(sweet_hfi_send(t,cmd,n))return -6;
+    e->attempted=1;e->request_header=cmd[0];
+    if(kind==1)s->version_sent=1;else if(kind==0)s->init_sent=1;
+    int sent=kind==4 ? sweet_hfi_send_final(t,cmd,n) : sweet_hfi_send(t,cmd,n);
+    e->published=sent==0 || sent==-2;
+    queue_snapshot(s,t);
+    e->cmd_after_read=s->cmd_read;e->cmd_after_write=s->cmd_write;
+    if(sent)return -6;
     for(unsigned us=0;;us+=100){
         uint32_t response[255];size_t words=0,payload_words=0;
         const uint32_t *payload=0;
@@ -117,6 +141,7 @@ static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_po
         rc=drain_events(s,o,t,2);if(rc)return rc;
         rc=sweet_hfi_receive(t,response,255,&words);
         queue_snapshot(s,t);
+        e->cmd_after_read=s->cmd_read;e->cmd_after_write=s->cmd_write;
         if(rc<0)return -6;
         if(!rc){
             unsigned id=response[0]&255u,type=(response[0]>>16)&15u;
@@ -129,16 +154,19 @@ static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_po
             }
             s->response_header=response[0];
             s->original_header=words>1 ? response[1] : 0;
+            e->response_header=s->response_header;e->original_header=s->original_header;
             rc=sweet_hfi_response(response,words,(uint8_t)cmd[0],(uint16_t)(cmd[0]>>20),
                 &s->firmware_error,&payload,&payload_words);
+            if(rc==0 || rc==2)e->firmware_error=s->firmware_error;
             if(rc==2)return -7;
             /* Legacy firmware may omit size/type in the echoed request
              * (0151 INIT: sent00100500, echoed00100000). The codec already
              * checks command ID and sequence, plus outer ACK framing/error.
              * Stock receive_ack_cmd matches sequence, not the whole header. */
-            if(rc || (version && payload_words<1))return -6;
-            if(version){s->firmware_version=payload[0];s->version_ack=1;}
-            else s->init_ack=1;
+            if(rc || (kind==1 && payload_words<1))return -6;
+            e->acked=1;++s->next_sequence;
+            if(kind==1){s->firmware_version=payload[0];s->version_ack=1;}
+            else if(kind==0)s->init_ack=1;
             /* Polled reader never sleeps on an IRQ. Clear only MSGQ bit0,
              * never the host boot request or any error indications. */
             rc=write_reg(s,o,A6XX_GMU_GMU2HOST_INTR_CLR,1);if(rc)return rc;
@@ -154,8 +182,10 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
 {
     if(!s || !o || !t || !o->read32 || !o->write32 || !o->barrier ||
         !o->delay_us || !o->check || !t->words || ((uintptr_t)t->words&3) ||
-        t->bytes!=0x5000 || !t->barrier || !t->doorbell || t->poisoned || s->attempted)return -1;
+        t->bytes!=0x5000 || !t->barrier || !t->doorbell || t->poisoned || t->tx_closed || s->attempted)return -1;
     s->attempted=1;s->vote=vote;phase(s,o,SWEET_GMU_POST_PREFLIGHT);
+    s->session_transport=t;s->session_words=t->words;s->session_ops=*o;
+    s->session_transport_ctx=t->ctx;s->session_barrier=t->barrier;s->session_doorbell=t->doorbell;
     /* Conservative bounded ARC indexes; caller proves level/profile mapping. */
     if(!(vote>>16) || !(vote&255) || (vote&255)>15 || !((vote>>8)&255) || ((vote>>8)&255)>15)return -3;
     int rc=check(s,o);if(rc)return rc;
@@ -197,6 +227,7 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
     rc=fresh_table(t,0);if(rc)return rc;
     rc=drain_events(s,o,t,2);if(rc)return rc;
     if(sweet_hfi_v1_init(cmd,5,1,0x60200000,0x4000,1))return -3;
+    s->next_sequence=1;
     rc=exchange(s,o,t,cmd,5,0);if(rc)return rc;
     phase(s,o,SWEET_GMU_POST_VERSION);
     /* Like stock: the first INIT is legacy; read protocol version after its ACK. */
@@ -227,4 +258,73 @@ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *s,
         }
     }
     phase(s,o,SWEET_GMU_POST_READY);return 0;
+}
+
+static int config_sample(struct sweet_gmu_config_state *c,struct sweet_gmu_postboot_state *s,
+    const struct sweet_gmu_postboot_ops *o,struct sweet_hfi_transport *t)
+{
+    if(c->observed>=3)return -3;
+    int rc=check(s,o);if(rc)return rc;
+    rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
+    queue_snapshot(s,t);
+    unsigned i=c->observed++;
+    c->samples[i][0]=s->host_irq;c->samples[i][1]=s->ao_irq;
+    c->samples[i][2]=s->gx_status;c->samples[i][3]=s->hfi_status;
+    c->samples[i][4]=s->msg_read;c->samples[i][5]=s->msg_write;
+    c->samples[i][6]=s->dbg_read;c->samples[i][7]=s->dbg_write;
+    c->samples[i][8]=s->cmd_read;c->samples[i][9]=s->cmd_write;
+    return 0;
+}
+int sweet_gmu_configure(struct sweet_gmu_config_state *c,struct sweet_gmu_postboot_state *s,
+    const struct sweet_gmu_postboot_ops *o,struct sweet_hfi_transport *t,
+    const struct sweet_hfi_perf_table *perf,const struct sweet_hfi_bw_table *bw,
+    unsigned gpu_index,unsigned bw_level)
+{
+    if(!c || !s || !o || !t || !o->read32 || !o->write32 || !o->barrier ||
+        !o->delay_us || !o->check || !t->words || ((uintptr_t)t->words&3) ||
+        t->bytes!=0x5000 || !t->barrier || !t->doorbell || c->attempted || c->configured || c->observed || s->config_attempted)return -1;
+    c->attempted=1;s->config_attempted=1;
+    if(s->stage!=SWEET_GMU_POST_READY || !s->init_ack || !s->version_ack ||
+        s->observed!=2 || s->next_sequence!=3 || t->poisoned || t->tx_closed ||
+        s->session_transport!=t || s->session_words!=t->words ||
+        s->session_transport_ctx!=t->ctx || s->session_barrier!=t->barrier || s->session_doorbell!=t->doorbell ||
+        s->session_ops.ctx!=o->ctx || s->session_ops.read32!=o->read32 || s->session_ops.write32!=o->write32 ||
+        s->session_ops.barrier!=o->barrier || s->session_ops.delay_us!=o->delay_us || s->session_ops.check!=o->check ||
+        (s->wire_version>>28)>=2 || (s->firmware_version>>28)!=1 ||
+        ((s->firmware_version>>16)&0xfff)<8)return -3;
+    phase(s,o,SWEET_GMU_CONFIG_PREFLIGHT);
+    if(sweet_hfi_config_prepare(&c->packets,perf,bw,gpu_index,bw_level,s->vote))return -3;
+    int rc=check(s,o);if(rc)return rc;
+    queue_snapshot(s,t);
+    if(s->cmd_read>7 || s->cmd_write!=7)return -3;
+    rc=drain_events(s,o,t,1);if(rc)return rc;
+    rc=drain_events(s,o,t,2);if(rc)return rc;
+    const uint32_t *commands[3]={c->packets.perf,c->packets.bw,c->packets.test};
+    const unsigned sizes[3]={43,160,2};
+    for(unsigned i=0;i<3;i++){
+        phase(s,o,(enum sweet_gmu_postboot_stage)(SWEET_GMU_CONFIG_PERF+i));
+        rc=check(s,o);if(rc)return rc;
+        /* Before sending TEST HFI must still be active. Its ACK/observations
+         * must not assume status1 survives the command-mode terminator. */
+        rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
+        if(!(s->hfi_status&1))return -3;
+        rc=exchange(s,o,t,commands[i],sizes[i],i+2);
+        if(i==2 && s->exchange[4].acked)c->configured=1;
+        if(rc)return rc;
+    }
+    if(!t->tx_closed || s->next_sequence!=6 || !c->configured)return -3;
+    phase(s,o,SWEET_GMU_CONFIG_OBSERVE);
+    rc=config_sample(c,s,o,t);if(rc)return rc;
+    for(unsigned n=1;n<=100;n++){
+        if(o->delay_us(o->ctx,100000))return -2;
+        rc=check(s,o);if(rc)return rc;
+        rc=drain_events(s,o,t,1);if(rc)return rc;
+        rc=drain_events(s,o,t,2);if(rc)return rc;
+        rc=check(s,o);if(rc)return rc;
+        if(s->host_irq&7)return -6;
+        if(n==10 || n==100){
+            rc=config_sample(c,s,o,t);if(rc)return rc;
+        }
+    }
+    phase(s,o,SWEET_GMU_CONFIG_READY);return 0;
 }

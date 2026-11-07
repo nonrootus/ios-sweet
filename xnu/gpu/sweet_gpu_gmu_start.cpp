@@ -17,6 +17,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_postboot.h"
 #include "../../../bsd/dev/sweet_gmu_postboot_profile.h"
 #include "../../../bsd/dev/sweet_gmu_arc.h"
+#include "../../../bsd/dev/sweet_gmu_board_profile.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
@@ -24,6 +25,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_postboot.h"
 #include "sweet_gmu_postboot_profile.h"
 #include "sweet_gmu_arc.h"
+#include "sweet_gmu_board_profile.h"
 #endif
 }
 
@@ -31,6 +33,8 @@ struct persistent_gmu {
     uintptr_t gcc, cc, gmu, smmu, region[3];
     sweet_gmu_start_state boot;
     sweet_gmu_postboot_state postboot;
+    sweet_gmu_config_state config;
+    sweet_gmu_board_profile profile;
     sweet_hfi_transport transport;
     volatile uint32_t *hfi_cpu;
     uint32_t hfi_bytes;
@@ -45,6 +49,7 @@ struct persistent_gmu {
 static persistent_gmu probe;
 static unsigned attempted;
 static unsigned postboot_attempted;
+static unsigned config_attempted;
 
 static uint32_t mmio_read(uintptr_t address)
 {
@@ -295,7 +300,7 @@ extern "C" int sweet_gpu_gmu_hfi_start(void)
     IOLog("SWEET GMU HFI: boot ARC rc=%d gfx=%x mx=%x requested_level=%u selected_level=%u packed=%08x\n",
         rc,gfx_address,mx_address,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE-1,vote>>16,vote);
     if(rc || gfx_address==mx_address || (gfx_address>>16)!=3 || (mx_address>>16)!=3)return -3;
-    s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0};
+    s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0,0};
     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,post_progress};
     rc=sweet_gmu_postboot(&s->postboot,&ops,&s->transport,vote);
     report_faults(s);
@@ -313,5 +318,52 @@ extern "C" int sweet_gpu_gmu_hfi_start(void)
             i ? 10u : 1u,p.samples[i][0],p.samples[i][1],p.samples[i][2],p.samples[i][3],
             p.samples[i][4],p.samples[i][5],p.samples[i][6],p.samples[i][7]);
     IOLog("SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started\n");
+    return rc;
+}
+
+extern "C" int sweet_rpmh_gpu_bcm_info(const char *,uint32_t *,uint32_t *,uint32_t *);
+static int profile_arc(void *,const char *name,uint32_t *address,uint16_t levels[16],unsigned *count)
+{
+    return sweet_rpmh_gpu_arc_info(name,address,levels,count);
+}
+static int profile_bcm(void *,const char *name,uint32_t *address,uint32_t *unit,uint32_t *metadata)
+{
+    return sweet_rpmh_gpu_bcm_info(name,address,unit,metadata);
+}
+static void config_progress(void *,enum sweet_gmu_postboot_stage stage)
+{
+    IOLog("SWEET GMU CONFIG: phase=%u; power and DDR floor retained\n",static_cast<unsigned>(stage));
+}
+extern "C" int sweet_gpu_gmu_configure(unsigned selected_profile)
+{
+    auto *s=&probe;
+    if(!__sync_bool_compare_and_swap(&config_attempted,0u,1u))return -1;
+    if(!postboot_attempted || s->postboot.stage!=SWEET_GMU_POST_READY || post_check(s))return -3;
+    sweet_gmu_profile_ops profile_ops={s,profile_arc,profile_bcm};
+    int rc=sweet_gmu_board_profile_build(&s->profile,&profile_ops,selected_profile);
+    IOLog("SWEET GMU CONFIG: profile=%u binding_rc=%d stock=10c33d40; recovery-selected, not fuse-derived\n",selected_profile,rc);
+    if(rc)return rc;
+    auto &b=s->profile;
+    IOLog("SWEET GMU CONFIG: GPU=%u GMU=%u initial=%u/%u max_request=%u; no frequency request\n",
+        b.perf.gpu_count,b.perf.gmu_count,b.initial_gpu_index,b.initial_bw_level,b.max_requested_gpu_index);
+    sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,config_progress};
+    rc=sweet_gmu_configure(&s->config,&s->postboot,&ops,&s->transport,&b.perf,&b.bw,b.initial_gpu_index,b.initial_bw_level);
+    report_faults(s);
+    auto &p=s->postboot;auto &c=s->config;
+    for(unsigned i=2;i<5;i++){
+        auto &e=p.exchange[i];
+        IOLog("SWEET GMU CONFIG: command=%u attempt=%u publish=%u ACK=%u req=%08x resp=%08x echo=%08x err=%08x CMD=%u/%u->%u/%u\n",
+            i,e.attempted,e.published,e.acked,e.request_header,e.response_header,e.original_header,e.firmware_error,
+            e.cmd_before_read,e.cmd_before_write,e.cmd_after_read,e.cmd_after_write);
+    }
+    IOLog("SWEET GMU CONFIG: done rc=%d phase=%u configured=%u next=%u TXclosed=%u poisoned=%u observations=%u irq=%08x/%08x event=%08x/%08x debug=%u last=%x/%08x\n",
+        rc,static_cast<unsigned>(p.stage),c.configured,p.next_sequence,s->transport.tx_closed,s->transport.poisoned,c.observed,
+        p.host_irq,p.ao_irq,p.event_header,p.event_code,p.debug_messages,p.last_offset,p.last_value);
+    const unsigned seconds[3]={0,1,10};
+    for(unsigned i=0;i<c.observed && i<3;i++)
+        IOLog("SWEET GMU CONFIG: observed %us irq=%08x/%08x GX=%08x HFI=%08x MSG=%u/%u DBG=%u/%u CMD=%u/%u\n",
+            seconds[i],c.samples[i][0],c.samples[i][1],c.samples[i][2],c.samples[i][3],
+            c.samples[i][4],c.samples[i][5],c.samples[i][6],c.samples[i][7],c.samples[i][8],c.samples[i][9]);
+    IOLog("SWEET GMU CONFIG: power, memory and DDR floor held until reboot; DCVS, SQE and rendering not started\n");
     return rc;
 }

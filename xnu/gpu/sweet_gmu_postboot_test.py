@@ -103,7 +103,7 @@ static void reset(void){
  assert(!sweet_gpu_hfi_table_init(table,sizeof(table),0x60100000));
  mmio[A6XX_GMU_SPTPRAC_PWR_CLK_STATUS/4]=0xc0;
  mmio[A6XX_GMU_HFI_VERSION_INFO/4]=0x10000000;
- transport=(struct sweet_hfi_transport){table,sizeof(table),0,dma_barrier,doorbell,0};
+ transport=(struct sweet_hfi_transport){table,sizeof(table),0,dma_barrier,doorbell,0,0};
 }
 static int run(void){return sweet_gmu_postboot(&s,&ops,&transport,0x00400202);}
 static void once(void){unsigned c=calls,w=nwrites,d=doorbells;assert(run()==-1);assert(c==calls&&w==nwrites&&d==doorbells);}
@@ -194,6 +194,6 @@ int main(void){
 (work/'test.c').write_text(program)
 subprocess.run(['gcc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
                 '-fno-sanitize-recover=all','-g','-I',str(src),str(work/'test.c'),
-                *[str(src/(n+'.c')) for n in ('sweet_gmu_postboot','sweet_hfi_transport','sweet_hfi_codec','sweet_gpu_hfi_table')],
+                *[str(src/(n+'.c')) for n in ('sweet_gmu_postboot','sweet_hfi_transport','sweet_hfi_codec','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw')],
                 '-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)

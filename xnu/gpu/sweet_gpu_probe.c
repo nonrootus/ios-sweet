@@ -175,11 +175,18 @@ void
 sweet_gpu_probe(void)
 {
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+    int requested_config = 0, selected_profile = 0;
     vm_offset_t gcc;
     uint32_t state;
 
     PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
     PE_parse_boot_argn("sweetgmuhfi", &requested_hfi, sizeof(requested_hfi));
+    PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
+    PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
+    if((requested_config || selected_profile) &&
+        (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+        printf("SWEET GMU CONFIG: requires cfg=1 profile=167 hfi=1 start=1\n");return;
+    }
     if(requested_hfi && (requested_hfi!=1 || requested_start!=1)) {
         printf("SWEET GMU HFI: requires sweetgmuhfi=1 sweetgmustart=1\n");return;
     }
@@ -409,7 +416,12 @@ sweet_gpu_probe(void)
                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
                                                     if(!start_rc && requested_hfi==1) {
                                                         extern int sweet_gpu_gmu_hfi_start(void);
-                                                        printf("SWEET GMU HFI: entry rc=%d\n",sweet_gpu_gmu_hfi_start());
+                                                        int hfi_rc=sweet_gpu_gmu_hfi_start();
+                                                        printf("SWEET GMU HFI: entry rc=%d\n",hfi_rc);
+                                                        if(!hfi_rc && requested_config==1) {
+                                                            extern int sweet_gpu_gmu_configure(unsigned);
+                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",sweet_gpu_gmu_configure((unsigned)selected_profile));
+                                                        }
                                                     }
                                                 }
                                                 return; /* no other GPU diagnostics after an attempted start */

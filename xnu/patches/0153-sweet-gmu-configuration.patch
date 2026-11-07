@@ -1,0 +1,670 @@
+--- a/bsd/dev/sweet_gmu_postboot.c
++++ b/bsd/dev/sweet_gmu_postboot.c
+@@ -29,6 +29,7 @@
+     rc=read_reg(s,o,A6XX_GMU_AO_HOST_INTERRUPT_STATUS,&s->ao_irq);
+     if(rc)return rc;
+     if((s->host_irq&(1u<<15)) || (s->ao_irq&0x29u))return -5;
++    if(s->stage>=SWEET_GMU_POST_INIT && (s->host_irq&2u))return -6;
+     if(s->stage>=SWEET_GMU_POST_HFI){
+         rc=read_reg(s,o,A6XX_GMU_SPTPRAC_PWR_CLK_STATUS,&s->gx_status);if(rc)return rc;
+         if((s->gx_status&(SWEET_GMU_GX_OFF|SWEET_GMU_SPTP_ON|SWEET_GMU_SPTP_OFF))!=SWEET_GMU_SPTP_ON)return -3;
+@@ -104,12 +105,35 @@
+     return -6;
+ }
+ static int exchange(struct sweet_gmu_postboot_state *s,const struct sweet_gmu_postboot_ops *o,
+-    struct sweet_hfi_transport *t,const uint32_t *cmd,size_t n,int version)
+-{
++    struct sweet_hfi_transport *t,const uint32_t *cmd,size_t n,unsigned kind)
++{
++    static const unsigned ids[5]={0,1,4,3,5};
++    static const unsigned sizes[5]={5,2,43,160,2};
++    static const unsigned positions[6]={0,5,7,50,210,212};
++    if(kind>=5 || n!=sizes[kind] || s->next_sequence!=kind+1 ||
++        cmd[0]!=((kind+1)<<20 | (uint32_t)n<<8 | ids[kind]))return -3;
++    struct sweet_gmu_exchange_state *e=&s->exchange[kind];
++    if(e->attempted)return -3;
+     int rc=check(s,o);if(rc)return rc;
++    /* ACK publication need not imply the producer has already made its CMD
++     * read index visible. Wait boundedly before reusing the command queue. */
++    for(unsigned us=0;;us+=100){
++        rc=check(s,o);if(rc)return rc;
++        queue_snapshot(s,t);
++        e->cmd_before_read=s->cmd_read;e->cmd_before_write=s->cmd_write;
++        if(s->cmd_write!=positions[kind] || s->cmd_read>positions[kind])return -3;
++        if(s->cmd_read==positions[kind])break;
++        if(us==100000)return -4;
++        if(o->delay_us(o->ctx,100))return -2;
++    }
+     /* Mark before publishing: an unsuccessful doorbell can still have fired. */
+-    if(version)s->version_sent=1;else s->init_sent=1;
+-    if(sweet_hfi_send(t,cmd,n))return -6;
++    e->attempted=1;e->request_header=cmd[0];
++    if(kind==1)s->version_sent=1;else if(kind==0)s->init_sent=1;
++    int sent=kind==4 ? sweet_hfi_send_final(t,cmd,n) : sweet_hfi_send(t,cmd,n);
++    e->published=sent==0 || sent==-2;
++    queue_snapshot(s,t);
++    e->cmd_after_read=s->cmd_read;e->cmd_after_write=s->cmd_write;
++    if(sent)return -6;
+     for(unsigned us=0;;us+=100){
+         uint32_t response[255];size_t words=0,payload_words=0;
+         const uint32_t *payload=0;
+@@ -117,6 +141,7 @@
+         rc=drain_events(s,o,t,2);if(rc)return rc;
+         rc=sweet_hfi_receive(t,response,255,&words);
+         queue_snapshot(s,t);
++        e->cmd_after_read=s->cmd_read;e->cmd_after_write=s->cmd_write;
+         if(rc<0)return -6;
+         if(!rc){
+             unsigned id=response[0]&255u,type=(response[0]>>16)&15u;
+@@ -129,16 +154,19 @@
+             }
+             s->response_header=response[0];
+             s->original_header=words>1 ? response[1] : 0;
++            e->response_header=s->response_header;e->original_header=s->original_header;
+             rc=sweet_hfi_response(response,words,(uint8_t)cmd[0],(uint16_t)(cmd[0]>>20),
+                 &s->firmware_error,&payload,&payload_words);
++            if(rc==0 || rc==2)e->firmware_error=s->firmware_error;
+             if(rc==2)return -7;
+             /* Legacy firmware may omit size/type in the echoed request
+              * (0151 INIT: sent00100500, echoed00100000). The codec already
+              * checks command ID and sequence, plus outer ACK framing/error.
+              * Stock receive_ack_cmd matches sequence, not the whole header. */
+-            if(rc || (version && payload_words<1))return -6;
+-            if(version){s->firmware_version=payload[0];s->version_ack=1;}
+-            else s->init_ack=1;
++            if(rc || (kind==1 && payload_words<1))return -6;
++            e->acked=1;++s->next_sequence;
++            if(kind==1){s->firmware_version=payload[0];s->version_ack=1;}
++            else if(kind==0)s->init_ack=1;
+             /* Polled reader never sleeps on an IRQ. Clear only MSGQ bit0,
+              * never the host boot request or any error indications. */
+             rc=write_reg(s,o,A6XX_GMU_GMU2HOST_INTR_CLR,1);if(rc)return rc;
+@@ -154,8 +182,10 @@
+ {
+     if(!s || !o || !t || !o->read32 || !o->write32 || !o->barrier ||
+         !o->delay_us || !o->check || !t->words || ((uintptr_t)t->words&3) ||
+-        t->bytes!=0x5000 || !t->barrier || !t->doorbell || t->poisoned || s->attempted)return -1;
++        t->bytes!=0x5000 || !t->barrier || !t->doorbell || t->poisoned || t->tx_closed || s->attempted)return -1;
+     s->attempted=1;s->vote=vote;phase(s,o,SWEET_GMU_POST_PREFLIGHT);
++    s->session_transport=t;s->session_words=t->words;s->session_ops=*o;
++    s->session_transport_ctx=t->ctx;s->session_barrier=t->barrier;s->session_doorbell=t->doorbell;
+     /* Conservative bounded ARC indexes; caller proves level/profile mapping. */
+     if(!(vote>>16) || !(vote&255) || (vote&255)>15 || !((vote>>8)&255) || ((vote>>8)&255)>15)return -3;
+     int rc=check(s,o);if(rc)return rc;
+@@ -197,6 +227,7 @@
+     rc=fresh_table(t,0);if(rc)return rc;
+     rc=drain_events(s,o,t,2);if(rc)return rc;
+     if(sweet_hfi_v1_init(cmd,5,1,0x60200000,0x4000,1))return -3;
++    s->next_sequence=1;
+     rc=exchange(s,o,t,cmd,5,0);if(rc)return rc;
+     phase(s,o,SWEET_GMU_POST_VERSION);
+     /* Like stock: the first INIT is legacy; read protocol version after its ACK. */
+@@ -228,3 +259,72 @@
+     }
+     phase(s,o,SWEET_GMU_POST_READY);return 0;
+ }
++
++static int config_sample(struct sweet_gmu_config_state *c,struct sweet_gmu_postboot_state *s,
++    const struct sweet_gmu_postboot_ops *o,struct sweet_hfi_transport *t)
++{
++    if(c->observed>=3)return -3;
++    int rc=check(s,o);if(rc)return rc;
++    rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
++    queue_snapshot(s,t);
++    unsigned i=c->observed++;
++    c->samples[i][0]=s->host_irq;c->samples[i][1]=s->ao_irq;
++    c->samples[i][2]=s->gx_status;c->samples[i][3]=s->hfi_status;
++    c->samples[i][4]=s->msg_read;c->samples[i][5]=s->msg_write;
++    c->samples[i][6]=s->dbg_read;c->samples[i][7]=s->dbg_write;
++    c->samples[i][8]=s->cmd_read;c->samples[i][9]=s->cmd_write;
++    return 0;
++}
++int sweet_gmu_configure(struct sweet_gmu_config_state *c,struct sweet_gmu_postboot_state *s,
++    const struct sweet_gmu_postboot_ops *o,struct sweet_hfi_transport *t,
++    const struct sweet_hfi_perf_table *perf,const struct sweet_hfi_bw_table *bw,
++    unsigned gpu_index,unsigned bw_level)
++{
++    if(!c || !s || !o || !t || !o->read32 || !o->write32 || !o->barrier ||
++        !o->delay_us || !o->check || !t->words || ((uintptr_t)t->words&3) ||
++        t->bytes!=0x5000 || !t->barrier || !t->doorbell || c->attempted || c->configured || c->observed || s->config_attempted)return -1;
++    c->attempted=1;s->config_attempted=1;
++    if(s->stage!=SWEET_GMU_POST_READY || !s->init_ack || !s->version_ack ||
++        s->observed!=2 || s->next_sequence!=3 || t->poisoned || t->tx_closed ||
++        s->session_transport!=t || s->session_words!=t->words ||
++        s->session_transport_ctx!=t->ctx || s->session_barrier!=t->barrier || s->session_doorbell!=t->doorbell ||
++        s->session_ops.ctx!=o->ctx || s->session_ops.read32!=o->read32 || s->session_ops.write32!=o->write32 ||
++        s->session_ops.barrier!=o->barrier || s->session_ops.delay_us!=o->delay_us || s->session_ops.check!=o->check ||
++        (s->wire_version>>28)>=2 || (s->firmware_version>>28)!=1 ||
++        ((s->firmware_version>>16)&0xfff)<8)return -3;
++    phase(s,o,SWEET_GMU_CONFIG_PREFLIGHT);
++    if(sweet_hfi_config_prepare(&c->packets,perf,bw,gpu_index,bw_level,s->vote))return -3;
++    int rc=check(s,o);if(rc)return rc;
++    queue_snapshot(s,t);
++    if(s->cmd_read>7 || s->cmd_write!=7)return -3;
++    rc=drain_events(s,o,t,1);if(rc)return rc;
++    rc=drain_events(s,o,t,2);if(rc)return rc;
++    const uint32_t *commands[3]={c->packets.perf,c->packets.bw,c->packets.test};
++    const unsigned sizes[3]={43,160,2};
++    for(unsigned i=0;i<3;i++){
++        phase(s,o,(enum sweet_gmu_postboot_stage)(SWEET_GMU_CONFIG_PERF+i));
++        rc=check(s,o);if(rc)return rc;
++        /* Before sending TEST HFI must still be active. Its ACK/observations
++         * must not assume status1 survives the command-mode terminator. */
++        rc=read_reg(s,o,A6XX_GMU_HFI_CTRL_STATUS,&s->hfi_status);if(rc)return rc;
++        if(!(s->hfi_status&1))return -3;
++        rc=exchange(s,o,t,commands[i],sizes[i],i+2);
++        if(i==2 && s->exchange[4].acked)c->configured=1;
++        if(rc)return rc;
++    }
++    if(!t->tx_closed || s->next_sequence!=6 || !c->configured)return -3;
++    phase(s,o,SWEET_GMU_CONFIG_OBSERVE);
++    rc=config_sample(c,s,o,t);if(rc)return rc;
++    for(unsigned n=1;n<=100;n++){
++        if(o->delay_us(o->ctx,100000))return -2;
++        rc=check(s,o);if(rc)return rc;
++        rc=drain_events(s,o,t,1);if(rc)return rc;
++        rc=drain_events(s,o,t,2);if(rc)return rc;
++        rc=check(s,o);if(rc)return rc;
++        if(s->host_irq&7)return -6;
++        if(n==10 || n==100){
++            rc=config_sample(c,s,o,t);if(rc)return rc;
++        }
++    }
++    phase(s,o,SWEET_GMU_CONFIG_READY);return 0;
++}
+--- a/bsd/dev/sweet_gmu_postboot.h
++++ b/bsd/dev/sweet_gmu_postboot.h
+@@ -3,6 +3,7 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ #include "sweet_hfi_transport.h"
++#include "sweet_hfi_config.h"
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -13,7 +14,9 @@
+ enum sweet_gmu_postboot_stage {
+     SWEET_GMU_POST_EMPTY, SWEET_GMU_POST_PREFLIGHT, SWEET_GMU_POST_OOB,
+     SWEET_GMU_POST_GX, SWEET_GMU_POST_SPTP, SWEET_GMU_POST_HFI,
+-    SWEET_GMU_POST_INIT, SWEET_GMU_POST_VERSION, SWEET_GMU_POST_OBSERVE, SWEET_GMU_POST_READY
++    SWEET_GMU_POST_INIT, SWEET_GMU_POST_VERSION, SWEET_GMU_POST_OBSERVE, SWEET_GMU_POST_READY,
++    SWEET_GMU_CONFIG_PREFLIGHT, SWEET_GMU_CONFIG_PERF, SWEET_GMU_CONFIG_BW,
++    SWEET_GMU_CONFIG_TEST, SWEET_GMU_CONFIG_OBSERVE, SWEET_GMU_CONFIG_READY
+ };
+ struct sweet_gmu_postboot_ops {
+     void *ctx;
+@@ -25,6 +28,11 @@
+      * Must NOT require GX collapsed after the OOB request. */
+     int (*check)(void *);
+     void (*progress)(void *, enum sweet_gmu_postboot_stage);
++};
++struct sweet_gmu_exchange_state {
++    unsigned attempted, published, acked;
++    uint32_t request_header, response_header, original_header, firmware_error;
++    uint32_t cmd_before_read, cmd_before_write, cmd_after_read, cmd_after_write;
+ };
+ struct sweet_gmu_postboot_state {
+     unsigned attempted, oob_issued, oob_ack, sptp_issued, hfi_issued;
+@@ -38,6 +46,23 @@
+     unsigned observed;
+     /* at1s/10s: hostIRQ, AOIRQ, GX, HFI, msg read/write, debug read/write */
+     uint32_t samples[2][8];
++    unsigned next_sequence, config_attempted;
++    /* Bind continuation to this retained transport, memory and callback owner. */
++    struct sweet_hfi_transport *session_transport;
++    volatile uint32_t *session_words;
++    struct sweet_gmu_postboot_ops session_ops;
++    void *session_transport_ctx;
++    void (*session_barrier)(void *);
++    int (*session_doorbell)(void *);
++    struct sweet_gmu_exchange_state exchange[5]; /* INIT, VERSION, PERF, BW, TEST */
++};
++struct sweet_gmu_config_state {
++    unsigned attempted, configured, observed;
++    /* configured means all three configuration ACKs received, independently
++     * of later IRQ-clear/health failures. No register DCVS/DDR handoff here. */
++    struct sweet_hfi_config_packets packets;
++    /* at0/1/10s: host/AO IRQ, GX, HFI, MSG, DBG and CMD read/write indexes */
++    uint32_t samples[3][10];
+ };
+ /* packed_vote is calculated from validated live cmd-db ARC tables for the
+  * explicitly selected stock boot voltage, NOT the reverse frequency index.
+@@ -47,6 +72,15 @@
+  * PERF/BW/TEST, GPU firmware/submission and acceleration remain separate. */
+ int sweet_gmu_postboot(struct sweet_gmu_postboot_state *,
+     const struct sweet_gmu_postboot_ops *, struct sweet_hfi_transport *, uint32_t packed_vote);
++/* Continue the SAME successful initial session once. All inputs are prepared
++ * before PERF; command-mode TX is sealed before TEST publication. Any failure
++ * retains power/memory and prohibits retry. Post-TEST HFI status is recorded,
++ * not required to remain1. Success proves bounded configuration exchange,
++ * not stock register DCVS/DDR handoff, GPU command execution or rendering. */
++int sweet_gmu_configure(struct sweet_gmu_config_state *, struct sweet_gmu_postboot_state *,
++    const struct sweet_gmu_postboot_ops *, struct sweet_hfi_transport *,
++    const struct sweet_hfi_perf_table *, const struct sweet_hfi_bw_table *,
++    unsigned initial_gpu_index, unsigned initial_bw_level);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/sweet_hfi_transport.c
++++ b/bsd/dev/sweet_hfi_transport.c
+@@ -6,14 +6,14 @@
+ #define QHEADER_SIZE 12u
+ static int valid(struct sweet_hfi_transport *t) {
+     if (!t || !t->words || ((uintptr_t)t->words&3u) || t->bytes<SWEET_HFI_V1_BYTES ||
+-        !t->barrier || !t->doorbell || t->poisoned) return 0;
++        !t->barrier || !t->doorbell) return 0;
+     if (t->words[1]!=54 || t->words[2]!=6 || t->words[3]!=12 || t->words[4]!=4) return 0;
+     return 1;
+ }
+-int sweet_hfi_send(struct sweet_hfi_transport *t, const uint32_t *msg, size_t count) {
++static int send_packet(struct sweet_hfi_transport *t, const uint32_t *msg, size_t count, int final) {
+     unsigned read,write,used,index;
+     volatile uint32_t *h,*q;
+-    if (!valid(t) || !msg || !count || count>255 || ((msg[0]>>8)&255u)!=count) return -1;
++    if (!valid(t) || t->poisoned || t->tx_closed || !msg || !count || count>255 || ((msg[0]>>8)&255u)!=count) return -1;
+     h=t->words+QHEADER_WORD;q=t->words+FIRST_QUEUE_WORD;
+     if(h[0]!=1 || h[3]!=QWORDS) return -1;
+     read=h[10];write=h[11];t->barrier(t->ctx);
+@@ -22,9 +22,17 @@
+     if(count>QWORDS-used-1) return 1;
+     index=write;
+     for(size_t i=0;i<count;i++){q[index]=msg[i];index=(index+1)%QWORDS;}
+-    t->barrier(t->ctx);h[11]=index;t->barrier(t->ctx);
++    t->barrier(t->ctx);
++    if(final)t->tx_closed=1;
++    h[11]=index;t->barrier(t->ctx);
+     if(t->doorbell(t->ctx)){t->poisoned=1;return -2;}
+     return 0;
++}
++int sweet_hfi_send(struct sweet_hfi_transport *t,const uint32_t *msg,size_t count) {
++    return send_packet(t,msg,count,0);
++}
++int sweet_hfi_send_final(struct sweet_hfi_transport *t,const uint32_t *msg,size_t count) {
++    return send_packet(t,msg,count,1);
+ }
+ int sweet_hfi_receive_queue(struct sweet_hfi_transport *t, unsigned queue,
+     uint32_t *out, size_t cap, size_t *count) {
+--- a/bsd/dev/sweet_hfi_transport.h
++++ b/bsd/dev/sweet_hfi_transport.h
+@@ -10,9 +10,13 @@
+     void *ctx;
+     void (*barrier)(void *);
+     int (*doorbell)(void *);
+-    unsigned poisoned;
++    unsigned poisoned; /* ambiguous doorbell: prohibit further TX, retain RX */
++    unsigned tx_closed; /* final command published; RX remains available */
+ };
+ int sweet_hfi_send(struct sweet_hfi_transport *, const uint32_t *, size_t);
++/* Seal TX before exposing the final packet's write index/doorbell. Invalid or
++ * full-queue refusal publishes nothing and does not seal. No reopen API. */
++int sweet_hfi_send_final(struct sweet_hfi_transport *, const uint32_t *, size_t);
+ /* Polled receive; no IRQ sleep/recheck protocol. An empty queue rearms rx_req.
+  * 0 message, 1 empty/incomplete, -1 invalid; outputs unchanged on failure. */
+ int sweet_hfi_receive(struct sweet_hfi_transport *, uint32_t *, size_t, size_t *);
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -175,11 +175,18 @@
+ sweet_gpu_probe(void)
+ {
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
++    int requested_config = 0, selected_profile = 0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+     PE_parse_boot_argn("sweetgmustart", &requested_start, sizeof(requested_start));
+     PE_parse_boot_argn("sweetgmuhfi", &requested_hfi, sizeof(requested_hfi));
++    PE_parse_boot_argn("sweetgmucfg", &requested_config, sizeof(requested_config));
++    PE_parse_boot_argn("sweetgmuprofile", &selected_profile, sizeof(selected_profile));
++    if((requested_config || selected_profile) &&
++        (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
++        printf("SWEET GMU CONFIG: requires cfg=1 profile=167 hfi=1 start=1\n");return;
++    }
+     if(requested_hfi && (requested_hfi!=1 || requested_start!=1)) {
+         printf("SWEET GMU HFI: requires sweetgmuhfi=1 sweetgmustart=1\n");return;
+     }
+@@ -409,7 +416,12 @@
+                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
+                                                     if(!start_rc && requested_hfi==1) {
+                                                         extern int sweet_gpu_gmu_hfi_start(void);
+-                                                        printf("SWEET GMU HFI: entry rc=%d\n",sweet_gpu_gmu_hfi_start());
++                                                        int hfi_rc=sweet_gpu_gmu_hfi_start();
++                                                        printf("SWEET GMU HFI: entry rc=%d\n",hfi_rc);
++                                                        if(!hfi_rc && requested_config==1) {
++                                                            extern int sweet_gpu_gmu_configure(unsigned);
++                                                            printf("SWEET GMU CONFIG: entry rc=%d\n",sweet_gpu_gmu_configure((unsigned)selected_profile));
++                                                        }
+                                                     }
+                                                 }
+                                                 return; /* no other GPU diagnostics after an attempted start */
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_config.c
+@@ -0,0 +1,31 @@
++#include "sweet_hfi_config.h"
++
++static int separate(const void *out, size_t out_size, const void *in, size_t in_size)
++{
++    const uintptr_t dst=(uintptr_t)out, src=(uintptr_t)in;
++    if(dst>UINTPTR_MAX-out_size || src>UINTPTR_MAX-in_size)return 0;
++    return dst>=src+in_size || src>=dst+out_size;
++}
++int sweet_hfi_config_prepare(struct sweet_hfi_config_packets *out,
++    const struct sweet_hfi_perf_table *perf, const struct sweet_hfi_bw_table *bw,
++    unsigned gpu_index, unsigned bw_level, uint32_t boot_vote)
++{
++    if(!out || !perf || !bw ||
++        !separate(out,sizeof(*out),perf,sizeof(*perf)) ||
++        !separate(out,sizeof(*out),bw,sizeof(*bw)))return -1;
++    /* Bound every index before reading a pair; encoders validate all rows. */
++    if(!gpu_index || gpu_index>=perf->gpu_count || gpu_index>=16 ||
++        !bw_level || bw_level>=bw->levels || bw_level>=16 ||
++        !(boot_vote>>16) || !(boot_vote&255) || (boot_vote&255)>15 ||
++        !((boot_vote>>8)&255) || ((boot_vote>>8)&255)>15 ||
++        perf->gpu[gpu_index].vote!=boot_vote)return -1;
++    struct sweet_hfi_config_packets prepared={0};
++    if(sweet_hfi_perf_encode(prepared.perf,SWEET_HFI_PERF_WORDS,3,perf) ||
++        sweet_hfi_bw_encode(prepared.bw,SWEET_HFI_BW_WORDS,4,bw) ||
++        sweet_hfi_v1_test(prepared.test,2,5))return -1;
++    prepared.initial_gpu_index=gpu_index;
++    prepared.initial_bw_level=bw_level;
++    prepared.boot_vote=boot_vote;
++    *out=prepared;
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_hfi_config.h
+@@ -0,0 +1,26 @@
++#ifndef SWEET_HFI_CONFIG_H
++#define SWEET_HFI_CONFIG_H
++#include "sweet_hfi_perf.h"
++#include "sweet_hfi_bw.h"
++
++/* Complete legacy A618 HFI_USE_REG configuration, prepared before publishing
++ * anything. Caller proves the tables and initial indexes belong to its board
++ * and the same retained session completed INIT1/VERSION2 with CMD7/7.
++ * This helper does not access queues, MMIO or firmware and grants no ownership.
++ * A runtime sender must keep the order PERF3/BW4/TEST5, validate each ACK and
++ * prohibit further TX once TEST may have been published. */
++struct sweet_hfi_config_packets {
++    uint32_t perf[SWEET_HFI_PERF_WORDS];
++    uint32_t bw[SWEET_HFI_BW_WORDS];
++    uint32_t test[2];
++    uint32_t initial_gpu_index, initial_bw_level, boot_vote;
++};
++/* 0 prepared; -1 invalid input. Output unchanged on failure. No aliasing with
++ * either input table. Explicit GPU index is required: two frequencies may
++ * share one rail vote. Initial bandwidth is a nonzero supported table index;
++ * its frequency-to-bandwidth relation must be validated by the board caller.
++ * Preparing packets is NOT completed HFI initialization or GPU readiness. */
++int sweet_hfi_config_prepare(struct sweet_hfi_config_packets *,
++    const struct sweet_hfi_perf_table *, const struct sweet_hfi_bw_table *,
++    unsigned initial_gpu_index, unsigned initial_bw_level, uint32_t boot_vote);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_board_profile.c
+@@ -0,0 +1,85 @@
++/* Explicit sweet_k6a recovery167 profile. Frequencies/OPP encodings follow
++ * pinned Xiaomi10c33d40 gpucc-sdmmagpie/clk/regulator sources; excludes140MHz
++ * as in the measured recovery profile. BCM data reconstructs the pinned
++ * stock isolated query, including its ACV carry and wait-mask behavior.
++ * These are driver configuration constants, not firmware or raw dump bytes.
++ * Revalidate every live binding before submission. No fuse claim or DVFS here. */
++#include "sweet_gmu_board_profile.h"
++#include "sweet_gmu_arc.h"
++struct profile_opp {uint32_t khz,level_plus_one,vote;};
++static const struct profile_opp gpu_opps[]={
++    {0u,1u,0x00000000u},
++    {180000u,49u,0x00400202u},
++    {267000u,65u,0x00400202u},
++    {355000u,129u,0x00800203u},
++    {430000u,193u,0x00c00204u},
++    {565000u,257u,0x01000305u},
++    {650000u,321u,0x01400306u},
++    {800000u,385u,0x01800407u},
++};
++static const struct profile_opp gmu_opps[]={
++    {0u,1u,0x00000000u},
++    {200000u,49u,0x00400202u},
++};
++static const struct {const char *name;uint32_t address,unit,metadata;} bindings[]={
++    {"MC0",0x50000u,1770000u,0x00000010u},
++    {"SH0",0x5003cu,2090000u,0x00010020u},
++    {"ACV",0x5000cu,1u,0x000b0000u},
++    {"SH2",0x50034u,2090000u,0x00010008u},
++    {"SN15",0x5007cu,530000u,0x00030008u},
++};
++static const uint32_t ddr_data[12][3]={
++    {0x40000000u,0x40000000u,0x40000000u},
++    {0x60000387u,0x6000017eu,0x60000008u},
++    {0x6000070fu,0x600002fdu,0x60000008u},
++    {0x60000a97u,0x6000047cu,0x60000008u},
++    {0x60000fecu,0x600006beu,0x60000008u},
++    {0x60001350u,0x6000082du,0x60000008u},
++    {0x6000180bu,0x60000a2eu,0x60000008u},
++    {0x60001d21u,0x60000c55u,0x60000008u},
++    {0x600023e9u,0x60000f34u,0x60000008u},
++    {0x60002fc6u,0x6000143au,0x60000008u},
++    {0x600036e8u,0x60001740u,0x60000008u},
++    {0x60003fb3u,0x60001af9u,0x60000008u},
++};
++static const uint32_t cnoc_data[2][2]={
++    {0x40000000u,0x40000000u},
++    {0x60000001u,0x60000001u},
++};
++int sweet_gmu_board_profile_build(struct sweet_gmu_board_profile *out,
++    const struct sweet_gmu_profile_ops *ops,unsigned selected)
++{
++    if(!out || !ops || !ops->arc || !ops->bcm || selected!=SWEET_GMU_RECOVERY167)return -1;
++    struct sweet_gmu_board_profile prepared={0};
++    const char *names[3]={"gfx.lvl","cx.lvl","mx.lvl"};
++    uint16_t levels[3][16]={{0}};unsigned counts[3]={0};uint32_t addresses[3]={0};
++    for(unsigned i=0;i<3;i++){
++        if(ops->arc(ops->ctx,names[i],&addresses[i],levels[i],&counts[i]) ||
++            (addresses[i]>>16)!=3 || (addresses[i]&3))return -2;
++        for(unsigned j=0;j<i;j++)if(addresses[i]==addresses[j])return -3;
++    }
++    prepared.perf.gpu_count=8;prepared.perf.gmu_count=2;
++    for(unsigned kind=0;kind<2;kind++){
++        const struct profile_opp *rows=kind?gmu_opps:gpu_opps;
++        unsigned n=kind?2:8;
++        struct sweet_hfi_perf_pair *pairs=kind?prepared.perf.gmu:prepared.perf.gpu;
++        for(unsigned i=0;i<n;i++){
++            uint32_t vote=0;
++            if(sweet_gmu_arc_vote(levels[kind],counts[kind],levels[2],counts[2],rows[i].level_plus_one,&vote) ||
++                vote!=rows[i].vote)return -3;
++            pairs[i].frequency_khz=rows[i].khz;pairs[i].vote=vote;
++        }
++    }
++    for(unsigned i=0;i<5;i++){
++        uint32_t address=0,unit=0,metadata=0;
++        if(ops->bcm(ops->ctx,bindings[i].name,&address,&unit,&metadata))return -2;
++        if(address!=bindings[i].address || unit!=bindings[i].unit || metadata!=bindings[i].metadata)return -3;
++        if(i<3)prepared.bw.ddr_addr[i]=address;else prepared.bw.cnoc_addr[i-3]=address;
++    }
++    prepared.bw.levels=12;prepared.bw.ddr_count=3;prepared.bw.cnoc_count=2;
++    prepared.bw.ddr_wait=prepared.bw.cnoc_wait=1;
++    for(unsigned i=0;i<12;i++)for(unsigned j=0;j<3;j++)prepared.bw.ddr_data[i][j]=ddr_data[i][j];
++    for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)prepared.bw.cnoc_data[i][j]=cnoc_data[i][j];
++    prepared.initial_gpu_index=1;prepared.initial_bw_level=4;prepared.max_requested_gpu_index=1;
++    *out=prepared;return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_gmu_board_profile.h
+@@ -0,0 +1,23 @@
++#ifndef SWEET_GMU_BOARD_PROFILE_H
++#define SWEET_GMU_BOARD_PROFILE_H
++#include "sweet_hfi_perf.h"
++#include "sweet_hfi_bw.h"
++#define SWEET_GMU_RECOVERY167 167u
++/* Explicit recovery-matched operating profile, NOT a fuse result. The only
++ * permitted frequency request is index1/180MHz until bins are verified. */
++struct sweet_gmu_board_profile {
++    struct sweet_hfi_perf_table perf;
++    struct sweet_hfi_bw_table bw;
++    unsigned initial_gpu_index, initial_bw_level, max_requested_gpu_index;
++};
++struct sweet_gmu_profile_ops {
++    void *ctx;
++    int (*arc)(void *,const char *,uint32_t *,uint16_t [16],unsigned *);
++    int (*bcm)(void *,const char *,uint32_t *,uint32_t *,uint32_t *);
++};
++/* Read-only binding: every ARC vote and all BCM addresses/unit/domain metadata
++ * must match this profile. No register/power requests. Output unchanged on
++ * failure. Caller uses a separate output object from the callback context. */
++int sweet_gmu_board_profile_build(struct sweet_gmu_board_profile *,
++    const struct sweet_gmu_profile_ops *,unsigned explicit_selection);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_rpmh_gpu_bcm_info.inc
+@@ -0,0 +1,40 @@
++/* Read-only BCM command-db metadata, sharing sweet_rpmh.c's mapping and lock.
++ * No TCS commands, regulator changes or inferred aggregate bandwidth. */
++int sweet_rpmh_gpu_bcm_info(const char *,uint32_t *,uint32_t *,uint32_t *);
++int sweet_rpmh_gpu_bcm_info(const char *name,uint32_t *address,uint32_t *unit,uint32_t *metadata)
++{
++    uint32_t key[2]={0,0},found_address=0,found_unit=0,found_metadata=0;
++    unsigned matches=0;
++    int error;
++    if(!name || !address || !unit || !metadata ||
++        (strcmp(name,"MC0") && strcmp(name,"SH0") && strcmp(name,"ACV") &&
++         strcmp(name,"SH2") && strcmp(name,"SN15")))return EINVAL;
++    for(unsigned i=0;i<8 && name[i];i++)key[i/4]|=(uint32_t)(uint8_t)name[i]<<(8*(i%4));
++    if(__atomic_exchange_n(&rh_lock,1,__ATOMIC_ACQUIRE))return EBUSY;
++    error=rh_map();if(error)goto out;
++    for(unsigned i=0;i<8;i++){
++        uint32_t h=8+16*i;unsigned slave=rh_db16(h);
++        if(!slave)break;
++        uint32_t entries=RH_DB_HEADER+rh_db16(h+2),aux=RH_DB_HEADER+rh_db16(h+4);
++        unsigned count=rh_db16(h+6);
++        if(slave<3 || slave>5 || (entries&3) || !rh_range(entries,count*RH_DB_ENTRY) || !rh_range(aux,0)){
++            error=EINVAL;goto out;
++        }
++        for(unsigned j=0;j<count;j++){
++            uint32_t e=entries+j*RH_DB_ENTRY;
++            if(rh_read(rh_db,e)!=key[0] || rh_read(rh_db,e+4)!=key[1])continue;
++            uint32_t a=aux+rh_db16(e+22),addr=rh_read(rh_db,e+16);
++            if(slave!=5 || rh_db16(h+8)!=0x1000 || (addr>>16)!=5 || (addr&3) ||
++                rh_db16(e+20)!=8 || (a&3) || !rh_range(a,8) || ++matches!=1){
++                error=EINVAL;goto out;
++            }
++            found_address=addr;found_unit=rh_read(rh_db,a);found_metadata=rh_read(rh_db,a+4);
++            if(!found_unit || (found_metadata>>24) || ((found_metadata>>16)&255)>=16){error=EINVAL;goto out;}
++        }
++    }
++    if(matches!=1){error=ENODEV;goto out;}
++    *address=found_address;*unit=found_unit;*metadata=found_metadata;error=0;
++out:
++    __atomic_store_n(&rh_lock,0,__ATOMIC_RELEASE);
++    return error;
++}
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -17,6 +17,7 @@
+ #include "../../../bsd/dev/sweet_gmu_postboot.h"
+ #include "../../../bsd/dev/sweet_gmu_postboot_profile.h"
+ #include "../../../bsd/dev/sweet_gmu_arc.h"
++#include "../../../bsd/dev/sweet_gmu_board_profile.h"
+ #else
+ #include "sweet_smmu_k6a.h"
+ #include "sweet_gmu_start.h"
+@@ -24,6 +25,7 @@
+ #include "sweet_gmu_postboot.h"
+ #include "sweet_gmu_postboot_profile.h"
+ #include "sweet_gmu_arc.h"
++#include "sweet_gmu_board_profile.h"
+ #endif
+ }
+ 
+@@ -31,6 +33,8 @@
+     uintptr_t gcc, cc, gmu, smmu, region[3];
+     sweet_gmu_start_state boot;
+     sweet_gmu_postboot_state postboot;
++    sweet_gmu_config_state config;
++    sweet_gmu_board_profile profile;
+     sweet_hfi_transport transport;
+     volatile uint32_t *hfi_cpu;
+     uint32_t hfi_bytes;
+@@ -45,6 +49,7 @@
+ static persistent_gmu probe;
+ static unsigned attempted;
+ static unsigned postboot_attempted;
++static unsigned config_attempted;
+ 
+ static uint32_t mmio_read(uintptr_t address)
+ {
+@@ -295,7 +300,7 @@
+     IOLog("SWEET GMU HFI: boot ARC rc=%d gfx=%x mx=%x requested_level=%u selected_level=%u packed=%08x\n",
+         rc,gfx_address,mx_address,SWEET_GMU_BOOT_OPP_LEVEL_PLUS_ONE-1,vote>>16,vote);
+     if(rc || gfx_address==mx_address || (gfx_address>>16)!=3 || (mx_address>>16)!=3)return -3;
+-    s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0};
++    s->transport={s->hfi_cpu,s->hfi_bytes,s,hfi_barrier,hfi_doorbell,0,0};
+     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,post_progress};
+     rc=sweet_gmu_postboot(&s->postboot,&ops,&s->transport,vote);
+     report_faults(s);
+@@ -315,3 +320,50 @@
+     IOLog("SWEET GMU HFI: retained until reboot; PERF/BW/TEST and acceleration not started\n");
+     return rc;
+ }
++
++extern "C" int sweet_rpmh_gpu_bcm_info(const char *,uint32_t *,uint32_t *,uint32_t *);
++static int profile_arc(void *,const char *name,uint32_t *address,uint16_t levels[16],unsigned *count)
++{
++    return sweet_rpmh_gpu_arc_info(name,address,levels,count);
++}
++static int profile_bcm(void *,const char *name,uint32_t *address,uint32_t *unit,uint32_t *metadata)
++{
++    return sweet_rpmh_gpu_bcm_info(name,address,unit,metadata);
++}
++static void config_progress(void *,enum sweet_gmu_postboot_stage stage)
++{
++    IOLog("SWEET GMU CONFIG: phase=%u; power and DDR floor retained\n",static_cast<unsigned>(stage));
++}
++extern "C" int sweet_gpu_gmu_configure(unsigned selected_profile)
++{
++    auto *s=&probe;
++    if(!__sync_bool_compare_and_swap(&config_attempted,0u,1u))return -1;
++    if(!postboot_attempted || s->postboot.stage!=SWEET_GMU_POST_READY || post_check(s))return -3;
++    sweet_gmu_profile_ops profile_ops={s,profile_arc,profile_bcm};
++    int rc=sweet_gmu_board_profile_build(&s->profile,&profile_ops,selected_profile);
++    IOLog("SWEET GMU CONFIG: profile=%u binding_rc=%d stock=10c33d40; recovery-selected, not fuse-derived\n",selected_profile,rc);
++    if(rc)return rc;
++    auto &b=s->profile;
++    IOLog("SWEET GMU CONFIG: GPU=%u GMU=%u initial=%u/%u max_request=%u; no frequency request\n",
++        b.perf.gpu_count,b.perf.gmu_count,b.initial_gpu_index,b.initial_bw_level,b.max_requested_gpu_index);
++    sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,config_progress};
++    rc=sweet_gmu_configure(&s->config,&s->postboot,&ops,&s->transport,&b.perf,&b.bw,b.initial_gpu_index,b.initial_bw_level);
++    report_faults(s);
++    auto &p=s->postboot;auto &c=s->config;
++    for(unsigned i=2;i<5;i++){
++        auto &e=p.exchange[i];
++        IOLog("SWEET GMU CONFIG: command=%u attempt=%u publish=%u ACK=%u req=%08x resp=%08x echo=%08x err=%08x CMD=%u/%u->%u/%u\n",
++            i,e.attempted,e.published,e.acked,e.request_header,e.response_header,e.original_header,e.firmware_error,
++            e.cmd_before_read,e.cmd_before_write,e.cmd_after_read,e.cmd_after_write);
++    }
++    IOLog("SWEET GMU CONFIG: done rc=%d phase=%u configured=%u next=%u TXclosed=%u poisoned=%u observations=%u irq=%08x/%08x event=%08x/%08x debug=%u last=%x/%08x\n",
++        rc,static_cast<unsigned>(p.stage),c.configured,p.next_sequence,s->transport.tx_closed,s->transport.poisoned,c.observed,
++        p.host_irq,p.ao_irq,p.event_header,p.event_code,p.debug_messages,p.last_offset,p.last_value);
++    const unsigned seconds[3]={0,1,10};
++    for(unsigned i=0;i<c.observed && i<3;i++)
++        IOLog("SWEET GMU CONFIG: observed %us irq=%08x/%08x GX=%08x HFI=%08x MSG=%u/%u DBG=%u/%u CMD=%u/%u\n",
++            seconds[i],c.samples[i][0],c.samples[i][1],c.samples[i][2],c.samples[i][3],
++            c.samples[i][4],c.samples[i][5],c.samples[i][6],c.samples[i][7],c.samples[i][8],c.samples[i][9]);
++    IOLog("SWEET GMU CONFIG: power, memory and DDR floor held until reboot; DCVS, SQE and rendering not started\n");
++    return rc;
++}
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -809,4 +809,6 @@
+     return error;
+ }
+ 
++#include "sweet_rpmh_gpu_bcm_info.inc"
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -671,3 +671,5 @@
+ bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk
+ bsd/dev/sweet_smmu_context.c		standard
+ bsd/dev/sweet_smmu_k6a.c		standard
++bsd/dev/sweet_hfi_config.c		standard
++bsd/dev/sweet_gmu_board_profile.c		standard

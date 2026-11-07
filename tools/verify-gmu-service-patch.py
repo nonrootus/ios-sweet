@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0152 against exact published0149 Git bytes before a full build.
+"""Check0150-0153 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -22,6 +22,15 @@ PATCHES = (
     ('xnu/patches/0151-sweet-gmu-sptp-already-on.patch', {'bsd/dev/sweet_gmu_postboot.c'}),
     ('xnu/patches/0152-sweet-gmu-ack-identity.patch', {'bsd/dev/sweet_gmu_postboot.c'}),
 )
+#0153 also modifies build wiring/rpmh.c, checked against the complete XNU tree
+# by the full build. This preflight covers exact canonical file bytes only.
+NEW_NAMES=('sweet_hfi_config.c','sweet_hfi_config.h','sweet_gmu_board_profile.c','sweet_gmu_board_profile.h','sweet_rpmh_gpu_bcm_info.inc')
+NEW_TARGETS={'bsd/dev/'+n for n in NEW_NAMES}
+TARGETS['bsd/dev/sweet_gpu_probe.c']='xnu/gpu/sweet_gpu_probe.c'
+TARGETS.update({'bsd/dev/'+n:'xnu/gpu/'+n for n in NEW_NAMES})
+WIRING={'bsd/conf/files','bsd/dev/sweet_rpmh.c'}
+PATCHES+= (('xnu/patches/0153-sweet-gmu-configuration.patch',set(TARGETS)|WIRING),)
+
 
 
 def main():
@@ -39,6 +48,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hfi-exact-', dir=args.build_directory) as scratch:
         work = Path(scratch)
         for target, canonical in TARGETS.items():
+            if target in NEW_TARGETS: continue
             path = work / target
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(blob(BASELINE, canonical))
@@ -50,19 +60,23 @@ def main():
             stats = subprocess.check_output(command + ['--numstat', str(patch)], cwd=work, text=True)
             if {line.split('\t')[-1] for line in stats.splitlines()} != targets:
                 raise ValueError('unexpected patch target set: ' + name)
-            subprocess.run(command + ['--check', str(patch)], cwd=work, check=True)
-            subprocess.run(command + [str(patch)], cwd=work, check=True)
-            applied.append(patch)
+            selected=command+(['--exclude='+p for p in sorted(WIRING)] if name.endswith('0153-sweet-gmu-configuration.patch') else [])
+            subprocess.run(selected + ['--check', str(patch)], cwd=work, check=True)
+            subprocess.run(selected + [str(patch)], cwd=work, check=True)
+            applied.append((patch,selected))
         for target, canonical in TARGETS.items():
             if (work / target).read_bytes() != blob(revision, canonical):
                 raise ValueError('patched bytes differ from committed canonical source: ' + canonical)
-        for patch in reversed(applied):
-            subprocess.run(command + ['--reverse', '--check', str(patch)], cwd=work, check=True)
-            subprocess.run(command + ['--reverse', str(patch)], cwd=work, check=True)
+        for patch,selected in reversed(applied):
+            subprocess.run(selected + ['--reverse', '--check', str(patch)], cwd=work, check=True)
+            subprocess.run(selected + ['--reverse', str(patch)], cwd=work, check=True)
         for target, canonical in TARGETS.items():
+            if target in NEW_TARGETS:
+                if (work/target).exists(): raise ValueError('new file survived reversal: '+target)
+                continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0152 exact published baseline, all5 canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0153 exact published baseline, all11 canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

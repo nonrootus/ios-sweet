@@ -1,0 +1,95 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -365,6 +365,10 @@
+ #define PTOV_TABLE_SIZE 8
+ SECURITY_READ_ONLY_LATE(static ptov_table_entry)        ptov_table[PTOV_TABLE_SIZE];
+ SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
++
++#if defined(SWEET)
++#include "sweet_a618_zap_reserve.inc"
++#endif
+ 
+ 
+ vm_map_address_t
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -19,6 +19,7 @@
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
+ extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
++extern void sweet_a618_zap_reserve_probe(void);
+ void sweet_gpu_probe(void);
+ extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
+ extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
+@@ -258,6 +259,7 @@
+     __asm__ volatile ("dmb oshld" ::: "memory");
+     printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
+         memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
++    sweet_a618_zap_reserve_probe();
+     /* Experimental CX power-on: caller opts in, prechecks only APPS DRV
+      * vote; this is not a measured voltage or proof of exclusive ownership. */
+     int cx_on = 0, cx_ok = 0;
+--- /dev/null
++++ b/osfmk/arm64/sweet_a618_zap_reserve.inc
+@@ -0,0 +1,61 @@
++/* Included by arm_vm_init.c so this probe can inspect the physical aperture.
++ * Called after VM startup. It only translates addresses and never accesses
++ * the contents of the reserved pages. */
++void sweet_a618_zap_reserve_probe(void);
++
++void
++sweet_a618_zap_reserve_probe(void)
++{
++	DTEntry chosen;
++	const void *property;
++	unsigned int length;
++	uint64_t reserve[2];
++	const pmap_paddr_t base = 0x1fca00000ull;
++	const vm_size_t size = 0x100000u;
++	vm_offset_t tail = 0;
++
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "sweet-a618-zap-reserve", &property, &length) != kSuccess) {
++		return;
++	}
++	if (length != sizeof(reserve)) {
++		printf("SWEET A618 ZAP: invalid reserve descriptor size=%u\n", length);
++		return;
++	}
++	memcpy(reserve, property, sizeof(reserve));
++	if (reserve[0] != base || reserve[1] != size || gPhysBase != 0x100000000ull ||
++	    real_avail_end != base || avail_end != base || !kva_active || PAGE_SIZE != 0x4000u) {
++		printf("SWEET A618 ZAP: reserve extent mismatch managed_end=%llx real_end=%llx\n",
++		    (unsigned long long)avail_end, (unsigned long long)real_avail_end);
++		return;
++	}
++	for (size_t i = 0; i < PTOV_TABLE_SIZE; ++i) {
++		const ptov_table_entry *entry = &ptov_table[i];
++		if (entry->len == 0) {
++			continue;
++		}
++		pmap_paddr_t end = entry->pa + entry->len;
++		if (end < entry->pa || (entry->pa < base + size && end > base)) {
++			printf("SWEET A618 ZAP: physical aperture overlaps reserve\n");
++			return;
++		}
++		if (end == base) {
++			tail = entry->va + entry->len;
++		}
++	}
++	if (!tail || !pmap_valid_page(atop(base - PAGE_SIZE)) ||
++	    kvtophys(tail - PAGE_SIZE) != base - PAGE_SIZE) {
++		printf("SWEET A618 ZAP: adjacent managed page check failed\n");
++		return;
++	}
++	const vm_offset_t linear = gVirtBase + (base - gPhysBase);
++	for (vm_size_t offset = 0; offset < size; offset += PAGE_SIZE) {
++		if (pmap_valid_page(atop(base + offset)) || kvtophys(tail + offset) ||
++		    kvtophys(linear + offset)) {
++			printf("SWEET A618 ZAP: reserve page owned or mapped offset=%lx\n", (unsigned long)offset);
++			return;
++		}
++	}
++	printf("SWEET A618 ZAP: reserve verified pa=%llx bytes=%lx pages=%lu\n",
++	    (unsigned long long)base, (unsigned long)size, (unsigned long)(size / PAGE_SIZE));
++}

@@ -2,7 +2,8 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+address comes from the sweet live FDT.
+Usage: mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--a618-zap-reserve]
 """
 import hashlib, os, struct, sys
 
@@ -23,6 +24,8 @@ PANIC_LOG_SIZE = 0x100000
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
 HIGH_PHYS_BASE = 0x100000000
 HIGH_MEM_SIZE = 0xfcc00000
+# Stock PIL requests a 1 MiB allocation for the relocatable A618 ZAP image.
+A618_ZAP_RESERVE_SIZE = 0x100000
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
@@ -74,12 +77,16 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False):
+def build(seed=None, qemu=False, highmem=False, a618_zap_reserve=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+    if a618_zap_reserve and (qemu or not highmem):
+        raise ValueError('--a618-zap-reserve requires the phone highmem layout')
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
+    if a618_zap_reserve:
+        mem_size -= A618_ZAP_RESERVE_SIZE
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
@@ -128,6 +135,11 @@ def build(seed=None, qemu=False, highmem=False):
         # The iOS shared cache is in no trust cache, so dyld can only map it
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
+    if a618_zap_reserve:
+        # Keep this range outside the boot_args RAM extent. XNU must still
+        # verify ownership and mapping before a loader may use the range.
+        chosen.props.append(('sweet-a618-zap-reserve', 0,
+                             u64(phys_base + mem_size, A618_ZAP_RESERVE_SIZE)))
 
     # SWEET SMP: all eight cores in physical-core order (0-5 Cortex-A55,
     # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
@@ -222,8 +234,7 @@ def build(seed=None, qemu=False, highmem=False):
     product_props = d22ap_product()
     product = [node('product', [ph()] + product_props)] if product_props else []
 
-    # Panic log region. /pram reg = <phys size>; it sits just above the
-    # dram-size we expose, so XNU maps it but never allocates into it.
+    # Panic log region. XNU maps /pram reg separately from managed RAM.
     pram = node('pram', [ph(), ('reg', u64(panic_base) + u64(PANIC_LOG_SIZE))])
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
@@ -242,7 +253,11 @@ def build(seed=None, qemu=False, highmem=False):
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
+    try:
+        root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                     a618_zap_reserve='--a618-zap-reserve' in sys.argv)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

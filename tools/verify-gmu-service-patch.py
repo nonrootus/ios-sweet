@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0166 against exact published0149 Git bytes before a full build.
+"""Check0150-0167 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -82,6 +82,13 @@ NEW_TARGETS.add(PAS_TARGET)
 TARGETS[PAS_TARGET] = 'xnu/gpu/sweet_a618_pas_probe.inc'
 PATCHES += (('xnu/patches/0166-sweet-a618-pas-info-probe.patch', {
     PAS_TARGET, OOB_TARGET, 'bsd/dev/sweet_gpu_probe.c'}),)
+ZAP_TARGET = 'osfmk/arm64/sweet_a618_zap_reserve.inc'
+VM_INIT = 'osfmk/arm64/arm_vm_init.c'
+NEW_TARGETS.add(ZAP_TARGET)
+TARGETS[ZAP_TARGET] = 'xnu/gpu/sweet_a618_zap_reserve.inc'
+WIRING.add(VM_INIT)
+PATCHES += (('xnu/patches/0167-sweet-a618-zap-reserve-probe.patch', {
+    ZAP_TARGET, VM_INIT, 'bsd/dev/sweet_gpu_probe.c'}),)
 
 
 def main():
@@ -110,6 +117,10 @@ def main():
         include='#include "sweet_rpmh_gpu_bcm_info.inc"'
         if rpmh.count(include)!=1 or rpmh.index(include)>rpmh.index('#endif /* ARM64_BOARD_CONFIG_SWEET */'):
             raise ValueError('BCM getter absent or outside SWEET conditional')
+        vm_init = (args.patched_tree / VM_INIT).read_text(encoding='utf-8')
+        zap_include = '#if defined(SWEET)\n#include "sweet_a618_zap_reserve.inc"\n#endif'
+        if vm_init.count(zap_include) != 1:
+            raise ValueError('ZAP reserve probe missing from SWEET VM initialization source')
         print('PASS actual builder tree:',len(TARGETS),'exact canonical blobs, compile entries and conditional BCM getter',revision)
         return
     if args.build_directory is None:parser.error('build_directory or --patched-tree required')
@@ -146,7 +157,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0166 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0167 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

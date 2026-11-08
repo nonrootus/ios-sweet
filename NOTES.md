@@ -20,6 +20,14 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0167 A618 ZAP reserve probe
+
+With an opt-in phone ADT, check the 1 MiB ZAP reservation against the
+VM and known physical aperture aliases without touching its contents.
+The existing 0166 CP and PAS INFO tests remain available. No new
+firmware authentication call is made. Both ARM64 files compiled
+against XNU target headers. Hardware testing remains pending.
+
 ## 0166 A618 PAS availability and TRUST baseline
 
 0165 completed its first command and GPU write to memory on sweet_k6a.

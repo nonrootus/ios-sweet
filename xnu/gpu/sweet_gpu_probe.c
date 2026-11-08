@@ -19,6 +19,7 @@
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
 extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
+extern void sweet_a618_zap_reserve_probe(void);
 void sweet_gpu_probe(void);
 extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
 extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
@@ -258,6 +259,7 @@ sweet_gpu_probe(void)
     __asm__ volatile ("dmb oshld" ::: "memory");
     printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
         memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
+    sweet_a618_zap_reserve_probe();
     /* Experimental CX power-on: caller opts in, prechecks only APPS DRV
      * vote; this is not a measured voltage or proof of exclusive ownership. */
     int cx_on = 0, cx_ok = 0;

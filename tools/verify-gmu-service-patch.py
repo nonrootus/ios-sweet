@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check 0150–0172 against exact published 0149 Git bytes before a full build.
+"""Check 0150–0173 against exact published 0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -111,6 +111,19 @@ PATCHES += (('xnu/patches/0171-sweet-a618-iosurface-span.patch', {
     'bsd/dev/sweet_gpu_probe.c'}),)
 PATCHES += (('xnu/patches/0172-sweet-a618-bounded-present.patch', {
     PRESENT_TARGET, OOB_TARGET, 'bsd/dev/sweet_gpu_probe.c'}),)
+RENDER_POOL_TARGETS = {
+    'bsd/dev/sweet_a618_render_pool.c', 'bsd/dev/sweet_a618_render_pool.h',
+    'iokit/Kernel/arm/sweet_gpu_render_memory.h',
+}
+NEW_TARGETS.update(RENDER_POOL_TARGETS)
+TARGETS.update({name: 'xnu/gpu/'+name.rsplit('/',1)[1] for name in RENDER_POOL_TARGETS})
+TARGETS['iokit/Kernel/arm/sweet_gpu_memory.cpp'] = 'xnu/gpu/sweet_gpu_memory.cpp'
+PATCHES += (('xnu/patches/0173-sweet-a618-render-pool.patch', RENDER_POOL_TARGETS | {
+    'bsd/conf/files', 'bsd/dev/sweet_a618_address_space.c',
+    'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp',
+    'iokit/Kernel/arm/sweet_gpu_memory.cpp',
+    'iokit/Kernel/arm/sweet_a618_mapping.inc',
+    'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
 
 
 def main():
@@ -131,7 +144,7 @@ def main():
             if not path.is_file() or path.read_bytes()!=blob(revision,canonical):
                 raise ValueError('actual builder tree missing or stale: '+target)
         files=(args.patched_tree/'bsd/conf/files').read_text(encoding='utf-8').splitlines()
-        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_pte','sweet_a618_address_space',
+        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_pte','sweet_a618_address_space','sweet_a618_render_pool',
                      'sweet_a618_cp_init','sweet_a618_pwrup'):
             if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
                 raise ValueError('actual builder missing unique compile entry: '+name)
@@ -181,7 +194,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0172 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0173 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,388 @@
+--- a/bsd/dev/sweet_a618_address_space.c
++++ b/bsd/dev/sweet_a618_address_space.c
+@@ -1,4 +1,5 @@
+ #include "sweet_a618_address_space.h"
++#include "sweet_a618_render_pool.h"
+ #include "sweet_gpu_pte.h"
+ #define PAGE_SIZE 4096u
+ #define ENTRIES 512u
+@@ -84,3 +85,18 @@
+         if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
+     return 0;
+ }
++
++int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page t[3],
++    const uint64_t pa[SWEET_A618_DATA_PAGES],uint64_t fill_pa,
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES])
++{
++    uint64_t leaves[19];
++    if (prepare(t,pa,fill_pa,leaves) ||
++        sweet_a618_render_pool_check(t,extra,physical)) return -1;
++    for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++){
++        if(level==1 && i>=64 && i<64+SWEET_A618_RENDER_TABLES)continue;
++        if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
++    }
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_render_pool.c
+@@ -0,0 +1,84 @@
++#include "sweet_a618_render_pool.h"
++#include "sweet_gpu_pte.h"
++
++#define TABLE_ENTRIES 512u
++#define PAGE_BYTES 4096u
++_Static_assert((SWEET_A618_RENDER_IOVA >> 30)==1u, "renderer must share SID0 L1");
++_Static_assert(((SWEET_A618_RENDER_IOVA >> 21)&511u)==64u, "renderer L2 start");
++
++static int overlap(uintptr_t a, size_t as, uintptr_t b, size_t bs)
++{
++    if (!a || !b || !as || !bs || a > UINTPTR_MAX-as || b > UINTPTR_MAX-bs)
++        return 1;
++    return a < b+bs && b < a+as;
++}
++
++static int valid(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES], int attached)
++{
++    if (!base || !extra || !physical ||
++        ((uintptr_t)base % _Alignof(struct sweet_gpu_table_page)) ||
++        ((uintptr_t)extra % _Alignof(struct sweet_gpu_table_page)) ||
++        ((uintptr_t)physical % _Alignof(uint64_t))) return -1;
++    for (unsigned j = 0; j < 3; ++j) {
++        uint64_t descriptor;
++        if (!base[j].cpu || ((uintptr_t)base[j].cpu & (PAGE_BYTES-1)) ||
++            sweet_gpu_pte_table(base[j].pa,&descriptor)) return -1;
++    }
++    for (unsigned t = 0; t < SWEET_A618_RENDER_TABLES; ++t) {
++        uint64_t descriptor;
++        if (!extra[t].cpu || ((uintptr_t)extra[t].cpu & (PAGE_BYTES-1)) ||
++            sweet_gpu_pte_table(extra[t].pa, &descriptor) ||
++            overlap((uintptr_t)extra[t].cpu,PAGE_BYTES,(uintptr_t)extra,
++                SWEET_A618_RENDER_TABLES*sizeof(*extra)) ||
++            overlap((uintptr_t)extra[t].cpu,PAGE_BYTES,(uintptr_t)physical,
++                SWEET_A618_RENDER_PAGES*sizeof(*physical))) return -1;
++        for (unsigned j = 0; j < 3; ++j)
++            if (!base[j].cpu || extra[t].pa == base[j].pa ||
++                overlap((uintptr_t)extra[t].cpu,PAGE_BYTES,(uintptr_t)base[j].cpu,PAGE_BYTES))
++                return -1;
++        for (unsigned j = 0; j < t; ++j)
++            if (extra[t].pa == extra[j].pa ||
++                overlap((uintptr_t)extra[t].cpu,PAGE_BYTES,(uintptr_t)extra[j].cpu,PAGE_BYTES))
++                return -1;
++        for (unsigned index = 0; index < SWEET_A618_RENDER_PAGES; ++index)
++            if (extra[t].pa == physical[index]) return -1;
++        if (base[1].cpu[64+t] != (attached ? descriptor : 0)) return -1;
++        for (unsigned leaf = 0; leaf < TABLE_ENTRIES; ++leaf) {
++            const unsigned index = t*TABLE_ENTRIES+leaf;
++            uint64_t expected;
++            if (sweet_gpu_pte_page_access(physical[index],0,0,&expected)) return -1;
++            expected |= UINT64_C(3)<<53; /* PXN and UXN: never execute a BO. */
++            if (extra[t].cpu[leaf] != (attached ? expected : 0)) return -1;
++        }
++    }
++    return 0;
++}
++
++int sweet_a618_render_pool_attach(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES])
++{
++    if (valid(base,extra,physical,0)) return -1;
++    /* No fallible callback follows the first store. Complete children before
++     * publishing the L2 descriptors and the already active L1 root. The caller
++     * must still clean all tables and barrier before installing the SID0 root. */
++    for (unsigned t = 0; t < SWEET_A618_RENDER_TABLES; ++t) {
++        for (unsigned leaf = 0; leaf < TABLE_ENTRIES; ++leaf) {
++            uint64_t pte;
++            (void)sweet_gpu_pte_page_access(physical[t*TABLE_ENTRIES+leaf],0,0,&pte);
++            extra[t].cpu[leaf] = pte | (UINT64_C(3)<<53);
++        }
++    }
++    for (unsigned t = 0; t < SWEET_A618_RENDER_TABLES; ++t)
++        base[1].cpu[64+t] = extra[t].pa | 3u;
++    return 0;
++}
++
++int sweet_a618_render_pool_check(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES])
++{
++    return valid(base,extra,physical,1);
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_render_pool.h
+@@ -0,0 +1,33 @@
++#ifndef SWEET_A618_RENDER_POOL_H
++#define SWEET_A618_RENDER_POOL_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++#include "sweet_a618_address_space.h"
++
++/* 128 MiB of already pinned, Normal-NC memory. The tree is built before the
++ * GPU context is installed; no live SMMU leaf replacement or TLB invalidation.
++ * The first page of each 2 MiB window belongs to the same pool as the rest. */
++#define SWEET_A618_RENDER_IOVA UINT32_C(0x48000000)
++#define SWEET_A618_RENDER_TABLES 64u
++#define SWEET_A618_RENDER_PAGES (SWEET_A618_RENDER_TABLES * 512u)
++#define SWEET_A618_RENDER_BYTES (SWEET_A618_RENDER_PAGES * 4096u)
++
++/* The base tree has already been built and verified. Every new table must be
++ * zero and privately owned. On preflight failure no table is modified. */
++int sweet_a618_render_pool_attach(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES]);
++int sweet_a618_render_pool_check(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES]);
++int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page base[3],
++    const uint64_t data_pa[SWEET_A618_DATA_PAGES], uint64_t fill_pa,
++    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
++    const uint64_t physical[SWEET_A618_RENDER_PAGES]);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -6,7 +6,11 @@
+  */
+ #include "sweet_gmu_memory.h"
+ #include "sweet_gpu_memory.h"
++#include "sweet_gpu_render_memory.h"
+ #include <IOKit/IOLib.h>
++#ifdef KERNEL
++#include <pexpert/pexpert.h>
++#endif
+ extern "C" {
+ #include <arm/machine_routines.h>
+ /* Internal declaration is hidden from the exported IOKit header view. */
+@@ -22,6 +26,7 @@
+ #include "../../../bsd/dev/sweet_gmu_dcvs.h"
+ #include "../../../bsd/dev/sweet_a618_firmware.h"
+ #include "../../../bsd/dev/sweet_a618_address_space.h"
++#include "../../../bsd/dev/sweet_a618_render_pool.h"
+ #include "../../../bsd/dev/sweet_a618_cp_init.h"
+ #include "../../../bsd/dev/sweet_a618_pwrup.h"
+ #else
+@@ -35,6 +40,7 @@
+ #include "sweet_gmu_dcvs.h"
+ #include "sweet_a618_firmware.h"
+ #include "sweet_a618_address_space.h"
++#include "sweet_a618_render_pool.h"
+ #include "sweet_a618_cp_init.h"
+ #include "sweet_a618_pwrup.h"
+ #endif
+--- a/iokit/Kernel/arm/sweet_gpu_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_memory.cpp
+@@ -1,4 +1,5 @@
+ #include "sweet_gpu_memory.h"
++#include "sweet_gpu_render_memory.h"
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+ #include <kern/task.h>
+@@ -120,3 +121,68 @@
+     __asm__ volatile ("dsb sy" ::: "memory");
+     return 0;
+ }
++
++struct sweet_gpu_render_memory {
++    IOBufferMemoryDescriptor *buffer;
++    void *cpu;
++    uint64_t physical[SWEET_A618_RENDER_PAGES];
++};
++
++sweet_gpu_render_memory *sweet_gpu_render_memory_create(void)
++{
++    if (page_size != 16384) return nullptr;
++    auto *m = static_cast<sweet_gpu_render_memory *>(IOMallocZero(sizeof(sweet_gpu_render_memory)));
++    if (!m) return nullptr;
++    m->buffer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++        kIODirectionInOut | kIOMemoryMapperNone | kIOMemoryKernelUserShared |
++            kIOMapWriteCombineCache,
++        SWEET_A618_RENDER_BYTES, page_size);
++    if (!m->buffer) { IOFree(m,sizeof(*m)); return nullptr; }
++    m->cpu = m->buffer->getBytesNoCopy();
++    if (!m->cpu || (reinterpret_cast<uintptr_t>(m->cpu) & (page_size-1))) goto bad;
++    /* A native 16 KiB backing page supplies four adjacent GPU leaves. Check
++     * the effective CPU mapping once per native page before assigning any IOVA. */
++    for (size_t i = 0; i < SWEET_A618_RENDER_PAGES; i += 4) {
++        IOByteCount length = 0;
++        const uint64_t pa = m->buffer->getPhysicalSegment(i*GPU_PAGE, &length,
++            kIOMemoryMapperNone);
++        if (!pa || (pa & (page_size-1)) || pa > GPU_PA_LIMIT-page_size ||
++            length < page_size ||
++            !nc_mapping_valid(static_cast<unsigned char *>(m->cpu)+i*GPU_PAGE, pa))
++            goto bad;
++        for (unsigned j = 0; j < 4; ++j)
++            m->physical[i+j] = pa+j*GPU_PAGE;
++    }
++    for (size_t i = 0; i < SWEET_A618_RENDER_PAGES; i += 4)
++        for (size_t j = 0; j < i; j += 4)
++            if (m->physical[i] == m->physical[j]) goto bad;
++    bzero(m->cpu,SWEET_A618_RENDER_BYTES);
++    return m;
++bad:
++    /* Never published to the SMMU; safe to discard this failed allocation. */
++    m->buffer->release();
++    IOFree(m,sizeof(*m));
++    return nullptr;
++}
++
++IOBufferMemoryDescriptor *sweet_gpu_render_memory_descriptor(sweet_gpu_render_memory *m)
++{
++    return m ? m->buffer : nullptr;
++}
++
++void sweet_gpu_render_memory_destroy_inactive(sweet_gpu_render_memory *m)
++{
++    if (!m) return;
++    if (m->buffer) m->buffer->release();
++    IOFree(m,sizeof(*m));
++}
++
++void *sweet_gpu_render_memory_cpu(sweet_gpu_render_memory *m)
++{
++    return m ? m->cpu : nullptr;
++}
++
++const uint64_t *sweet_gpu_render_memory_physical(sweet_gpu_render_memory *m)
++{
++    return m ? m->physical : nullptr;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_gpu_render_memory.h
+@@ -0,0 +1,20 @@
++#ifndef SWEET_GPU_RENDER_MEMORY_H
++#define SWEET_GPU_RENDER_MEMORY_H
++
++#ifdef KERNEL
++#include "../../../bsd/dev/sweet_a618_render_pool.h"
++#else
++#include "sweet_a618_render_pool.h"
++#endif
++class IOBufferMemoryDescriptor;
++
++/* One permanent, wired, Normal-NC allocation made before the GPU context is
++ * installed. The descriptor keeps every BO's physical backing alive. */
++struct sweet_gpu_render_memory;
++sweet_gpu_render_memory *sweet_gpu_render_memory_create(void);
++void sweet_gpu_render_memory_destroy_inactive(sweet_gpu_render_memory *);
++IOBufferMemoryDescriptor *sweet_gpu_render_memory_descriptor(sweet_gpu_render_memory *);
++void *sweet_gpu_render_memory_cpu(sweet_gpu_render_memory *);
++const uint64_t *sweet_gpu_render_memory_physical(sweet_gpu_render_memory *);
++
++#endif
+--- a/iokit/Kernel/arm/sweet_a618_mapping.inc
++++ b/iokit/Kernel/arm/sweet_a618_mapping.inc
+@@ -5,18 +5,32 @@
+  */
+ static struct {
+     sweet_gpu_memory *memory;
++    sweet_gpu_memory *render_tables_memory;
++    sweet_gpu_render_memory *render_pool;
+     sweet_gpu_table_page tables[3];
++    sweet_gpu_table_page render_tables[SWEET_A618_RENDER_TABLES];
+     sweet_smmu_context context;
+-    bool published, pinned;
++    bool published, pinned, render_ready;
+     unsigned observations;
+ } a618_mapping;
+ static unsigned a618_mapping_attempted, a618_mapping_verify_attempted;
++static int a618_tree_check(void)
++{
++    auto &m=a618_mapping;auto &a=a618_preparation;
++    const uint64_t fill_pa=a.physical[SWEET_A618_DATA_PAGES];
++#ifdef KERNEL
++    return m.render_ready ?
++        sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
++            m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)) :
++        sweet_a618_address_space_check(m.tables,a.physical,fill_pa);
++#else
++    return sweet_a618_address_space_check(m.tables,a.physical,fill_pa);
++#endif
++}
+ static int a618_pin_tables(void *opaque,uint64_t *root)
+ {
+     auto *s=static_cast<persistent_gmu *>(opaque);auto &m=a618_mapping;
+-    if(!root || m.pinned || !m.published || stopped(s) ||
+-        sweet_a618_address_space_check(m.tables,a618_preparation.physical,
+-            a618_preparation.physical[SWEET_A618_DATA_PAGES]))return -1;
++    if(!root || m.pinned || !m.published || stopped(s) || a618_tree_check())return -1;
+     m.pinned=true;*root=m.tables[0].pa;return 0;
+ }
+ static void a618_unpin_before_write(void *)
+@@ -42,9 +56,37 @@
+     }
+     if(sweet_a618_address_space_build(m.tables,a.physical,fill_pa) ||
+         sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
++#ifdef KERNEL
++    int render_requested=0;
++    PE_parse_boot_argn("sweetcagpu",&render_requested,sizeof(render_requested));
++    if(render_requested==1 && fill){
++        m.render_pool=sweet_gpu_render_memory_create();
++        m.render_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_RENDER_TABLES);
++        if(!m.render_pool || !m.render_tables_memory){
++            sweet_gpu_render_memory_destroy_inactive(m.render_pool);
++            if(m.render_tables_memory)sweet_gpu_memory_destroy(m.render_tables_memory);
++            m.render_pool=nullptr;m.render_tables_memory=nullptr;
++            IOLog("SWEET CA: GPU pool unavailable; retaining CPU renderer\n");
++        }else{
++            for(unsigned i=0;i<SWEET_A618_RENDER_TABLES;i++){
++                void *cpu=nullptr;uint64_t pa=0;
++                if(sweet_gpu_memory_page(m.render_tables_memory,i,&cpu,&pa))return -5;
++                m.render_tables[i]={static_cast<uint64_t *>(cpu),pa};
++            }
++            if(sweet_a618_render_pool_attach(m.tables,m.render_tables,
++                sweet_gpu_render_memory_physical(m.render_pool)) ||
++                sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
++                m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)))return -5;
++            for(unsigned i=0;i<SWEET_A618_RENDER_TABLES;i++)
++                if(sweet_gpu_memory_clean(m.render_tables_memory,i))return -5;
++            m.render_ready=true;
++            IOLog("SWEET CA: pinned 128 MiB private GPU BO pool before SID0 install\n");
++        }
++    }
++#endif
+     /* Fixed three-level tree: complete children before the parent root. */
+     for(unsigned i=3;i;i--)if(sweet_gpu_memory_clean(m.memory,i-1))return -5;
+-    if(complete(s) || sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
++    if(complete(s) || a618_tree_check())return -5;
+     m.published=true;
+     IOLog("SWEET A618 COLD MAP: tree root=%llx tables=3 data=%u SQE=%08x ring=%08x scratch=%08x pwrup=%08x; powerup contents still reserved\n",
+         static_cast<unsigned long long>(m.tables[0].pa),a.pages,SWEET_A618_SQE_IOVA,SWEET_A618_RING_IOVA,
+@@ -70,7 +112,7 @@
+         m.context.state!=SWEET_SMMU_CONTEXT_ACTIVE ||
+         a618_prepare_guard(s))return -3;
+     IOLog("SWEET A618 MAP: begin retained cold context check; no GPU command submission\n");
+-    if(sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
++    if(a618_tree_check())return -5;
+     a.gpu=ml_io_map(a618_register_base,a618_register_size);if(!a.gpu)return -2;
+     for(unsigned i=0;i<a618_register_count;i++){
+         if(a618_prepare_guard(s))return -3;
+--- a/iokit/Kernel/arm/sweet_a618_cp_run.inc
++++ b/iokit/Kernel/arm/sweet_a618_cp_run.inc
+@@ -290,8 +290,7 @@
+     }
+     if (sweet_gpu_memory_clean(a618_preparation.storage[2],0) ||
+         sweet_gpu_memory_clean(a618_preparation.storage[3],0) || complete(s)) return -5;
+-    return sweet_a618_address_space_check(a618_mapping.tables,a618_preparation.physical,
+-        a618_preparation.physical[SWEET_A618_DATA_PAGES]) ? -5 : 0;
++    return a618_tree_check() ? -5 : 0;
+ }
+ 
+ static int a618_zap_load(persistent_gmu *, a618_cp_run &);
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -676,5 +676,6 @@
+ bsd/dev/sweet_gmu_dcvs.c		standard
+ bsd/dev/sweet_a618_pte.c		standard
+ bsd/dev/sweet_a618_address_space.c		standard
++bsd/dev/sweet_a618_render_pool.c		standard
+ bsd/dev/sweet_a618_cp_init.c		standard
+ bsd/dev/sweet_a618_pwrup.c		standard

@@ -641,7 +641,7 @@ int main(){
 (work/'test.cpp').write_text(model)
 common=['-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g','-I',str(src)]
 objects=[]
-for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_firmware','sweet_gpu_pte','sweet_a618_pte','sweet_a618_address_space','sweet_a618_cp_init','sweet_a618_pwrup'):
+for name in ('sweet_smmu_context','sweet_smmu_k6a','sweet_gmu_start','sweet_gpu_gmu','sweet_gmu_postboot','sweet_gmu_arc','sweet_hfi_codec','sweet_hfi_transport','sweet_gpu_hfi_table','sweet_hfi_config','sweet_hfi_perf','sweet_hfi_bw','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_firmware','sweet_gpu_pte','sweet_a618_pte','sweet_a618_address_space','sweet_a618_render_pool','sweet_a618_cp_init','sweet_a618_pwrup'):
     obj=work/(name+'.o');subprocess.run(['gcc','-std=c11',*common,'-c',str(src/(name+'.c')),'-o',str(obj)],check=True);objects.append(str(obj))
 subprocess.run(['g++','-std=c++17',*common,'-I',str(work),str(work/'test.cpp'),*objects,'-o',str(work/'test')],check=True)
 subprocess.run([str(work/'test')],check=True)

@@ -5,18 +5,32 @@
  */
 static struct {
     sweet_gpu_memory *memory;
+    sweet_gpu_memory *render_tables_memory;
+    sweet_gpu_render_memory *render_pool;
     sweet_gpu_table_page tables[3];
+    sweet_gpu_table_page render_tables[SWEET_A618_RENDER_TABLES];
     sweet_smmu_context context;
-    bool published, pinned;
+    bool published, pinned, render_ready;
     unsigned observations;
 } a618_mapping;
 static unsigned a618_mapping_attempted, a618_mapping_verify_attempted;
+static int a618_tree_check(void)
+{
+    auto &m=a618_mapping;auto &a=a618_preparation;
+    const uint64_t fill_pa=a.physical[SWEET_A618_DATA_PAGES];
+#ifdef KERNEL
+    return m.render_ready ?
+        sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
+            m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)) :
+        sweet_a618_address_space_check(m.tables,a.physical,fill_pa);
+#else
+    return sweet_a618_address_space_check(m.tables,a.physical,fill_pa);
+#endif
+}
 static int a618_pin_tables(void *opaque,uint64_t *root)
 {
     auto *s=static_cast<persistent_gmu *>(opaque);auto &m=a618_mapping;
-    if(!root || m.pinned || !m.published || stopped(s) ||
-        sweet_a618_address_space_check(m.tables,a618_preparation.physical,
-            a618_preparation.physical[SWEET_A618_DATA_PAGES]))return -1;
+    if(!root || m.pinned || !m.published || stopped(s) || a618_tree_check())return -1;
     m.pinned=true;*root=m.tables[0].pa;return 0;
 }
 static void a618_unpin_before_write(void *)
@@ -42,9 +56,37 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
     }
     if(sweet_a618_address_space_build(m.tables,a.physical,fill_pa) ||
         sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
+#ifdef KERNEL
+    int render_requested=0;
+    PE_parse_boot_argn("sweetcagpu",&render_requested,sizeof(render_requested));
+    if(render_requested==1 && fill){
+        m.render_pool=sweet_gpu_render_memory_create();
+        m.render_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_RENDER_TABLES);
+        if(!m.render_pool || !m.render_tables_memory){
+            sweet_gpu_render_memory_destroy_inactive(m.render_pool);
+            if(m.render_tables_memory)sweet_gpu_memory_destroy(m.render_tables_memory);
+            m.render_pool=nullptr;m.render_tables_memory=nullptr;
+            IOLog("SWEET CA: GPU pool unavailable; retaining CPU renderer\n");
+        }else{
+            for(unsigned i=0;i<SWEET_A618_RENDER_TABLES;i++){
+                void *cpu=nullptr;uint64_t pa=0;
+                if(sweet_gpu_memory_page(m.render_tables_memory,i,&cpu,&pa))return -5;
+                m.render_tables[i]={static_cast<uint64_t *>(cpu),pa};
+            }
+            if(sweet_a618_render_pool_attach(m.tables,m.render_tables,
+                sweet_gpu_render_memory_physical(m.render_pool)) ||
+                sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
+                m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)))return -5;
+            for(unsigned i=0;i<SWEET_A618_RENDER_TABLES;i++)
+                if(sweet_gpu_memory_clean(m.render_tables_memory,i))return -5;
+            m.render_ready=true;
+            IOLog("SWEET CA: pinned 128 MiB private GPU BO pool before SID0 install\n");
+        }
+    }
+#endif
     /* Fixed three-level tree: complete children before the parent root. */
     for(unsigned i=3;i;i--)if(sweet_gpu_memory_clean(m.memory,i-1))return -5;
-    if(complete(s) || sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
+    if(complete(s) || a618_tree_check())return -5;
     m.published=true;
     IOLog("SWEET A618 COLD MAP: tree root=%llx tables=3 data=%u SQE=%08x ring=%08x scratch=%08x pwrup=%08x; powerup contents still reserved\n",
         static_cast<unsigned long long>(m.tables[0].pa),a.pages,SWEET_A618_SQE_IOVA,SWEET_A618_RING_IOVA,
@@ -70,7 +112,7 @@ extern "C" int sweet_gpu_a618_mapping_verify(void)
         m.context.state!=SWEET_SMMU_CONTEXT_ACTIVE ||
         a618_prepare_guard(s))return -3;
     IOLog("SWEET A618 MAP: begin retained cold context check; no GPU command submission\n");
-    if(sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
+    if(a618_tree_check())return -5;
     a.gpu=ml_io_map(a618_register_base,a618_register_size);if(!a.gpu)return -2;
     for(unsigned i=0;i<a618_register_count;i++){
         if(a618_prepare_guard(s))return -3;

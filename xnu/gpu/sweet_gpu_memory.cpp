@@ -1,4 +1,5 @@
 #include "sweet_gpu_memory.h"
+#include "sweet_gpu_render_memory.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <kern/task.h>
@@ -119,4 +120,69 @@ int sweet_gpu_memory_clean(struct sweet_gpu_memory *m, size_t index)
     if (!m->nc) clean_dcache(va, GPU_PAGE, FALSE);
     __asm__ volatile ("dsb sy" ::: "memory");
     return 0;
+}
+
+struct sweet_gpu_render_memory {
+    IOBufferMemoryDescriptor *buffer;
+    void *cpu;
+    uint64_t physical[SWEET_A618_RENDER_PAGES];
+};
+
+sweet_gpu_render_memory *sweet_gpu_render_memory_create(void)
+{
+    if (page_size != 16384) return nullptr;
+    auto *m = static_cast<sweet_gpu_render_memory *>(IOMallocZero(sizeof(sweet_gpu_render_memory)));
+    if (!m) return nullptr;
+    m->buffer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+        kIODirectionInOut | kIOMemoryMapperNone | kIOMemoryKernelUserShared |
+            kIOMapWriteCombineCache,
+        SWEET_A618_RENDER_BYTES, page_size);
+    if (!m->buffer) { IOFree(m,sizeof(*m)); return nullptr; }
+    m->cpu = m->buffer->getBytesNoCopy();
+    if (!m->cpu || (reinterpret_cast<uintptr_t>(m->cpu) & (page_size-1))) goto bad;
+    /* A native 16 KiB backing page supplies four adjacent GPU leaves. Check
+     * the effective CPU mapping once per native page before assigning any IOVA. */
+    for (size_t i = 0; i < SWEET_A618_RENDER_PAGES; i += 4) {
+        IOByteCount length = 0;
+        const uint64_t pa = m->buffer->getPhysicalSegment(i*GPU_PAGE, &length,
+            kIOMemoryMapperNone);
+        if (!pa || (pa & (page_size-1)) || pa > GPU_PA_LIMIT-page_size ||
+            length < page_size ||
+            !nc_mapping_valid(static_cast<unsigned char *>(m->cpu)+i*GPU_PAGE, pa))
+            goto bad;
+        for (unsigned j = 0; j < 4; ++j)
+            m->physical[i+j] = pa+j*GPU_PAGE;
+    }
+    for (size_t i = 0; i < SWEET_A618_RENDER_PAGES; i += 4)
+        for (size_t j = 0; j < i; j += 4)
+            if (m->physical[i] == m->physical[j]) goto bad;
+    bzero(m->cpu,SWEET_A618_RENDER_BYTES);
+    return m;
+bad:
+    /* Never published to the SMMU; safe to discard this failed allocation. */
+    m->buffer->release();
+    IOFree(m,sizeof(*m));
+    return nullptr;
+}
+
+IOBufferMemoryDescriptor *sweet_gpu_render_memory_descriptor(sweet_gpu_render_memory *m)
+{
+    return m ? m->buffer : nullptr;
+}
+
+void sweet_gpu_render_memory_destroy_inactive(sweet_gpu_render_memory *m)
+{
+    if (!m) return;
+    if (m->buffer) m->buffer->release();
+    IOFree(m,sizeof(*m));
+}
+
+void *sweet_gpu_render_memory_cpu(sweet_gpu_render_memory *m)
+{
+    return m ? m->cpu : nullptr;
+}
+
+const uint64_t *sweet_gpu_render_memory_physical(sweet_gpu_render_memory *m)
+{
+    return m ? m->physical : nullptr;
 }

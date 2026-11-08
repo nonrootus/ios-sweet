@@ -1,4 +1,5 @@
 #include "sweet_a618_address_space.h"
+#include "sweet_a618_render_pool.h"
 #include "sweet_gpu_pte.h"
 #define PAGE_SIZE 4096u
 #define ENTRIES 512u
@@ -82,5 +83,20 @@ int sweet_a618_address_space_check(const struct sweet_gpu_table_page t[3],const 
     if(prepare(t,pa,fill_pa,leaves))return -1;
     for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
         if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
+    return 0;
+}
+
+int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page t[3],
+    const uint64_t pa[SWEET_A618_DATA_PAGES],uint64_t fill_pa,
+    const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
+    const uint64_t physical[SWEET_A618_RENDER_PAGES])
+{
+    uint64_t leaves[19];
+    if (prepare(t,pa,fill_pa,leaves) ||
+        sweet_a618_render_pool_check(t,extra,physical)) return -1;
+    for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++){
+        if(level==1 && i>=64 && i<64+SWEET_A618_RENDER_TABLES)continue;
+        if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
+    }
     return 0;
 }

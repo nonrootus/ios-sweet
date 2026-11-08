@@ -6,7 +6,11 @@
  */
 #include "sweet_gmu_memory.h"
 #include "sweet_gpu_memory.h"
+#include "sweet_gpu_render_memory.h"
 #include <IOKit/IOLib.h>
+#ifdef KERNEL
+#include <pexpert/pexpert.h>
+#endif
 extern "C" {
 #include <arm/machine_routines.h>
 /* Internal declaration is hidden from the exported IOKit header view. */
@@ -22,6 +26,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_dcvs.h"
 #include "../../../bsd/dev/sweet_a618_firmware.h"
 #include "../../../bsd/dev/sweet_a618_address_space.h"
+#include "../../../bsd/dev/sweet_a618_render_pool.h"
 #include "../../../bsd/dev/sweet_a618_cp_init.h"
 #include "../../../bsd/dev/sweet_a618_pwrup.h"
 #else
@@ -35,6 +40,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_dcvs.h"
 #include "sweet_a618_firmware.h"
 #include "sweet_a618_address_space.h"
+#include "sweet_a618_render_pool.h"
 #include "sweet_a618_cp_init.h"
 #include "sweet_a618_pwrup.h"
 #endif

@@ -153,9 +153,27 @@ static int a618_cp_roq_fence(persistent_gmu *s, const a618_cp_run &run, unsigned
     const uint32_t clock = a618_cp_read(run, 0xae); // RBBM_CLOCK_CNTL
     IOLog("SWEET A618 CP: ROQ fence DWORD=%05x first=%08x settled=%08x ctl=%08x status=%08x clock=%08x\n",
         reg, first, settled, control, status, clock);
-    if (control || status == UINT32_MAX || (status & 3u) ||
-        clock == UINT32_MAX || clock == 0xdeafbead) return -3;
+    if (control || status || clock == UINT32_MAX || clock == 0xdeafbead) return -3;
     return 0;
+}
+
+static int a618_cp_roq_snapshot(persistent_gmu *s, const a618_cp_run &run, unsigned delay_us)
+{
+    if (a618_cp_guard(s, run)) return -3;
+    uint32_t fence_range = 0;
+    if (post_read(s, A6XX_GMU_AHB_FENCE_RANGE_0, &fence_range)) return -2;
+    const uint32_t roq2 = a618_cp_read(run, 0x8c2);
+    const uint32_t roq1 = a618_cp_read(run, 0x8c1);
+    const uint32_t pool = a618_cp_read(run, 0x8c3);
+    const uint32_t fifo = a618_cp_read(run, 0x9e00);
+    IOLog("SWEET A618 CP: ROQ snapshot delay_us=%u roq2=%08x roq1=%08x pool=%08x fifo=%08x range=%08x\n",
+        delay_us, roq2, roq1, pool, fifo, fence_range);
+    const uint32_t values[] = {roq2, roq1, pool, fifo};
+    for (uint32_t value : values) {
+        if (value == UINT32_MAX || value == 0xdeafbead) return -2;
+    }
+    if (fence_range != 0x80a008a0u) return -3;
+    return a618_cp_guard(s, run);
 }
 
 static int a618_cp_roq(persistent_gmu *s, a618_cp_run &run)
@@ -164,6 +182,8 @@ static int a618_cp_roq(persistent_gmu *s, a618_cp_run &run)
         {0x8c2,0x010000c0}, {0x8c1,0x8040362c}, {0x8c3,128}, {0x9e00,0x00180000},
     };
     int rc = a618_cp_roq_fence(s, run, 0, 0, 0);
+    if (rc) return rc;
+    rc = a618_cp_roq_snapshot(s, run, 0);
     if (rc) return rc;
     bool diagnose = false;
     for (const auto &item : settings) {
@@ -184,7 +204,16 @@ static int a618_cp_roq(persistent_gmu *s, a618_cp_run &run)
         if (settled != first || (settled & ~item.value)) return -5;
         diagnose = true;
     }
-    return diagnose ? -5 : 0;
+    if (!diagnose) return 0;
+
+    // Take a final sample with the same vote and without repeating any writes.
+    // The earlier mismatch still blocks CP_AHB and SQE even if it settles.
+    constexpr unsigned sample_delay_us = 10000;
+    IODelay(sample_delay_us);
+    rc = a618_cp_roq_fence(s, run, 0, 0, 0);
+    if (rc) return rc;
+    rc = a618_cp_roq_snapshot(s, run, sample_delay_us);
+    return rc ? rc : -5;
 }
 
 static int a618_cp_configure(persistent_gmu *s, a618_cp_run &run)

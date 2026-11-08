@@ -20,6 +20,14 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0164 A618 ROQ baseline and delayed sample
+
+0163 observed stable zero for ROQ2 with exact adjacent readbacks
+and a clear AHB fence. Sample the four registers before the stock
+group and 10ms after a diagnostic group, preserving the refusal to
+start SQE on an initial mismatch. The expected fence range and zero
+fence status are required. Host and target-header checks passed.
+
 ## 0163 A618 ROQ readback diagnostics
 
 0162 passed the GMEM end comparison and observed zero after the stock

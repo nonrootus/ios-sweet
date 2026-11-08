@@ -26,6 +26,10 @@ on:
         description: Build the ARM64 iOS renderer libraries instead of XNU
         type: boolean
         default: false
+      wrapper_only:
+        description: Build only the ARM64 iOS backboardd launcher
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -45,7 +49,7 @@ env:
 
 jobs:
   build:
-    if: ${{ !inputs.renderer_only }}
+    if: ${{ !inputs.renderer_only && !inputs.wrapper_only }}
     # Host architecture is independent of the SWEET arm64 kernel target.
     runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
@@ -275,7 +279,7 @@ jobs:
           if-no-files-found: warn
 
   renderer:
-    if: ${{ inputs.renderer_only }}
+    if: ${{ inputs.renderer_only && !inputs.wrapper_only }}
     runs-on: macos-15-intel
     timeout-minutes: 40
     permissions:
@@ -301,3 +305,21 @@ jobs:
             ${{ runner.temp }}/sweet-renderer/Mesa-license.rst
             ${{ runner.temp }}/sweet-renderer/SOURCES.txt
             ${{ runner.temp }}/sweet-renderer/SHA256SUMS
+
+  wrapper:
+    if: ${{ inputs.wrapper_only }}
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build signed ARM64 iOS backboardd launcher
+        run: bash tools/build-sweet-backboard-wrapper.sh "$RUNNER_TEMP/sweet-wrapper"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweet-ios16-backboard-wrapper-arm64
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/sweet-wrapper/usr/libexec/backboardd
+            ${{ runner.temp }}/sweet-wrapper/SHA256SUMS

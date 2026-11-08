@@ -22,6 +22,10 @@ on:
         options:
           - macos-15
           - macos-15-intel
+      renderer_only:
+        description: Build the ARM64 iOS renderer libraries instead of XNU
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -41,6 +45,7 @@ env:
 
 jobs:
   build:
+    if: ${{ !inputs.renderer_only }}
     # Host architecture is independent of the SWEET arm64 kernel target.
     runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
@@ -266,3 +271,31 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
+
+  renderer:
+    if: ${{ inputs.renderer_only }}
+    runs-on: macos-15-intel
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Mesa build tools
+        run: brew install meson ninja bison flex
+      - name: Build signed ARM64 iOS libraries
+        run: |
+          export PATH="$(brew --prefix flex)/bin:$PATH"
+          bash tools/build-sweet-renderer.sh "$RUNNER_TEMP/sweet-renderer"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweet-ios16-renderer-arm64
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/sweet-renderer/sweet/lib/*.dylib
+            ${{ runner.temp }}/sweet-renderer/CREDITS.md
+            ${{ runner.temp }}/sweet-renderer/Mesa-license.rst
+            ${{ runner.temp }}/sweet-renderer/SOURCES.txt
+            ${{ runner.temp }}/sweet-renderer/SHA256SUMS

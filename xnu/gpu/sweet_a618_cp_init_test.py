@@ -31,7 +31,7 @@ struct adreno_device {struct {uint64_t gpuaddr;} pwrup_reglist;};
 /* Sizes below only appear in a compile-time disabled stock branch. */
 static unsigned a6xx_ifpc_pwrup_reglist[1],a6xx_pwrup_reglist[1];
 '''
-for name in ('CP_TYPE7_PKT','CP_ME_INIT'):
+for name in ('CP_TYPE7_PKT','CP_ME_INIT','CP_WHERE_AM_I'):
     program+=re.search(r'^#define\s+'+name+r'\s+[^\n]+',pm4,re.M)[0]+'\n'
 program+=function(pm4,'pm4_calc_odd_parity_bit')+function(pm4,'cp_type7_packet')
 program+=code[code.index('#define CP_INIT_MAX_CONTEXT'):code.index('static void _set_ordinals')]
@@ -57,6 +57,24 @@ int main(void){
   for(unsigned j=0;j<14;j++)assert(out[j]==0xa5a5a5a5);
  }
  assert(sweet_a618_cp_init_encode(0,12,0x1000)==-1);
+ uint32_t first[17],stock[15];
+ for(unsigned page=1;page<(1u<<20);page++){
+  uint64_t scratch=(uint64_t)page<<12;
+  dev.pwrup_reglist.gpuaddr=(scratch==0x40021000)?0x1000:0x40021000;
+  stock[0]=cp_type7_packet(CP_ME_INIT,11);_set_ordinals(&dev,stock+1,11);
+  stock[12]=cp_type7_packet(CP_WHERE_AM_I,2);stock[13]=lower_32_bits(scratch);stock[14]=upper_32_bits(scratch);
+  memset(first,0xa5,sizeof(first));
+  assert(!sweet_a618_cp_boot_encode(first,17,dev.pwrup_reglist.gpuaddr,scratch));
+  assert(!memcmp(first,stock,sizeof(stock)) && first[15]==0xa5a5a5a5 && first[16]==0xa5a5a5a5);
+ }
+ memset(first,0xa5,sizeof(first));
+ assert(sweet_a618_cp_boot_encode(first,17,0x1000,0x1000)==-1);
+ assert(sweet_a618_cp_boot_encode(first,14,0x1000,0x2000)==-1);
+ assert(sweet_a618_cp_boot_encode(first,17,0x1000,0x2001)==-1);
+ assert(sweet_a618_cp_boot_encode(first,17,0x1000,UINT64_C(0x100000000))==-1);
+ assert(sweet_a618_cp_boot_encode(first,17,0,0x2000)==-1);
+ for(unsigned j=0;j<17;j++)assert(first[j]==0xa5a5a5a5);
+ puts("PASS unlinked cold CP submission:15 stock DWORDs incl WHERE_AM_I and exact RB0 shadow address");
  puts("PASS unlinked CP_ME_INIT: all1048575 mapped-page address candidates match unchanged stock12words; parity/profile, bounds/canaries and unchanged output on failure; no mapping/submission proof");
 }
 '''

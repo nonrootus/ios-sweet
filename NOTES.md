@@ -1,6 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## A618 offline CP startup inputs
+
+The first stock submission has 15 DWORDs. CP_ME_INIT uses the powerup
+list, followed by CP_WHERE_AM_I to write the RB0 shadow read pointer.
+Packet generation matches stock across all nonzero 32-bit page addresses.
+The generated A618 protection profile combines 28 stock groups with two
+from the FDT SMMU range. It matches the stock constructor and preserves
+the final two slots. Both inputs are outside the compiled 0157 kernel.
+
 ## 0157 dedicated A618 power vote
 
 Opt-in diagnostic after the cold mapping and DCVS checks. Requests the

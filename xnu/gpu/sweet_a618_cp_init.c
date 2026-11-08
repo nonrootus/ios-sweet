@@ -13,3 +13,17 @@ int sweet_a618_cp_init_encode(uint32_t *out,size_t words,uint64_t reglist_iova)
     for(unsigned i=0;i<SWEET_A618_CP_INIT_WORDS;i++)out[i]=packet[i];
     return 0;
 }
+
+int sweet_a618_cp_boot_encode(uint32_t *out, size_t words, uint64_t reglist_iova,
+    uint64_t scratch_iova)
+{
+    if (words < SWEET_A618_CP_BOOT_WORDS || !scratch_iova || (scratch_iova & 4095) ||
+        scratch_iova > UINT64_C(0xfffff000) || scratch_iova == reglist_iova) return -1;
+    if (sweet_a618_cp_init_encode(out, words, reglist_iova)) return -1;
+    /* cp_type7_packet(CP_WHERE_AM_I=0x62, 2), followed by the RB0 shadow IOVA.
+     * For both count and opcode, the number of one bits is already odd. */
+    out[12] = 0x70620002u;
+    out[13] = (uint32_t)scratch_iova;
+    out[14] = 0;
+    return 0;
+}

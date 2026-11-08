@@ -1,8 +1,10 @@
 /* Only the signed stock A618 ZAP layout. Qualcomm authenticates the exact
  * bundle bytes. This loader is reached with GPU OOB held and SQE halted. */
 #ifdef KERNEL
+#include <vm/memory_types.h>
+
 extern "C" int sweet_a618_zap_low_check(void);
-extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, uint32_t);
 extern "C" void ml_io_unmap(vm_offset_t, vm_size_t);
 extern "C" uint64_t kvtophys(vm_offset_t);
 
@@ -83,7 +85,8 @@ static int a618_zap_load(persistent_gmu *s, a618_cp_run &run)
         reply.status, static_cast<unsigned long long>(reply.available));
     if (reply.status || reply.available || !zap_cold(s, run) || sweet_a618_zap_low_check()) return -6;
 
-    vm_offset_t va = ml_io_map_wcomb(zap_pa, zap_map);
+    /* ml_io_unmap releases an allocation from kernel_map. */
+    vm_offset_t va = ml_io_map_unmappable(zap_pa, zap_map, VM_WIMG_WCOMB);
     if (!va) return -5;
     bool ok = kvtophys(va) == zap_pa;
     if (ok) {

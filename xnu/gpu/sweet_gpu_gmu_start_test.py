@@ -271,6 +271,28 @@ model=model.replace('    assert(smmu[0x8000/4]==0);',r"""    unsigned off=(unsig
     assert(smmu[(off>=0x9000?0x9000:0x8000)/4]==0);""",1)
 model+=r'''
 static int run(){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu),cold_map_enabled?1u:0u);}
+static unsigned pas_mode, pas_calls, pas_writes;
+static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target){
+ const uint32_t ids[]={0x02000201u,0x02000202u,0x02000205u,0x02000206u};
+ assert(cp_started && gpu_oob_held && gpu_regs[0x806]==15 && gpu_regs[0x807]==15);
+ if(!pas_calls)pas_writes=writes;
+ assert(writes==pas_writes);
+ const unsigned call=pas_calls++;
+ if(!call){
+  assert(flags==0xc0000000u && target==0x82000601u);
+  if(pas_mode==1)return {-1,0};
+  if(pas_mode==2)return {1,0};
+  if(pas_mode==6)return {-12,0};
+  return {0,1};
+ }
+ if(pas_mode==1 && call==1){assert(flags==0x80000000u && target==0x82000601u);return {0,1};}
+ const unsigned index=call-(pas_mode==1?2u:1u);
+ assert(index<4 && target==ids[index] && flags==(pas_mode==1?0u:0x40000000u));
+ if(pas_mode==3 && index==1)return {0,0};
+ if(pas_mode==4)gpu_regs[0xf400]=0;
+ if(pas_mode==7)return {0,2};
+ return {0,1};
+}
 static void once(){unsigned w=writes,m=maps,c=creates;assert(run()==-1);assert(w==writes&&m==maps&&c==creates);}
 static void retained(){assert(live==1&&allocated&&pins==1&&!unpins&&!destroys&&allocated->refs==1);assert(probe.context.retained);once();}
 int main(){
@@ -558,6 +580,27 @@ int main(){
   unsigned prior=writes;assert(sweet_gpu_a618_oob_probe(1)==-1 && writes==prior);retained();
  }
  puts("PASS0165 ROQ requires exact delayed group and rejects persistent zero, wrong neighbour and fence drop");
+ for(pas_mode=0;pas_mode<=8;pas_mode++){
+  pas_calls=pas_writes=0;
+  reset();cold_map_enabled=true;assert(!run());
+  post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_a618_mapping_verify());
+  gpu_regs[0xf400]=1;
+  assert(sweet_gpu_a618_oob_probe(0,1)==-1 && !pas_calls);
+  if(pas_mode==5)cp_mode=2;
+  const int rc=sweet_gpu_a618_oob_probe(1,pas_mode==8?0u:1u);
+  assert((rc==0)==(pas_mode!=5));
+  const unsigned expected[]={5,6,1,5,2,0,1,2,0};
+  assert(pas_calls==expected[pas_mode] && (!pas_calls || writes==pas_writes));
+  const int results[]={0,0,-4,-5,-3,0,-5,-5,0};
+  auto marker=std::string("SWEET A618 PAS: entry rc=")+std::to_string(results[pas_mode]);
+  assert((messages.find(marker)!=std::string::npos)==(pas_mode!=5 && pas_mode!=8));
+  assert((messages.find("SWEET A618 PAS: INFO complete")!=std::string::npos)==(pas_mode<=1 || pas_mode==3));
+  assert(gpu_oob_held==(pas_mode!=5));
+  retained();
+ }
+ puts("PASS0166 PAS availability: explicit opt-in after CP success, exact INFO IDs, 32-bit fallback, and fail-closed replies");
  puts("PASS0159 first CP model: A615-family GX status, CX deassert and stuck ACK, stock setup, packet/shadow, TSB refusal, raw IRQ/CP and SMMU/fence faults, timeout and retained ownership");
  for(unsigned mode=1;mode<=6;mode++){
   reset();cold_map_enabled=true;assert(!run());

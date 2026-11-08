@@ -177,6 +177,7 @@ sweet_gpu_probe(void)
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
     int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0,requested_gpu_cp=0;
+    int requested_pas_probe = 0;
     vm_offset_t gcc;
     uint32_t state;
 
@@ -189,6 +190,10 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
     PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
+    PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
+    if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+        printf("SWEET A618 PAS: requires sweetgpupasprobe=1 sweetgpucp=1\n");return;
+    }
     if(requested_gpu_cp && (requested_gpu_cp!=1 || requested_gpu_oob!=1)) {
         printf("SWEET A618 CP: requires cp=1 oob=1\n");return;
     }
@@ -455,8 +460,8 @@ sweet_gpu_probe(void)
                                                                         int mapping_rc=sweet_gpu_a618_mapping_verify();
                                                                         printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
                                                                         if(!mapping_rc && requested_gpu_oob==1) {
-                                                                            extern int sweet_gpu_a618_oob_probe(unsigned);
-                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp));
+                                                                            extern int sweet_gpu_a618_oob_probe(unsigned, unsigned);
+                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp,(unsigned)requested_pas_probe));
                                                                         }
                                                                     } else {
                                                                         extern int sweet_gpu_a618_prepare(void);

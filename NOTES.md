@@ -20,6 +20,15 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0166 A618 PAS availability and TRUST baseline
+
+0165 completed its first command and GPU write to memory on sweet_k6a.
+After the same successful test, an explicit `sweetgpupasprobe=1` runs the
+stock Qualcomm INFO availability queries for signed firmware loader
+commands. Record the observed convention and TRUST before and after
+the queries. The probe does not authenticate or load firmware. ARM64
+and composed host checks passed; hardware availability remains pending.
+
 ## 0165 Gate first GPU command on settled ROQ group
 
 The fresh 0164 capture showed ROQ2 initially read zero, then the exact

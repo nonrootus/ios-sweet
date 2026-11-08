@@ -1,0 +1,147 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -177,6 +177,7 @@
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
+     int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0,requested_gpu_cp=0;
++    int requested_pas_probe = 0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+@@ -189,6 +190,10 @@
+     PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
+     PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
+     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
++    PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
++    if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
++        printf("SWEET A618 PAS: requires sweetgpupasprobe=1 sweetgpucp=1\n");return;
++    }
+     if(requested_gpu_cp && (requested_gpu_cp!=1 || requested_gpu_oob!=1)) {
+         printf("SWEET A618 CP: requires cp=1 oob=1\n");return;
+     }
+@@ -455,8 +460,8 @@
+                                                                         int mapping_rc=sweet_gpu_a618_mapping_verify();
+                                                                         printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
+                                                                         if(!mapping_rc && requested_gpu_oob==1) {
+-                                                                            extern int sweet_gpu_a618_oob_probe(unsigned);
+-                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp));
++                                                                            extern int sweet_gpu_a618_oob_probe(unsigned, unsigned);
++                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp,(unsigned)requested_pas_probe));
+                                                                         }
+                                                                     } else {
+                                                                         extern int sweet_gpu_a618_prepare(void);
+--- a/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -26,10 +26,12 @@
+ #include "sweet_a618_protect_profile.h"
+ #endif
+ #include "sweet_a618_cp_run.inc"
++#include "sweet_a618_pas_probe.inc"
+ 
+-extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp)
++extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0)
+ {
+-    if (first_cp > 1 || !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
++    if (first_cp > 1 || pas_probe > first_cp ||
++        !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
+     auto *s = &probe;
+     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
+         return -3;
+@@ -81,6 +83,8 @@
+         rc = a618_cp_first(s,run);
+         IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
+             rc,run.writes,run.sqe_attempted,run.rptr,run.wptr,run.shadow_rptr,run.busy,run.fence,run.waited_us);
++        if (!rc && pas_probe)
++            IOLog("SWEET A618 PAS: entry rc=%d\n", a618_pas_probe(s, run));
+     }
+     /* Even an error return from a store could have reached the GMU. Release
+      * only our vote, and only if the same session and MMIO domain are healthy. */
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_pas_probe.inc
+@@ -0,0 +1,86 @@
++/* Xiaomi sweet_k6a 10c33d40, drivers/soc/qcom/scm.c. Only INFO
++ * IS_CALL_AVAIL is invoked here. The queried PIL IDs are arguments. */
++struct a618_scm_reply {
++    int32_t status;
++    uint64_t available;
++};
++
++static constexpr uint32_t a618_scm_info = 0x02000601u;
++static constexpr uint32_t a618_smc_fast = 0x80000000u;
++static constexpr uint32_t a618_smc_64 = 0x40000000u;
++
++#ifdef KERNEL
++static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target)
++{
++    register uint64_t x0 __asm__("x0") = a618_scm_info | flags;
++    register uint64_t x1 __asm__("x1") = 1; // SCM_ARGS(1, SCM_VAL)
++    register uint64_t x2 __asm__("x2") = target;
++    register uint64_t x3 __asm__("x3") = 0;
++    register uint64_t x4 __asm__("x4") = 0;
++    register uint64_t x5 __asm__("x5") = 0;
++    register uint64_t x6 __asm__("x6") = 0;
++    // SCM_INTERRUPTED resumes the same read with the returned registers.
++    // A still-interrupted result stops the probe without issuing another ID.
++    for (unsigned entry = 0; entry < 16; ++entry) {
++        __asm__ volatile("smc #0"
++            : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
++            : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++        if (static_cast<int32_t>(x0) != 1) break;
++    }
++    return {static_cast<int32_t>(x0), flags & a618_smc_64 ? x1 : static_cast<uint32_t>(x1)};
++}
++#else
++static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target);
++#endif
++
++static int a618_pas_guard(persistent_gmu *s, const a618_cp_run &run, uint32_t &trust)
++{
++    constexpr uint32_t busy_off = 0x23b0cu*4-0x6a000u;
++    uint32_t fence = 0, busy = 0;
++    if (!run.sqe_attempted || !run.shadow || a618_cp_guard(s, run) ||
++        post_read(s, a618_fence_status, &fence) || fence ||
++        post_read(s, busy_off, &busy) || busy == UINT32_MAX || (busy & (1u << 23)) ||
++        a618_cp_read(run, 0x806) != SWEET_A618_CP_BOOT_WORDS ||
++        a618_cp_read(run, 0x807) != SWEET_A618_CP_BOOT_WORDS ||
++        complete(s) || *run.shadow != SWEET_A618_CP_BOOT_WORDS) return -3;
++    trust = a618_cp_read(run, 0xf400); // RBBM_SECVID_TRUST_CNTL, observe only.
++    return trust <= 1 ? 0 : -3;
++}
++
++static int a618_pas_probe(persistent_gmu *s, const a618_cp_run &run)
++{
++    uint32_t baseline = UINT32_MAX, trust = UINT32_MAX;
++    if (a618_pas_guard(s, run, baseline)) return -3;
++    IOLog("SWEET A618 PAS: INFO only; post-CP TRUST=%08x\n", baseline);
++    constexpr uint32_t self = a618_scm_info | a618_smc_fast;
++    uint32_t convention = a618_smc_64;
++    a618_scm_reply reply = {};
++    for (;;) {
++        reply = a618_scm_info_query(convention | a618_smc_fast, self);
++        IOLog("SWEET A618 PAS: self bits=%u status=%d available=%llx\n",
++            convention ? 64u : 32u, reply.status, static_cast<unsigned long long>(reply.available));
++        if (a618_pas_guard(s, run, trust) || trust != baseline) return -3;
++        if (!reply.status && reply.available == 1) break;
++        if (reply.status == 1) return -4;
++        const bool unsupported = reply.status == -1 || reply.status == -4 ||
++            (!reply.status && !reply.available);
++        if (!convention || !unsupported) return -5;
++        convention = 0; // The stock self-query tries the 32-bit convention next.
++    }
++
++    static constexpr uint32_t pil_ids[] = {0x02000201u, 0x02000202u, 0x02000205u, 0x02000206u};
++    unsigned available = 0;
++    for (uint32_t target : pil_ids) {
++        reply = a618_scm_info_query(convention, target);
++        IOLog("SWEET A618 PAS: query target=%08x status=%d available=%llx\n",
++            target, reply.status, static_cast<unsigned long long>(reply.available));
++        if (a618_pas_guard(s, run, trust) || trust != baseline) return -3;
++        if (reply.status == 1) return -4;
++        if (reply.status || reply.available > 1) return -5;
++        available += static_cast<unsigned>(reply.available);
++    }
++    IOLog("SWEET A618 PAS: INFO complete bits=%u available=%u/%u TRUST=%08x/%08x\n",
++        convention ? 64u : 32u, available, static_cast<unsigned>(sizeof(pil_ids)/sizeof(pil_ids[0])),
++        baseline, trust);
++    return available == sizeof(pil_ids)/sizeof(pil_ids[0]) ? 0 : -5;
++}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0165 against exact published0149 Git bytes before a full build.
+"""Check0150-0166 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -77,6 +77,11 @@ PATCHES += (('xnu/patches/0162-sweet-a618-gmem-limit-readback.patch', {'iokit/Ke
 PATCHES += (('xnu/patches/0163-sweet-a618-roq-readback.patch', {'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
 PATCHES += (('xnu/patches/0164-sweet-a618-roq-baseline.patch', {'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
 PATCHES += (('xnu/patches/0165-sweet-a618-roq-settle.patch', {'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
+PAS_TARGET = 'iokit/Kernel/arm/sweet_a618_pas_probe.inc'
+NEW_TARGETS.add(PAS_TARGET)
+TARGETS[PAS_TARGET] = 'xnu/gpu/sweet_a618_pas_probe.inc'
+PATCHES += (('xnu/patches/0166-sweet-a618-pas-info-probe.patch', {
+    PAS_TARGET, OOB_TARGET, 'bsd/dev/sweet_gpu_probe.c'}),)
 
 
 def main():
@@ -141,7 +146,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0165 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0166 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

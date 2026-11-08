@@ -37,7 +37,7 @@
  		}
  		if (src != 0 && bpe == 4) {
 +			// One known full-screen BGRA layer is eligible for the GPU span.
-+			const bool candidate = layer == 0 && s->pixelFormat == SWEET_FB_FORMAT_BGRA &&
++			const bool candidate = mask == 1 && layer == 0 && s->pixelFormat == SWEET_FB_FORMAT_BGRA &&
 +			    s->width == 1125 && s->height == 2436 && s->bytesPerRow == 4608 &&
 +			    dx == 0 && dy == 0 && sx == 22 && sy == 18 && w == 1080 && h == 2400 &&
 +			    fWidth == 1080 && fHeight == 2400 && fRowBytes == 4320;
@@ -152,7 +152,7 @@
  }
 --- /dev/null
 +++ b/iokit/Kernel/arm/sweet_a618_present.inc
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,98 @@
 +/* First bridge to AppleCLCD. GPU addresses are fixed inside the retained
 + * private Normal-NC fill page. The panel and IOSurface are CPU addresses. */
 +static constexpr unsigned a618_present_words = 256;
@@ -211,6 +211,8 @@
 +    constexpr uint32_t base = SWEET_A618_FILL_IOVA;
 +    constexpr uint32_t fence = base + a618_present_fence * 4;
 +    const uint32_t packet[] = {
++        a618_pkt7(0x46,1), 0x31, // A6xx CACHE_INVALIDATE after reusing the fill page
++        a618_pkt7(0x26,0),
 +        a618_pkt7(0x75,5), a618_present_words, // CP_MEMCPY: DWORD count, source, destination
 +        base + a618_present_source * 4, 0, base + a618_present_destination * 4, 0,
 +        a618_pkt7(0x26,0), // CP_WAIT_FOR_IDLE

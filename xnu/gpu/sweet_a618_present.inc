@@ -56,6 +56,8 @@ extern "C" bool sweet_gpu_present_span(const void *source, void *destination, si
     constexpr uint32_t base = SWEET_A618_FILL_IOVA;
     constexpr uint32_t fence = base + a618_present_fence * 4;
     const uint32_t packet[] = {
+        a618_pkt7(0x46,1), 0x31, // A6xx CACHE_INVALIDATE after reusing the fill page
+        a618_pkt7(0x26,0),
         a618_pkt7(0x75,5), a618_present_words, // CP_MEMCPY: DWORD count, source, destination
         base + a618_present_source * 4, 0, base + a618_present_destination * 4, 0,
         a618_pkt7(0x26,0), // CP_WAIT_FOR_IDLE

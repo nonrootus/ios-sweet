@@ -194,8 +194,9 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
     PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
     PE_parse_boot_argn("sweetgpufill", &requested_fill, sizeof(requested_fill));
-    if (requested_fill && (requested_fill != 1 || requested_pas_probe != 1 || requested_gpu_cp != 1)) {
-        printf("SWEET A618 FILL: requires fill=1 pasprobe=1 cp=1\n");
+    if (requested_fill && ((requested_fill != 1 && requested_fill != 2) ||
+        requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+        printf("SWEET A618 FILL: requires fill=1 or 2, pasprobe=1 and cp=1\n");
         return;
     }
     if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
@@ -454,7 +455,7 @@ sweet_gpu_probe(void)
                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
                                                 else {
                                                     int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,
-                                                        (unsigned)requested_mapping,(unsigned)requested_fill);
+                                                        (unsigned)requested_mapping,requested_fill != 0);
                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
                                                     if(!start_rc && requested_hfi==1) {
                                                         extern int sweet_gpu_gmu_hfi_start(void);

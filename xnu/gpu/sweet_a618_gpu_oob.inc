@@ -36,10 +36,11 @@ static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value
 #include "sweet_a618_pas_probe.inc"
 #include "sweet_a618_zap_load.inc"
 #include "sweet_a618_fill.inc"
+#include "sweet_a618_present.inc"
 
 extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
 {
-    if (first_cp > 1 || pas_probe > first_cp || fill > pas_probe ||
+    if (first_cp > 1 || pas_probe > first_cp || fill > 2 || (fill && !pas_probe) ||
         !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
     auto *s = &probe;
     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
@@ -88,6 +89,7 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
     }
 
     a618_cp_run run = {};
+    unsigned completed_tail = 0;
     if (first_cp && !rc && !cleanup && acked && ack_cleared) {
         rc = a618_cp_first(s,run,fill != 0);
         IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
@@ -96,7 +98,7 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
             const int pas_rc = a618_pas_probe(s, run);
             IOLog("SWEET A618 PAS: entry rc=%d\n", pas_rc);
             if (fill) {
-                rc = pas_rc ? pas_rc : a618_fill_first(s, run);
+                rc = pas_rc ? pas_rc : a618_fill_first(s, run, &completed_tail);
                 IOLog("SWEET A618 FILL: result rc=%d\n", rc);
             }
         }
@@ -119,5 +121,6 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
+    if (!rc && fill == 2) a618_present_arm(run, completed_tail);
     return rc;
 }

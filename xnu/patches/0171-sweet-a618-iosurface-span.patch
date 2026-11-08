@@ -1,0 +1,251 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -194,8 +194,9 @@
+     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
+     PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
+     PE_parse_boot_argn("sweetgpufill", &requested_fill, sizeof(requested_fill));
+-    if (requested_fill && (requested_fill != 1 || requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+-        printf("SWEET A618 FILL: requires fill=1 pasprobe=1 cp=1\n");
++    if (requested_fill && ((requested_fill != 1 && requested_fill != 2) ||
++        requested_pas_probe != 1 || requested_gpu_cp != 1)) {
++        printf("SWEET A618 FILL: requires fill=1 or 2, pasprobe=1 and cp=1\n");
+         return;
+     }
+     if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+@@ -454,7 +455,7 @@
+                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
+                                                 else {
+                                                     int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,
+-                                                        (unsigned)requested_mapping,(unsigned)requested_fill);
++                                                        (unsigned)requested_mapping,requested_fill != 0);
+                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
+                                                     if(!start_rc && requested_hfi==1) {
+                                                         extern int sweet_gpu_gmu_hfi_start(void);
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,8 @@
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+ 
++extern "C" bool sweet_gpu_present_span(const void *, void *, size_t);
++
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+ 	kSweetFBSwapBegin               = 4,
+@@ -391,10 +393,26 @@
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			// One known full-screen BGRA layer is eligible for the GPU span.
++			const bool candidate = layer == 0 && s->pixelFormat == SWEET_FB_FORMAT_BGRA &&
++			    s->width == 1125 && s->height == 2436 && s->bytesPerRow == 4608 &&
++			    dx == 0 && dy == 0 && sx == 22 && sy == 18 && w == 1080 && h == 2400 &&
++			    fWidth == 1080 && fHeight == 2400 && fRowBytes == 4320;
++			const size_t row_bytes = (size_t)w * 4;
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4);
++				auto *dst = (uint8_t *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
++				const auto *row = (const uint8_t *)(src + s->offset +
++				    (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4);
++				constexpr size_t span = 1024;
++				constexpr size_t center = (4320 - span) / 2;
++				if (candidate && y == h / 2 && sweet_gpu_present_span(row + center, dst + center, span)) {
++					memcpy(dst, row, center);
++					memcpy(dst + center + span, row + center + span, row_bytes - center - span);
++					IOLog("SWEET FB: GPU span committed swap=%u layer=%u bytes=%zu\n",
++					    get32(rec, 0x50), layer, span);
++				} else {
++					memcpy(dst, row, row_bytes);
++				}
+ 			}
+ 		}
+ 		s->release();
+--- a/iokit/Kernel/arm/sweet_a618_fill.inc
++++ b/iokit/Kernel/arm/sweet_a618_fill.inc
+@@ -20,7 +20,8 @@
+ }
+ 
+ static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
+-    const char *phase, const uint32_t *packet, unsigned count, unsigned &tail)
++    const char *phase, const uint32_t *packet, unsigned count, unsigned &tail,
++    unsigned timeout_us = 2000000)
+ {
+     if (tail >= 1024 || count + 3 > 1024 - tail) return -5;
+     if (a618_cp_guard(s, run)) {
+@@ -52,7 +53,7 @@
+     if (complete(s)) return -3;
+     IOLog("SWEET A618 RING: %s WPTR written=%u\n", phase, end);
+     constexpr uint32_t busy_off = 0x23b0cu*4-0x6a000u;
+-    for (unsigned waited = 0; waited <= 2000000; waited += 1000) {
++    for (unsigned waited = 0; waited <= timeout_us; waited += 1000) {
+         if (a618_cp_guard(s, run)) {
+             IOLog("SWEET A618 RING: %s polling guard failed at %u us\n", phase, waited);
+             return -3;
+@@ -81,15 +82,15 @@
+             tail = end;
+             return 0;
+         }
+-        if (waited == 2000000)
++        if (waited == timeout_us)
+             IOLog("SWEET A618 RING: %s timeout RPTR=%u WPTR=%u shadow=%u busy=%08x\n",
+                 phase, rptr, wptr, shadow, busy);
+-        if (waited != 2000000) IODelay(1000);
++        if (waited != timeout_us) IODelay(1000);
+     }
+     return -4;
+ }
+ 
+-static int a618_fill_first(persistent_gmu *s, a618_cp_run &run)
++static int a618_fill_first(persistent_gmu *s, a618_cp_run &run, unsigned *completed_tail = nullptr)
+ {
+     constexpr uint32_t sentinel = 0xa5a5a5a5, pixel = 0x42424242;
+     constexpr uint32_t color_fence = 0x13579bdf, cache_fence = 0x2468ace0;
+@@ -153,5 +154,7 @@
+     }
+     IOLog("SWEET A618 FILL: pixels=%u/256 guards_changed=%u fences=%08x/%08x\n",
+         matches, guards, color, cache);
+-    return matches == pixels && !guards && color == color_fence && cache == cache_fence ? 0 : -5;
++    if (matches != pixels || guards || color != color_fence || cache != cache_fence) return -5;
++    if (completed_tail) *completed_tail = tail;
++    return 0;
+ }
+--- a/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -36,10 +36,11 @@
+ #include "sweet_a618_pas_probe.inc"
+ #include "sweet_a618_zap_load.inc"
+ #include "sweet_a618_fill.inc"
++#include "sweet_a618_present.inc"
+ 
+ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
+ {
+-    if (first_cp > 1 || pas_probe > first_cp || fill > pas_probe ||
++    if (first_cp > 1 || pas_probe > first_cp || fill > 2 || (fill && !pas_probe) ||
+         !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
+     auto *s = &probe;
+     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
+@@ -88,6 +89,7 @@
+     }
+ 
+     a618_cp_run run = {};
++    unsigned completed_tail = 0;
+     if (first_cp && !rc && !cleanup && acked && ack_cleared) {
+         rc = a618_cp_first(s,run,fill != 0);
+         IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
+@@ -96,7 +98,7 @@
+             const int pas_rc = a618_pas_probe(s, run);
+             IOLog("SWEET A618 PAS: entry rc=%d\n", pas_rc);
+             if (fill) {
+-                rc = pas_rc ? pas_rc : a618_fill_first(s, run);
++                rc = pas_rc ? pas_rc : a618_fill_first(s, run, &completed_tail);
+                 IOLog("SWEET A618 FILL: result rc=%d\n", rc);
+             }
+         }
+@@ -119,5 +121,6 @@
+     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
+     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
+         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
++    if (!rc && fill == 2) a618_present_arm(run, completed_tail);
+     return rc;
+ }
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_present.inc
+@@ -0,0 +1,96 @@
++/* First bridge to AppleCLCD. GPU addresses are fixed inside the retained
++ * private Normal-NC fill page. The panel and IOSurface are CPU addresses. */
++static constexpr unsigned a618_present_words = 256;
++static constexpr unsigned a618_present_source = 0x100 / 4;
++static constexpr unsigned a618_present_destination = 0x800 / 4;
++static constexpr unsigned a618_present_fence = 4;
++static constexpr uint32_t a618_present_done = 0x1710c0de;
++static constexpr uint32_t a618_present_guard = 0xa5a5a5a5;
++static_assert(a618_present_source + a618_present_words < a618_present_destination);
++static_assert(a618_present_destination + a618_present_words < 1024);
++
++static struct {
++    a618_cp_run run;
++    unsigned tail;
++    unsigned armed;
++} a618_present;
++
++static void a618_present_arm(const a618_cp_run &run, unsigned tail)
++{
++    a618_present.run = run;
++    a618_present.tail = tail;
++    IOLog("SWEET A618 PRESENT: armed after verified 2D fill\n");
++    __atomic_store_n(&a618_present.armed, 1u, __ATOMIC_RELEASE);
++}
++
++extern "C" bool sweet_gpu_present_span(const void *source, void *destination, size_t bytes)
++{
++    if (bytes != a618_present_words * sizeof(uint32_t) || !source || !destination ||
++        !__atomic_load_n(&a618_present.armed, __ATOMIC_ACQUIRE)) return false;
++
++    uint32_t expected[a618_present_words];
++    memcpy(expected, source, sizeof(expected));
++    bool varies = false;
++    for (uint32_t word : expected) varies |= word != expected[0];
++    if (!varies) return false;
++    // A failed or uncertain submission consumes the single attempt as well.
++    if (!__sync_bool_compare_and_swap(&a618_present.armed, 1u, 0u)) return false;
++
++    void *cpu = nullptr;
++    if (a618_cp_buffer(a618_fill_buffer, 0, SWEET_A618_DATA_PAGES, &cpu)) {
++        IOLog("SWEET A618 PRESENT: buffer validation failed; CPU fallback\n");
++        return false;
++    }
++    auto *words = static_cast<volatile uint32_t *>(cpu);
++    for (unsigned i = 0; i < 1024; ++i) words[i] = a618_present_guard;
++    words[a618_present_fence] = 0;
++    for (unsigned i = 0; i < a618_present_words; ++i) {
++        words[a618_present_source + i] = expected[i];
++        words[a618_present_destination + i] = ~expected[i];
++    }
++    if (sweet_gpu_memory_clean(a618_preparation.storage[a618_fill_buffer], 0)) {
++        IOLog("SWEET A618 PRESENT: buffer publish failed; CPU fallback\n");
++        return false;
++    }
++
++    constexpr uint32_t base = SWEET_A618_FILL_IOVA;
++    constexpr uint32_t fence = base + a618_present_fence * 4;
++    const uint32_t packet[] = {
++        a618_pkt7(0x75,5), a618_present_words, // CP_MEMCPY: DWORD count, source, destination
++        base + a618_present_source * 4, 0, base + a618_present_destination * 4, 0,
++        a618_pkt7(0x26,0), // CP_WAIT_FOR_IDLE
++        a618_pkt7(0x46,4), 0x04, fence, 0, a618_present_done,
++        a618_pkt7(0x14,4), 0, fence, 0, a618_present_done,
++    };
++    auto &run = a618_present.run;
++    IOLog("SWEET A618 PRESENT: IOSurface copy bytes=%zu\n", bytes);
++    int rc = a618_fill_submit(&probe, run, "present", packet,
++        sizeof(packet)/sizeof(packet[0]), a618_present.tail, 5000);
++    if (rc) {
++        IOLog("SWEET A618 PRESENT: submission rc=%d; CPU fallback\n", rc);
++        return false;
++    }
++
++    uint32_t output[a618_present_words];
++    unsigned matches = 0, changed = 0;
++    for (unsigned i = 0; i < 1024; ++i) {
++        const uint32_t word = words[i];
++        if (i >= a618_present_destination && i < a618_present_destination + a618_present_words) {
++            unsigned index = i - a618_present_destination;
++            output[index] = word;
++            matches += word == expected[index];
++        } else if (i >= a618_present_source && i < a618_present_source + a618_present_words) {
++            changed += word != expected[i - a618_present_source];
++        } else if (i != a618_present_fence) {
++            changed += word != a618_present_guard;
++        }
++    }
++    const uint32_t observed = words[a618_present_fence];
++    const bool valid = matches == a618_present_words && !changed && observed == a618_present_done &&
++        !a618_cp_guard(&probe, run);
++    IOLog("SWEET A618 PRESENT: words=%u/%u changed=%u fence=%08x verified=%u\n",
++        matches, a618_present_words, changed, observed, unsigned(valid));
++    if (!valid) return false;
++    memcpy(destination, output, sizeof(output));
++    return true;
++}

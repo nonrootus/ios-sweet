@@ -20,7 +20,8 @@ static uint32_t a618_pkt4(uint32_t reg)
 }
 
 static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
-    const char *phase, const uint32_t *packet, unsigned count, unsigned &tail)
+    const char *phase, const uint32_t *packet, unsigned count, unsigned &tail,
+    unsigned timeout_us = 2000000)
 {
     if (tail >= 1024 || count + 3 > 1024 - tail) return -5;
     if (a618_cp_guard(s, run)) {
@@ -52,7 +53,7 @@ static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
     if (complete(s)) return -3;
     IOLog("SWEET A618 RING: %s WPTR written=%u\n", phase, end);
     constexpr uint32_t busy_off = 0x23b0cu*4-0x6a000u;
-    for (unsigned waited = 0; waited <= 2000000; waited += 1000) {
+    for (unsigned waited = 0; waited <= timeout_us; waited += 1000) {
         if (a618_cp_guard(s, run)) {
             IOLog("SWEET A618 RING: %s polling guard failed at %u us\n", phase, waited);
             return -3;
@@ -81,15 +82,15 @@ static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
             tail = end;
             return 0;
         }
-        if (waited == 2000000)
+        if (waited == timeout_us)
             IOLog("SWEET A618 RING: %s timeout RPTR=%u WPTR=%u shadow=%u busy=%08x\n",
                 phase, rptr, wptr, shadow, busy);
-        if (waited != 2000000) IODelay(1000);
+        if (waited != timeout_us) IODelay(1000);
     }
     return -4;
 }
 
-static int a618_fill_first(persistent_gmu *s, a618_cp_run &run)
+static int a618_fill_first(persistent_gmu *s, a618_cp_run &run, unsigned *completed_tail = nullptr)
 {
     constexpr uint32_t sentinel = 0xa5a5a5a5, pixel = 0x42424242;
     constexpr uint32_t color_fence = 0x13579bdf, cache_fence = 0x2468ace0;
@@ -153,5 +154,7 @@ static int a618_fill_first(persistent_gmu *s, a618_cp_run &run)
     }
     IOLog("SWEET A618 FILL: pixels=%u/256 guards_changed=%u fences=%08x/%08x\n",
         matches, guards, color, cache);
-    return matches == pixels && !guards && color == color_fence && cache == cache_fence ? 0 : -5;
+    if (matches != pixels || guards || color != color_fence || cache != cache_fence) return -5;
+    if (completed_tail) *completed_tail = tail;
+    return 0;
 }

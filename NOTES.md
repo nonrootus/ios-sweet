@@ -1,12 +1,19 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## 0156 GPU SMMU hardware result
+
+The owner confirms iOS loaded and returned to recovery. A fresh log shows
+GPU SID0/CB1/ASID2 accepted before CM3 release. The separate GMU context
+remained intact with its own root. Three table pages and 18 data pages were
+retained. SMMU checks at 0, 1 and 10 seconds found no fault and a zero GPU
+fault address. The first command processor transaction remains the next test.
+
 - 0156 built and sent by temporary fastboot boot. Full SWEET XNU
   CI42372262645 passed at source 84b4b01fed3a3d77e1f35d74fa068b1f80706ef0.
   Source, kernel hash and markers, reproduced payload, ten kernel segments,
   Android boot parts and the cold mapping flags passed verification. Fastboot
-  Sending and Booting returned OKAY on 2026-11-08 at 04:57:04 UTC. Await
-  a fresh recovery log and the owner's iOS boot result.
+  Sending and Booting returned OKAY on 2026-11-08 at 04:57:04 UTC.
 
 - 0156 opt-in cold GPU CB1/slot1/SID0/ASID2
   mapping before CM3 release, with reset/retention/GX-down guards. GMU

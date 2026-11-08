@@ -1,0 +1,16 @@
+--- a/iokit/Kernel/arm/sweet_a618_cp_run.inc
++++ b/iokit/Kernel/arm/sweet_a618_cp_run.inc
+@@ -55,8 +55,11 @@
+     mmio_write32(a618_cp_register(run, dword), value);
+     if (complete(s)) return -2;
+     uint32_t readback = a618_cp_read(run, dword);
+-    if (readback == value) return 0;
+-    IOLog("SWEET A618 CP: readback DWORD=%05x expected=%08x actual=%08x\n", dword, value, readback);
++    /* Preserve the stock all-ones performance counter write. This A618
++     * returned 0x002f7fff on hardware after that write in 0160. */
++    const uint32_t expected = dword == 0x50b && value == UINT32_MAX ? 0x002f7fffu : value;
++    if (readback == expected) return 0;
++    IOLog("SWEET A618 CP: readback DWORD=%05x expected=%08x actual=%08x\n", dword, expected, readback);
+     return -5;
+ }
+ 

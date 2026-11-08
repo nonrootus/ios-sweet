@@ -20,6 +20,16 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0161 A618 busy mask readback
+
+On sweet_k6a, 0160 booted iOS and measured CX traffic in both directions.
+The command setup reached the busy counter mask, which read back 0x002f7fff
+following the stock all-ones write. SQE release was not attempted.
+
+0161 preserves that write and requires the exact observed value for this
+one pair. All other registers retain their existing comparisons. Local
+host, ARM64 and patch checks pass. Device result pending.
+
 ## 0160 A618 CX traffic check
 
 On sweet_k6a, 0159 booted iOS. GX status was clean, but CX halt ACK stayed

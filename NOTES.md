@@ -20,6 +20,14 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0163 A618 ROQ readback diagnostics
+
+0162 passed the GMEM end comparison and observed zero after the stock
+CP_ROQ_THRESHOLDS_2 write. 0163 captures AHB fence and clock status and,
+only on stable zero and clean guards, checks three adjacent stock
+writes. The mismatch branch stops before CP_AHB, ring or SQE setup.
+Host and target-header checks passed. Device result pending.
+
 ## 0162 A618 GMEM limit readback
 
 On sweet_k6a, 0161 passed the busy mask comparison. The stock inclusive

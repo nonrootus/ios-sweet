@@ -126,7 +126,7 @@ static bool cold_map_enabled;
 static unsigned cold_fault,gpu_smmu_writes;
 static unsigned gpu_oob_mode, gpu_oob_writes;
 static bool gpu_oob_held;
-static unsigned cp_mode, cp_writes;
+static unsigned cp_mode, cp_writes, roq_reads;
 static bool cp_started;
 static unsigned cx_mode, cx_writes;
 extern "C" sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) {
@@ -155,12 +155,14 @@ model=model.replace('    assert(!(a&3));',r"""    assert(!(a&3));
     if(prep_check_active && a==uintptr_t(cc)+0x10 && ++prep_guard_reads==prep_fail_guard)return 0;
     if(a>=uintptr_t(gpu_regs) && a<uintptr_t(gpu_regs)+sizeof(gpu_regs)){
       ++gpu_reads;if(prep_late_irq)gmu_full[0x14648/4]|=4;
+      if(cp_mode==23 && a==uintptr_t(gpu_regs)+4*0x8c2 && ++roq_reads==2)
+          return 0x010000c0;
     }""",1)
 model=model.replace('    released=fw_timeout=',r"""    a618_preparation={};a618_prepare_attempted=0;dcvs_succeeded=false;
     prep_check_active=false;prep_guard_reads=prep_fail_guard=0;
     cold_map_enabled=false;cold_fault=gpu_smmu_writes=0;
     gpu_oob_mode=gpu_oob_writes=0;gpu_oob_held=false;a618_gpu_oob_attempted=0;
-    cp_mode=cp_writes=0;cp_started=false;
+    cp_mode=cp_writes=roq_reads=0;cp_started=false;
     cx_mode=cx_writes=0;a618_bus={};
     a618_mapping={};a618_mapping_attempted=a618_mapping_verify_attempted=a618_storage_attempted=0;
     prep_creates=prep_clean=prep_pages=gpu_reads=prep_clean_fail=prep_page_fail=prep_create_fail=0;
@@ -228,6 +230,13 @@ model=model.replace('    if(!is_smmu(a)) {',r"""    if(in_range(a,gpu_regs,sizeo
             gpu_regs[dword]=cp_mode==20 ? 0x0017e000u : 0x0017f000u;
             return;
         }
+        if(dword==0x8c2 && cp_mode>=21 && cp_mode<=24){
+            assert(v==0x010000c0);
+            if(cp_mode==22)gmu_full[0x24c4c/4]=1;
+            return;
+        }
+        if(dword==0x8c1 && cp_mode==21)return;
+        if(dword==0x8c1 && cp_mode==24){gpu_regs[dword]=v|1;return;}
         if(dword==0x808){assert(v==1 && prep_clean==31);cp_started=true;}
         if(dword==0x807){
             assert(v==15 && cp_started && gpu_regs[0x804]==0x40020000 && gpu_regs[0x800]==0x40010000 && gpu_regs[0x830]==0x40001000);
@@ -497,7 +506,7 @@ int main(){
   retained();
  }
  puts("PASS0157 dedicated GPU OOB: clean ACK and release, timeout, sticky/stale ACK, service and SMMU faults, unavailable GPU register, no retry");
- for(unsigned mode=0;mode<21;mode++){
+ for(unsigned mode=0;mode<25;mode++){
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
   assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
@@ -517,8 +526,10 @@ int main(){
   if(mode==17)gpu_regs[0x3c46]=4;
   if(mode==18){gpu_regs[0x18]=0x10000;gpu_regs[0x215]=1;}
   int rc=sweet_gpu_a618_oob_probe(1);
-  const bool passed=mode==0 || mode==8 || mode==9 || mode==12 || mode==18;
+  const bool passed=mode==0 || mode==9 || mode==12 || mode==18;
+  if((rc==0)!=passed)fprintf(stderr,"CP model mode=%u rc=%d log=%s\n",mode,rc,messages.c_str());
   assert((rc==0)==passed);
+  if(mode==8)assert(rc==-3 && cp_writes==30);
   assert(cp_started==(passed || (mode>=3 && mode<=5)) && gpu_oob_held==cp_started);
   if(mode==1)assert(rc==-4 && cp_writes==1 && gpu_regs[0x3c46]==3);
   if(mode==6 || mode==7 || mode==10 || mode==11 || (mode>=13 && mode<=17))assert(!cp_writes);
@@ -528,8 +539,17 @@ int main(){
   if(mode==5)assert(rc==-2);
   if(mode==19)assert(rc==-5 && cp_writes==18);
   if(mode==20)assert(rc==-5 && cp_writes==27);
+  if(mode>=21){
+   assert(rc==(mode==22?-3:-5));
+   assert(cp_writes==(mode==21?34u:mode==24?32u:31u));
+   assert(!gpu_regs[0x98d] && !gpu_regs[0x84f] && !gpu_regs[0x800] &&
+          !gpu_regs[0x807] && !gpu_regs[0x808] && prep_clean==21);
+   assert(messages.find("ROQ fence DWORD=008c2")!=std::string::npos);
+   if(mode==21)assert(gpu_regs[0x8c3]==128 && gpu_regs[0x9e00]==0x00180000);
+  }
   unsigned prior=writes;assert(sweet_gpu_a618_oob_probe(1)==-1 && writes==prior);retained();
  }
+ puts("PASS0163 ROQ group stops before SQE on stable zero, fence drop, delayed change and extra bits");
  puts("PASS0159 first CP model: A615-family GX status, CX deassert and stuck ACK, stock setup, packet/shadow, TSB refusal, raw IRQ/CP and SMMU/fence faults, timeout and retained ownership");
  for(unsigned mode=1;mode<=6;mode++){
   reset();cold_map_enabled=true;assert(!run());

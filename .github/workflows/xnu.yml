@@ -135,11 +135,12 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
           # 0160 supersedes the sole 0159 target. Canonical bytes are checked below.
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc "$GITHUB_WORKSPACE/xnu/patches/0160-sweet-a618-cx-traffic.patch"
-          # 0162 supersedes the sole 0161 target. The preflight validates both in order.
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0162-sweet-a618-gmem-limit-readback.patch"
+          # The exact preflight validates 0161 through 0163 in order.
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0163-sweet-a618-roq-readback.patch"
           python3 tools/verify-gmu-service-patch.py --patched-tree dxb/xnu
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 BUS: AXI read=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 BUS: CX halt ack' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 CP: ROQ fence DWORD=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 CP: done rc=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'sweetgpucp' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 OOB: done rc=' > /dev/null

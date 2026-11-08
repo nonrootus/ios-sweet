@@ -10,24 +10,29 @@ static constexpr uint32_t a618_smc_fast = 0x80000000u;
 static constexpr uint32_t a618_smc_64 = 0x40000000u;
 
 #ifdef KERNEL
-static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target)
+static a618_scm_reply a618_scm_call(uint32_t function, uint32_t args,
+    uint64_t arg0, uint64_t arg1, uint64_t arg2)
 {
-    register uint64_t x0 __asm__("x0") = a618_scm_info | flags;
-    register uint64_t x1 __asm__("x1") = 1; // SCM_ARGS(1, SCM_VAL)
-    register uint64_t x2 __asm__("x2") = target;
-    register uint64_t x3 __asm__("x3") = 0;
-    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = args;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = arg1;
+    register uint64_t x4 __asm__("x4") = arg2;
     register uint64_t x5 __asm__("x5") = 0;
     register uint64_t x6 __asm__("x6") = 0;
-    // SCM_INTERRUPTED resumes the same read with the returned registers.
-    // A still-interrupted result stops the probe without issuing another ID.
+    // Resume the same transaction with the returned registers.
     for (unsigned entry = 0; entry < 16; ++entry) {
         __asm__ volatile("smc #0"
             : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6)
             : : "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
         if (static_cast<int32_t>(x0) != 1) break;
     }
-    return {static_cast<int32_t>(x0), flags & a618_smc_64 ? x1 : static_cast<uint32_t>(x1)};
+    return {static_cast<int32_t>(x0), function & a618_smc_64 ? x1 : static_cast<uint32_t>(x1)};
+}
+
+static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target)
+{
+    return a618_scm_call(a618_scm_info | flags, 1, target, 0, 0);
 }
 #else
 static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target);

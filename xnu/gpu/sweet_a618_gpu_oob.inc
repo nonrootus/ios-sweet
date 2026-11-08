@@ -27,10 +27,12 @@ static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value
 #endif
 #include "sweet_a618_cp_run.inc"
 #include "sweet_a618_pas_probe.inc"
+#include "sweet_a618_zap_load.inc"
+#include "sweet_a618_fill.inc"
 
-extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0)
+extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
 {
-    if (first_cp > 1 || pas_probe > first_cp ||
+    if (first_cp > 1 || pas_probe > first_cp || fill > pas_probe ||
         !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
     auto *s = &probe;
     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
@@ -80,15 +82,21 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
 
     a618_cp_run run = {};
     if (first_cp && !rc && !cleanup && acked && ack_cleared) {
-        rc = a618_cp_first(s,run);
+        rc = a618_cp_first(s,run,fill != 0);
         IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
             rc,run.writes,run.sqe_attempted,run.rptr,run.wptr,run.shadow_rptr,run.busy,run.fence,run.waited_us);
-        if (!rc && pas_probe)
-            IOLog("SWEET A618 PAS: entry rc=%d\n", a618_pas_probe(s, run));
+        if (!rc && pas_probe) {
+            const int pas_rc = a618_pas_probe(s, run);
+            IOLog("SWEET A618 PAS: entry rc=%d\n", pas_rc);
+            if (fill) {
+                rc = pas_rc ? pas_rc : a618_fill_first(s, run);
+                IOLog("SWEET A618 FILL: result rc=%d\n", rc);
+            }
+        }
     }
     /* Even an error return from a store could have reached the GMU. Release
      * only our vote, and only if the same session and MMIO domain are healthy. */
-    if (run.sqe_attempted) {
+    if (run.sqe_attempted || run.zap_attempted) {
         IOLog("SWEET A618 CP: GPU OOB, boot vote and memory retained until reset\n");
     } else {
         const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);

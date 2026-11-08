@@ -74,6 +74,51 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+extern char _head[], _end[];
+static const char zap_result[] = " sweetzapfdt=0x";
+
+static int zap_range_conflict(uint64_t start, uint64_t end)
+{
+	return start >= end || (start < 0xb0100000ull && end > 0xb0000000ull);
+}
+
+/* The image builder appends this request as the last boot argument. Inspect
+ * ABL's handoff before copying anything into XNU's target memory. */
+static int zap_layout_probe(uintptr_t dtb, uint64_t rd_start, uint64_t rd_end,
+	const struct payload *p, uintptr_t adt_pa, uintptr_t top, unsigned *arglen)
+{
+	static const char request[] = " sweetzaplayout=1";
+	const char *line = p->cmdline;
+	unsigned length = 0;
+	while (length < BOOT_LINE_LENGTH && line[length])
+		++length;
+	if (length < sizeof(request) - 1 || length + sizeof(zap_result) + 2 > BOOT_LINE_LENGTH)
+		return -1;
+	for (unsigned i = 0; i < sizeof(request) - 1; ++i)
+		if (line[length - (sizeof(request) - 1) + i] != request[i])
+			return -1;
+
+	unsigned evidence = fdt_ram_probe(dtb, 0xb0000000ull, 0x100000ull);
+	if (zap_range_conflict(rd_start, rd_end) ||
+	    zap_range_conflict((uintptr_t)_head, (uintptr_t)_end) ||
+	    zap_range_conflict(p->phys_base, p->phys_base + p->mem_size) ||
+	    zap_range_conflict(adt_pa, top))
+		evidence |= FDT_RAM_BOOT_OVERLAP;
+	*arglen = length;
+	con_hex("ZAPFDT", evidence);
+	return evidence;
+}
+
+static void zap_layout_append(volatile char *line, unsigned length, unsigned evidence)
+{
+	static const char hex[] = "0123456789abcdef";
+	for (unsigned i = 0; i < sizeof(zap_result) - 1; ++i)
+		line[length++] = zap_result[i];
+	line[length++] = hex[evidence >> 4];
+	line[length++] = hex[evidence & 15];
+	line[length] = '\0';
+}
+
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
 const char *loader_boot(uintptr_t dtb)
@@ -100,6 +145,12 @@ const char *loader_boot(uintptr_t dtb)
 	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
 		return "ramdisk overlaps kernel memory";
 
+	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
+	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
+	uintptr_t top = ba_pa + PAGE_16K;
+	unsigned zap_arglen = 0;
+	int zap_evidence = zap_layout_probe(dtb, rd_start, rd_end, p, adt_pa, top, &zap_arglen);
+
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
 		uintptr_t dst = s->vmaddr + pa_of_va_base;
@@ -110,10 +161,7 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
-	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
-	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
-	uintptr_t top = ba_pa + PAGE_16K;
 
 	zero64(ba_pa, PAGE_16K);
 	volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
@@ -133,6 +181,8 @@ const char *loader_boot(uintptr_t dtb)
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
 		ba->CommandLine[i] = p->cmdline[i];
+	if (zap_evidence >= 0)
+		zap_layout_append(ba->CommandLine, zap_arglen, (unsigned)zap_evidence);
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 

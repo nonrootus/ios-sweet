@@ -5,6 +5,7 @@ struct a618_cp_run {
     uintptr_t extended;
     volatile uint32_t *shadow;
     bool sqe_attempted;
+    bool zap_attempted;
     bool tsb_preconfigured;
     unsigned writes, waited_us;
     uint32_t rptr, wptr, shadow_rptr, busy, fence;
@@ -292,7 +293,9 @@ static int a618_cp_publish(persistent_gmu *s, a618_cp_run &run)
     return sweet_a618_address_space_check(a618_mapping.tables,a618_preparation.physical) ? -5 : 0;
 }
 
-static int a618_cp_first(persistent_gmu *s, a618_cp_run &run)
+static int a618_zap_load(persistent_gmu *, a618_cp_run &);
+
+static int a618_cp_first(persistent_gmu *s, a618_cp_run &run, bool fill)
 {
     run.extended = a618_bus.window ? a618_bus.window :
         ml_io_map(a618_register_base+a618_register_size,a618_extended_size);
@@ -316,6 +319,11 @@ static int a618_cp_first(persistent_gmu *s, a618_cp_run &run)
     if (a618_cp_guard(s,run) || post_read(s,a618_fence_status,&run.fence) ||
         run.fence == UINT32_MAX || (run.fence & 1u) ||
         a618_cp_read(run,0x806) || a618_cp_read(run,0x807) || *run.shadow) return -3;
+    if (fill) {
+        rc = a618_zap_load(s, run);
+        IOLog("SWEET A618 FILL: ZAP load rc=%d\n", rc);
+        if (rc) return rc;
+    }
     IOLog("SWEET A618 CP: armed words=%u; releasing SQE with GPU OOB held\n",SWEET_A618_CP_BOOT_WORDS);
     run.sqe_attempted = true;
     mmio_write32(a618_cp_register(run,0x808),1);

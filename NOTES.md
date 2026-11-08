@@ -20,6 +20,14 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0169 Combined A618 first fill
+
+Opt in with sweetgpufill=1 and the updated boot shim's live memory
+evidence. After the cold bandwidth handoff, the stock signed ZAP
+sequence precedes SQE. Verify CP mode transition and a guarded 16x16
+fill with both GPU-written fences in one hardware boot. Local target
+compilation and existing regression checks passed. Hardware pending.
+
 ## 0167 A618 ZAP reserve probe
 
 With an opt-in phone ADT, check the 1 MiB ZAP reservation against the

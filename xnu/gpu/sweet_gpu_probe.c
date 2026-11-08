@@ -20,6 +20,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
 extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
 extern void sweet_a618_zap_reserve_probe(void);
+extern int sweet_a618_zap_low_check(void);
 void sweet_gpu_probe(void);
 extern int sweet_rpmh_gpu_arc_info(const char *, uint32_t *, uint16_t [16], unsigned *);
 extern int sweet_rpmh_gpu_arc_read(const char *, unsigned *);
@@ -178,7 +179,7 @@ sweet_gpu_probe(void)
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
     int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0,requested_gpu_cp=0;
-    int requested_pas_probe = 0;
+    int requested_pas_probe = 0, requested_fill = 0;
     vm_offset_t gcc;
     uint32_t state;
 
@@ -192,6 +193,11 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
     PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
+    PE_parse_boot_argn("sweetgpufill", &requested_fill, sizeof(requested_fill));
+    if (requested_fill && (requested_fill != 1 || requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+        printf("SWEET A618 FILL: requires fill=1 pasprobe=1 cp=1\n");
+        return;
+    }
     if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
         printf("SWEET A618 PAS: requires sweetgpupasprobe=1 sweetgpucp=1\n");return;
     }
@@ -260,6 +266,15 @@ sweet_gpu_probe(void)
     printf("SWEET GPU: memnoc GFX CBCR 0x%08x (vote %u, off %u); SMMU not accessed\n",
         memnoc, memnoc & 1u, (memnoc >> 31) & 1u);
     sweet_a618_zap_reserve_probe();
+    if (requested_fill) {
+        int layout = 0, evidence = 0;
+        PE_parse_boot_argn("sweetzaplayout", &layout, sizeof(layout));
+        PE_parse_boot_argn("sweetzapfdt", &evidence, sizeof(evidence));
+        /* Bit 2 describes allocations Linux would make after handoff. */
+        int rc = layout == 1 && (evidence == 1 || evidence == 5) ? sweet_a618_zap_low_check() : -1;
+        printf("SWEET A618 FILL: low memory evidence=%x rc=%d\n", evidence, rc);
+        if (rc) return;
+    }
     /* Experimental CX power-on: caller opts in, prechecks only APPS DRV
      * vote; this is not a measured voltage or proof of exclusive ownership. */
     int cx_on = 0, cx_ok = 0;
@@ -421,6 +436,7 @@ sweet_gpu_probe(void)
                                     int bw_bootstrap = 0;
                                     if (PE_parse_boot_argn("sweetgmubw", &bw_bootstrap, sizeof(bw_bootstrap)) && bw_bootstrap == 1) {
                                         extern int sweet_rpmh_gpu_bw_bootstrap(void);
+                                        extern int sweet_rpmh_gpu_zap_bw_bootstrap(void);
                                         unsigned long jtag = 0;
                                         unsigned wfi_mode = 1;
                                         int load_arg = 0, smmu_arg = 0;
@@ -432,7 +448,7 @@ sweet_gpu_probe(void)
                                             gmu_retention || jtag != 1 || wfi_mode != 0 || load_arg || smmu_arg)
                                             printf("SWEET GPU: BCM handoff skipped: reset, idle flags or conflicting probe\n");
                                         else {
-                                            int bw_rc = sweet_rpmh_gpu_bw_bootstrap();
+                                            int bw_rc = requested_fill ? sweet_rpmh_gpu_zap_bw_bootstrap() : sweet_rpmh_gpu_bw_bootstrap();
                                             printf("SWEET GPU: BCM handoff rc=%d; CM3 remains reset\n", bw_rc);
                                             if (requested_start == 1) {
                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
@@ -462,8 +478,8 @@ sweet_gpu_probe(void)
                                                                         int mapping_rc=sweet_gpu_a618_mapping_verify();
                                                                         printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
                                                                         if(!mapping_rc && requested_gpu_oob==1) {
-                                                                            extern int sweet_gpu_a618_oob_probe(unsigned, unsigned);
-                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp,(unsigned)requested_pas_probe));
+                                                                            extern int sweet_gpu_a618_oob_probe(unsigned, unsigned, unsigned);
+                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp,(unsigned)requested_pas_probe,(unsigned)requested_fill));
                                                                         }
                                                                     } else {
                                                                         extern int sweet_gpu_a618_prepare(void);

@@ -2,6 +2,29 @@
  * Called after VM startup. It only translates addresses and never accesses
  * the contents of the reserved pages. */
 void sweet_a618_zap_reserve_probe(void);
+int sweet_a618_zap_low_check(void);
+
+int
+sweet_a618_zap_low_check(void)
+{
+	const pmap_paddr_t base = 0xb0000000ull, end = base + 0x100000u;
+	if (!kva_active || gPhysBase != 0x100000000ull || PAGE_SIZE != 0x4000u) {
+		return -1;
+	}
+	for (size_t i = 0; i < PTOV_TABLE_SIZE; ++i) {
+		const ptov_table_entry *entry = &ptov_table[i];
+		if (entry->len && entry->pa < end && entry->pa + entry->len > base) {
+			return -1;
+		}
+	}
+	for (pmap_paddr_t pa = base; pa < end; pa += PAGE_SIZE) {
+		pmap_paddr_t mapped = kvtophys(gVirtBase - (gPhysBase - pa));
+		if (pmap_valid_page(atop(pa)) || (mapped >= base && mapped < end)) {
+			return -1;
+		}
+	}
+	return 0;
+}
 
 void
 sweet_a618_zap_reserve_probe(void)

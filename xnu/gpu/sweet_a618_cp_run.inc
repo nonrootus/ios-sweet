@@ -157,63 +157,65 @@ static int a618_cp_roq_fence(persistent_gmu *s, const a618_cp_run &run, unsigned
     return 0;
 }
 
+static constexpr a618_cp_setting a618_roq_settings[] = {
+    {0x8c2,0x010000c0}, {0x8c1,0x8040362c}, {0x8c3,128}, {0x9e00,0x00180000},
+};
+
 static int a618_cp_roq_snapshot(persistent_gmu *s, const a618_cp_run &run, unsigned delay_us)
 {
     if (a618_cp_guard(s, run)) return -3;
-    uint32_t fence_range = 0;
-    if (post_read(s, A6XX_GMU_AHB_FENCE_RANGE_0, &fence_range)) return -2;
-    const uint32_t roq2 = a618_cp_read(run, 0x8c2);
-    const uint32_t roq1 = a618_cp_read(run, 0x8c1);
-    const uint32_t pool = a618_cp_read(run, 0x8c3);
-    const uint32_t fifo = a618_cp_read(run, 0x9e00);
+    uint32_t values[sizeof(a618_roq_settings)/sizeof(a618_roq_settings[0])];
+    for (unsigned i = 0; i < sizeof(values)/sizeof(values[0]); ++i)
+        values[i] = a618_cp_read(run, a618_roq_settings[i].reg);
+
+    uint32_t fence_range = 0, control = 0, status = 0;
+    if (post_read(s, A6XX_GMU_AHB_FENCE_RANGE_0, &fence_range) ||
+        post_read(s, a618_fence_control, &control) || post_read(s, a618_fence_status, &status))
+        return -2;
     IOLog("SWEET A618 CP: ROQ snapshot delay_us=%u roq2=%08x roq1=%08x pool=%08x fifo=%08x range=%08x\n",
-        delay_us, roq2, roq1, pool, fifo, fence_range);
-    const uint32_t values[] = {roq2, roq1, pool, fifo};
-    for (uint32_t value : values) {
-        if (value == UINT32_MAX || value == 0xdeafbead) return -2;
+        delay_us, values[0], values[1], values[2], values[3], fence_range);
+    if (fence_range != 0x80a008a0u || control || status || a618_cp_guard(s, run)) return -3;
+    for (unsigned i = 0; i < sizeof(values)/sizeof(values[0]); ++i) {
+        if (values[i] == UINT32_MAX || values[i] == 0xdeafbead) return -2;
+        if (delay_us && values[i] != a618_roq_settings[i].value) return -5;
     }
-    if (fence_range != 0x80a008a0u) return -3;
-    return a618_cp_guard(s, run);
+    return 0;
 }
 
 static int a618_cp_roq(persistent_gmu *s, a618_cp_run &run)
 {
-    static const a618_cp_setting settings[] = {
-        {0x8c2,0x010000c0}, {0x8c1,0x8040362c}, {0x8c3,128}, {0x9e00,0x00180000},
-    };
     int rc = a618_cp_roq_fence(s, run, 0, 0, 0);
     if (rc) return rc;
     rc = a618_cp_roq_snapshot(s, run, 0);
     if (rc) return rc;
-    bool diagnose = false;
-    for (const auto &item : settings) {
+    bool delayed = false;
+    for (const auto &item : a618_roq_settings) {
         uint32_t first = UINT32_MAX;
         rc = a618_cp_set(s, run, item.reg, item.value, &first);
-        if (!diagnose && !rc) continue;
-        if (rc && rc != -5) return rc;
-        if (!diagnose && (item.reg != 0x8c2 || first)) return rc;
+        // 0164 observed zero twice at ROQ2 and the exact stock value after
+        // the full group settled. No other mismatch can enter this path.
+        const bool pending_roq2 = rc == -5 && item.reg == 0x8c2 && first == 0;
+        if (rc && !pending_roq2) return rc;
+        if (!delayed && !pending_roq2) continue;
 
-        // 0162 returned zero on ROQ_THRESHOLDS_2. Collect the rest of this
-        // stock group only if the readback is stable and the fence is clean.
-        // A mismatch can never pass this group into CP_AHB or SQE setup.
         IODelay(100);
         if (a618_cp_guard(s, run)) return -3;
-        uint32_t settled = a618_cp_read(run, item.reg);
+        const uint32_t settled = a618_cp_read(run, item.reg);
         rc = a618_cp_roq_fence(s, run, item.reg, first, settled);
         if (rc) return rc;
-        if (settled != first || (settled & ~item.value)) return -5;
-        diagnose = true;
+        if (settled != first) return -5;
+        delayed = true;
     }
-    if (!diagnose) return 0;
+    if (!delayed) return 0;
 
-    // Take a final sample with the same vote and without repeating any writes.
-    // The earlier mismatch still blocks CP_AHB and SQE even if it settles.
     constexpr unsigned sample_delay_us = 10000;
     IODelay(sample_delay_us);
     rc = a618_cp_roq_fence(s, run, 0, 0, 0);
     if (rc) return rc;
     rc = a618_cp_roq_snapshot(s, run, sample_delay_us);
-    return rc ? rc : -5;
+    if (rc) return rc;
+    IOLog("SWEET A618 CP: ROQ settled to stock before SQE\n");
+    return 0;
 }
 
 static int a618_cp_configure(persistent_gmu *s, a618_cp_run &run)

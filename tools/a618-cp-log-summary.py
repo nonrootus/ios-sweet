@@ -28,6 +28,10 @@ ROQ_SNAPSHOT = re.compile(
     r'ROQ snapshot delay_us=(0|10000) roq2=([0-9a-f]{8}) roq1=([0-9a-f]{8}) '
     r'pool=([0-9a-f]{8}) fifo=([0-9a-f]{8}) range=([0-9a-f]{8})'
 )
+ROQ_COMPLETE = 'ROQ settled to stock before SQE'
+ROQ_INITIAL_ZERO = 'readback DWORD=008c2 expected=010000c0 actual=00000000'
+ROQ_WRITES = ((0x8c2, 0), (0x8c1, 0x8040362c), (0x8c3, 128), (0x9e00, 0x00180000))
+ROQ_FINAL = (0x010000c0, 0x8040362c, 128, 0x00180000, 0x80a008a0)
 PATTERNS = {
     'request': (OOB, r'request=00010000 expected_ack=01000000 timeout_us=100000'),
     'held': (OOB, r'held status=([0-9a-f]{8}) protect=([0-9a-f]{8}) addr_mode=([0-9a-f]{8})'),
@@ -40,6 +44,32 @@ PATTERNS = {
 }
 
 
+def roq_ready(fences, snapshots, zero, completion, preflight, armed):
+    if len(fences) not in (1, 6) or len(snapshots) not in (1, 2):
+        return False
+    if any(control or status or clock in (0xffffffff, 0xdeafbead)
+           for _, (_, _, _, control, status, clock) in fences):
+        return False
+    if any(first != settled for _, (_, first, settled, _, _, _) in fences):
+        return False
+    if fences[0][1][:2] != (0, 0):
+        return False
+    before, delay, (*registers, fence_range) = snapshots[0]
+    if delay or fence_range != 0x80a008a0 or any(value in (0xffffffff, 0xdeafbead) for value in registers):
+        return False
+    if not preflight < fences[0][0] < before < armed:
+        return False
+    if not zero and not completion:
+        return len(fences) == len(snapshots) == 1
+    if len(zero) != 1 or len(completion) != 1 or len(fences) != 6 or len(snapshots) != 2:
+        return False
+    if tuple(values[:2] for _, values in fences[1:]) != (*ROQ_WRITES, (0, 0)):
+        return False
+    after, delay, values = snapshots[1]
+    order = [before, zero[0], *(line for line, _ in fences[1:]), after, completion[0], armed]
+    return delay == 10000 and values == ROQ_FINAL and order == sorted(set(order))
+
+
 def analyze(text, meta):
     base = mapping.analyze(text, meta)
     issues = ['mapping evidence missing or failed'] if base['exit_code'] else []
@@ -47,6 +77,7 @@ def analyze(text, meta):
     diagnostics = []
     roq_fence = []
     roq_snapshots = []
+    roq_zero, roq_complete = [], []
     bus_measurement, bus_acceptance = [], []
     for line_no, line in enumerate(text.splitlines(), 1):
         if line.startswith(BUS):
@@ -60,11 +91,18 @@ def analyze(text, meta):
         if not line.startswith((OOB, CP)):
             continue
         if line.startswith(CP):
-            sample = ROQ_FENCE.fullmatch(line[len(CP):])
+            payload = line[len(CP):]
+            if payload == ROQ_COMPLETE:
+                roq_complete.append(line_no)
+                continue
+            if payload == ROQ_INITIAL_ZERO:
+                roq_zero.append(line_no)
+                continue
+            sample = ROQ_FENCE.fullmatch(payload)
             if sample:
                 roq_fence.append((line_no, tuple(int(value, 16) for value in sample.groups())))
                 continue
-            sample = ROQ_SNAPSHOT.fullmatch(line[len(CP):])
+            sample = ROQ_SNAPSHOT.fullmatch(payload)
             if sample:
                 delay, *values = sample.groups()
                 roq_snapshots.append((line_no, int(delay), tuple(int(value, 16) for value in values)))
@@ -105,18 +143,16 @@ def analyze(text, meta):
             issues.append('out-of-order first command evidence')
         if diagnostics:
             issues.append('unexpected GPU diagnostic record')
-        if roq_fence:
+        preflight = records['preflight'][0][0]
+        armed = records['armed'][0][0]
+        if roq_snapshots or roq_zero or roq_complete:
+            if not roq_ready(roq_fence, roq_snapshots, roq_zero, roq_complete, preflight, armed):
+                issues.append('inconsistent ROQ settlement evidence')
+        elif roq_fence:
             line, (reg, first, settled, control, status, clock) = roq_fence[0]
-            if (len(roq_fence) != 1 or any((reg, first, settled, control)) or
-                status & 3 or clock in (0xffffffff, 0xdeafbead) or
-                not records['preflight'][0][0] < line < records['armed'][0][0]):
+            if (len(roq_fence) != 1 or any((reg, first, settled, control, status)) or
+                clock in (0xffffffff, 0xdeafbead) or not preflight < line < armed):
                 issues.append('inconsistent ROQ fence evidence')
-        if roq_snapshots:
-            line, delay, (*registers, fence_range) = roq_snapshots[0]
-            if (len(roq_snapshots) != 1 or delay or fence_range != 0x80a008a0 or
-                any(value in (0xffffffff, 0xdeafbead) for value in registers) or
-                not roq_fence or not roq_fence[0][0] < line < records['armed'][0][0]):
-                issues.append('inconsistent ROQ snapshot evidence')
         if bus_acceptance:
             preflight, preflight_values = records['preflight'][0]
             armed = records['armed'][0][0]
@@ -131,7 +167,8 @@ def analyze(text, meta):
     code = 4 if failed else 3 if issues else 0
     return {'state': 'log_reports_failure' if failed else 'incomplete_or_inconsistent' if issues else 'log_reports_first_command_complete',
             'exit_code': code, 'issues': issues, 'records': records, 'diagnostics': diagnostics,
-            'roq_fence': roq_fence, 'roq_snapshots': roq_snapshots, 'bus_measurement': bus_measurement,
+            'roq_fence': roq_fence, 'roq_snapshots': roq_snapshots,
+            'roq_initial_zero': roq_zero, 'roq_complete': roq_complete, 'bus_measurement': bus_measurement,
             'bus_acceptance': bus_acceptance, 'capture': meta}
 
 

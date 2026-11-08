@@ -155,8 +155,9 @@ model=model.replace('    assert(!(a&3));',r"""    assert(!(a&3));
     if(prep_check_active && a==uintptr_t(cc)+0x10 && ++prep_guard_reads==prep_fail_guard)return 0;
     if(a>=uintptr_t(gpu_regs) && a<uintptr_t(gpu_regs)+sizeof(gpu_regs)){
       ++gpu_reads;if(prep_late_irq)gmu_full[0x14648/4]|=4;
-      if((cp_mode==23 || cp_mode==25) && a==uintptr_t(gpu_regs)+4*0x8c2 &&
+      if((cp_mode==23 || cp_mode==25 || cp_mode==27) && a==uintptr_t(gpu_regs)+4*0x8c2 &&
          ++roq_reads==(cp_mode==23?3u:4u))return 0x010000c0;
+      if(cp_mode==27 && roq_reads==4 && a==uintptr_t(gpu_regs)+4*0x8c1)return 0;
     }""",1)
 model=model.replace('    released=fw_timeout=',r"""    a618_preparation={};a618_prepare_attempted=0;dcvs_succeeded=false;
     prep_check_active=false;prep_guard_reads=prep_fail_guard=0;
@@ -230,7 +231,7 @@ model=model.replace('    if(!is_smmu(a)) {',r"""    if(in_range(a,gpu_regs,sizeo
             gpu_regs[dword]=cp_mode==20 ? 0x0017e000u : 0x0017f000u;
             return;
         }
-        if(dword==0x8c2 && cp_mode>=21 && cp_mode<=25){
+        if(dword==0x8c2 && cp_mode>=21 && cp_mode<=27){
             assert(v==0x010000c0);
             if(cp_mode==22)gmu_full[0x24c4c/4]=1;
             return;
@@ -506,7 +507,7 @@ int main(){
   retained();
  }
  puts("PASS0157 dedicated GPU OOB: clean ACK and release, timeout, sticky/stale ACK, service and SMMU faults, unavailable GPU register, no retry");
- for(unsigned mode=0;mode<26;mode++){
+ for(unsigned mode=0;mode<28;mode++){
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
   assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
@@ -526,7 +527,7 @@ int main(){
   if(mode==17)gpu_regs[0x3c46]=4;
   if(mode==18){gpu_regs[0x18]=0x10000;gpu_regs[0x215]=1;}
   int rc=sweet_gpu_a618_oob_probe(1);
-  const bool passed=mode==0 || mode==9 || mode==12 || mode==18;
+  const bool passed=mode==0 || mode==9 || mode==12 || mode==18 || mode==25;
   if((rc==0)!=passed)fprintf(stderr,"CP model mode=%u rc=%d log=%s\n",mode,rc,messages.c_str());
   assert((rc==0)==passed);
   if(mode==8)assert(rc==-3 && cp_writes==30);
@@ -539,23 +540,24 @@ int main(){
   if(mode==5)assert(rc==-2);
   if(mode==19)assert(rc==-5 && cp_writes==18);
   if(mode==20)assert(rc==-5 && cp_writes==27);
-  if(mode>=21){
+  if(mode>=21 && mode!=25){
    assert(rc==(mode==22?-3:-5));
-   assert(cp_writes==(mode==21||mode==25?34u:mode==24?32u:31u));
+   assert(cp_writes==(mode>=26?34u:mode==21||mode==24?32u:31u));
    assert(!gpu_regs[0x98d] && !gpu_regs[0x84f] && !gpu_regs[0x800] &&
           !gpu_regs[0x807] && !gpu_regs[0x808] && prep_clean==21);
    assert(messages.find("ROQ fence DWORD=008c2")!=std::string::npos);
    assert(messages.find("ROQ snapshot delay_us=0 roq2=00000000")!=std::string::npos);
-   if(mode==21 || mode==25){
-    assert(gpu_regs[0x8c3]==128 && gpu_regs[0x9e00]==0x00180000);
-    const char *sample=mode==21?"ROQ snapshot delay_us=10000 roq2=00000000":
-                                "ROQ snapshot delay_us=10000 roq2=010000c0";
-    assert(messages.find(sample)!=std::string::npos);
-   }else assert(messages.find("ROQ snapshot delay_us=10000")==std::string::npos);
+   if(mode>=26)assert(messages.find("ROQ snapshot delay_us=10000")!=std::string::npos);
+   else assert(messages.find("ROQ snapshot delay_us=10000")==std::string::npos);
+  }
+  if(mode>=21){
+   const bool verified=messages.find("ROQ settled to stock before SQE")!=std::string::npos;
+   assert(verified==(mode==25));
+   if(verified)assert(messages.find("ROQ snapshot delay_us=10000 roq2=010000c0")!=std::string::npos);
   }
   unsigned prior=writes;assert(sweet_gpu_a618_oob_probe(1)==-1 && writes==prior);retained();
  }
- puts("PASS0163 ROQ group stops before SQE on stable zero, fence drop, delayed change and extra bits");
+ puts("PASS0165 ROQ requires exact delayed group and rejects persistent zero, wrong neighbour and fence drop");
  puts("PASS0159 first CP model: A615-family GX status, CX deassert and stuck ACK, stock setup, packet/shadow, TSB refusal, raw IRQ/CP and SMMU/fence faults, timeout and retained ownership");
  for(unsigned mode=1;mode<=6;mode++){
   reset();cold_map_enabled=true;assert(!run());

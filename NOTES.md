@@ -20,6 +20,15 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0165 Gate first GPU command on settled ROQ group
+
+The fresh 0164 capture showed ROQ2 initially read zero, then the exact
+stock value 10ms after its adjacent writes. Preserve the stock write
+order and values. Allow only that specific early zero to reach a delayed
+check of all four exact values, fence range and fence status before
+releasing SQE. Other mismatches still abort. ARM64, host model and log
+parser checks passed. Device execution awaits a fresh recovery log.
+
 ## 0164 A618 ROQ baseline and delayed sample
 
 0163 observed stable zero for ROQ2 with exact adjacent readbacks

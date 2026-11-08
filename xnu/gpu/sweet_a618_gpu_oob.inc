@@ -37,6 +37,9 @@ static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value
 #include "sweet_a618_zap_load.inc"
 #include "sweet_a618_fill.inc"
 #include "sweet_a618_present.inc"
+#ifdef KERNEL
+#include "sweet_a618_renderer.inc"
+#endif
 
 extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
 {
@@ -122,5 +125,9 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
     if (!rc && fill >= 2) a618_present_arm(run, completed_tail, fill == 3 ? a618_present_max_frames : 1u);
+#ifdef KERNEL
+    if (!rc && fill == 1 && a618_mapping.render_ready)
+        a618_render_arm(run, completed_tail);
+#endif
     return rc;
 }

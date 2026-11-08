@@ -1,0 +1,646 @@
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -0,0 +1,375 @@
++/* Mesa's msm DRM 1.7 calls, restricted to the signed iOS 20H392 backboardd.
++ * GPU memory is a single pre-pinned Normal-NC pool. No live SMMU edits,
++ * external IOSurface import, DMA teardown or GPU reset is provided here. */
++#include "sweet_a618_render_bridge.h"
++#include "../../../bsd/dev/sweet_a618_render_pool.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOSubMemoryDescriptor.h>
++#include <kern/task.h>
++#include <sys/proc.h>
++#include <sys/systm.h>
++
++enum : uint32_t {
++    kGemClose=0x09,kGetParam=0x40,kSetParam=0x41,kGemNew=0x42,
++    kGemInfo=0x43,kCpuPrep=0x44,kCpuFini=0x45,kSubmit=0x46,
++    kWaitFence=0x47,kMadvise=0x48,kQueueNew=0x4a,kQueueClose=0x4b,
++    kQueueQuery=0x4c,
++};
++struct msm_timespec { int64_t seconds,nanoseconds; };
++struct msm_param { uint32_t pipe,param;uint64_t value;uint32_t len,pad; };
++struct msm_gem_new { uint64_t size;uint32_t flags,handle; };
++struct msm_gem_info { uint32_t handle,info;uint64_t value;uint32_t len,pad; };
++struct msm_gem_cpu_prep { uint32_t handle,op;msm_timespec timeout; };
++struct msm_gem_submit_bo { uint32_t flags,handle;uint64_t presumed; };
++struct msm_gem_submit_cmd { uint32_t type,submit_idx,submit_offset,size,pad,nr_relocs;uint64_t relocs; };
++struct msm_gem_submit {
++    uint32_t flags,fence,nr_bos,nr_cmds;uint64_t bos,cmds;int32_t fence_fd;
++    uint32_t queueid;uint64_t in_syncobjs,out_syncobjs;
++    uint32_t nr_in_syncobjs,nr_out_syncobjs,syncobj_stride,pad;
++};
++struct msm_wait_fence { uint32_t fence,flags;msm_timespec timeout;uint32_t queueid; };
++struct msm_gem_madvise { uint32_t handle,madv,retained; };
++struct msm_submitqueue { uint32_t flags,prio,id; };
++struct msm_submitqueue_query { uint64_t data;uint32_t id,param,len,pad; };
++struct drm_gem_close { uint32_t handle,pad; };
++
++static_assert(sizeof(msm_param)==24 && sizeof(msm_gem_new)==16);
++static_assert(sizeof(msm_gem_submit_bo)==16 && sizeof(msm_gem_submit_cmd)==32);
++static_assert(sizeof(msm_gem_submit)==72);
++
++static constexpr unsigned kSlots=SWEET_A618_RENDER_BYTES/16384u;
++static constexpr unsigned kHandles=8192;
++static constexpr unsigned kMaxBOs=1024,kMaxCMDs=64;
++static uint64_t allocated[kSlots/64];
++static IOLock *pool_lock;
++
++static int pool_reserve(unsigned units)
++{
++    if(!units || units>kSlots || !pool_lock)return -1;
++    IOLockLock(pool_lock);
++    for(unsigned first=0;first+units<=kSlots;first++){
++        unsigned i=0;
++        for(;i<units;i++)if(allocated[(first+i)/64]&(UINT64_C(1)<<((first+i)%64)))break;
++        if(i<units){first+=i;continue;}
++        for(i=0;i<units;i++)allocated[(first+i)/64]|=UINT64_C(1)<<((first+i)%64);
++        IOLockUnlock(pool_lock);
++        return static_cast<int>(first);
++    }
++    IOLockUnlock(pool_lock);
++    return -1;
++}
++
++class SweetAdrenoBO : public IOSubMemoryDescriptor {
++    OSDeclareDefaultStructors(SweetAdrenoBO);
++public:
++    virtual void free() APPLE_KEXT_OVERRIDE {
++        /* IOSubMemoryDescriptor forwards maps to its parent. A user mapping
++         * may outlive GEM_CLOSE, so never recycle this IOVA during this boot. */
++        IOSubMemoryDescriptor::free();
++    }
++};
++OSDefineMetaClassAndStructors(SweetAdrenoBO,IOSubMemoryDescriptor);
++
++struct sweet_bo { SweetAdrenoBO *memory;uint64_t size,iova;uint32_t flags; };
++
++class SweetAdrenoUserClient : public IOUserClient {
++    OSDeclareDefaultStructors(SweetAdrenoUserClient);
++    task_t owner;
++    IOLock *lock;
++    sweet_bo *bos;
++    uint32_t next_handle,queue_count;
++    bool client_ok() const {return current_task()==owner && sweet_a618_render_ready();}
++    sweet_bo *lookup(uint32_t handle) {
++        return handle && handle<=kHandles && bos && bos[handle-1].memory ? &bos[handle-1] : nullptr;
++    }
++    IOReturn submit(msm_gem_submit *request);
++public:
++    virtual bool initWithTask(task_t task,void *sid,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE;
++    virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++    virtual IOReturn clientClose() APPLE_KEXT_OVERRIDE;
++    virtual void free() APPLE_KEXT_OVERRIDE;
++    virtual IOReturn clientMemoryForType(UInt32 type,IOOptionBits *options,
++        IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
++    virtual IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *args,
++        IOExternalMethodDispatch *dispatch,OSObject *target,void *reference) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAdrenoUserClient,IOUserClient);
++
++bool SweetAdrenoUserClient::initWithTask(task_t task,void *sid,UInt32 type,OSDictionary *props)
++{
++    static const unsigned char allowed[20]={
++        0x89,0xe6,0x32,0x85,0x41,0xc2,0xe3,0x75,0x22,0xd9,
++        0x0f,0xa4,0xa6,0x93,0xc7,0x46,0x82,0x5b,0x22,0xa8};
++    unsigned char actual[20]={};
++    if(type || task!=current_task() ||
++        proc_getcdhash(current_proc(),actual) ||
++        memcmp(actual,allowed,sizeof(allowed)) ||
++        !IOUserClient::initWithTask(task,sid,type,props))return false;
++    owner=task;
++    return true;
++}
++
++bool SweetAdrenoUserClient::start(IOService *provider)
++{
++    if(!sweet_a618_render_ready() || !IOUserClient::start(provider))return false;
++    lock=IOLockAlloc();
++    bos=static_cast<sweet_bo *>(IOMallocZero(kHandles*sizeof(sweet_bo)));
++    return lock && bos;
++}
++
++IOReturn SweetAdrenoUserClient::clientClose()
++{
++    if(lock && bos){
++        IOLockLock(lock);
++        for(unsigned i=0;i<kHandles;i++){
++            auto *memory=bos[i].memory;
++            bos[i].memory=nullptr;
++            if(memory)memory->release();
++        }
++        IOLockUnlock(lock);
++    }
++    if(!isInactive())terminate();
++    return kIOReturnSuccess;
++}
++
++void SweetAdrenoUserClient::free()
++{
++    if(bos){IOFree(bos,kHandles*sizeof(sweet_bo));bos=nullptr;}
++    if(lock){IOLockFree(lock);lock=nullptr;}
++    IOUserClient::free();
++}
++
++IOReturn SweetAdrenoUserClient::clientMemoryForType(UInt32 type,
++    IOOptionBits *options,IOMemoryDescriptor **memory)
++{
++    if(!client_ok() || !options || !memory || !lock)return kIOReturnNotPrivileged;
++    IOLockLock(lock);
++    sweet_bo *bo=lookup(type);
++    if(bo){bo->memory->retain();*memory=bo->memory;*options=0;}
++    IOLockUnlock(lock);
++    return bo ? kIOReturnSuccess:kIOReturnBadArgument;
++}
++
++IOReturn SweetAdrenoUserClient::submit(msm_gem_submit *request)
++{
++    if(!request->nr_cmds || request->nr_cmds>kMaxCMDs ||
++        !request->nr_bos || request->nr_bos>kMaxBOs ||
++        !request->bos || !request->cmds || request->nr_in_syncobjs ||
++        request->nr_out_syncobjs || request->queueid>queue_count)
++        return kIOReturnBadArgument;
++    const size_t bo_bytes=request->nr_bos*sizeof(msm_gem_submit_bo);
++    const size_t cmd_bytes=request->nr_cmds*sizeof(msm_gem_submit_cmd);
++    auto *sb=static_cast<msm_gem_submit_bo *>(IOMallocData(bo_bytes));
++    auto *sc=static_cast<msm_gem_submit_cmd *>(IOMallocData(cmd_bytes));
++    if(!sb || !sc){
++        if(sb)IOFreeData(sb,bo_bytes);if(sc)IOFreeData(sc,cmd_bytes);
++        return kIOReturnNoMemory;
++    }
++    IOReturn result=kIOReturnBadArgument;
++    uint64_t iova[kMaxCMDs];uint32_t dwords[kMaxCMDs];unsigned count=0;
++    if(copyin(static_cast<user_addr_t>(request->bos),sb,bo_bytes) ||
++        copyin(static_cast<user_addr_t>(request->cmds),sc,cmd_bytes)){
++        result=kIOReturnVMError;goto out;
++    }
++    IOLockLock(lock);
++    for(unsigned i=0;i<request->nr_bos;i++){
++        sweet_bo *bo=lookup(sb[i].handle);
++        if(!bo){result=kIOReturnBadArgument;goto unlock;}
++    }
++    for(unsigned i=0;i<request->nr_cmds;i++){
++        const auto &cmd=sc[i];
++        if(cmd.type!=1 && cmd.type!=3)continue; // Context restore uses the same IB form.
++        if(cmd.submit_idx>=request->nr_bos || cmd.nr_relocs ||
++            (cmd.submit_offset&3) || (cmd.size&3) || !cmd.size){
++            result=kIOReturnBadArgument;goto unlock;
++        }
++        sweet_bo *bo=lookup(sb[cmd.submit_idx].handle);
++        if(!bo || static_cast<uint64_t>(cmd.submit_offset)+cmd.size>bo->size){
++            result=kIOReturnBadArgument;goto unlock;
++        }
++        iova[count]=bo->iova+cmd.submit_offset;
++        dwords[count]=cmd.size/4;
++        ++count;
++    }
++    if(!count){result=kIOReturnBadArgument;goto unlock;}
++    __asm__ volatile("dsb sy" ::: "memory"); // Drain Normal-NC user writes before the GPU reads IBs.
++    request->fence=0;
++    if(sweet_a618_render_submit(iova,dwords,count,&request->fence)){
++        result=kIOReturnTimeout;goto unlock;
++    }
++    if(request->flags&0x20000000u)request->fence_fd=-1;
++    result=kIOReturnSuccess;
++unlock:
++    IOLockUnlock(lock);
++out:
++    IOFreeData(sb,bo_bytes);IOFreeData(sc,cmd_bytes);
++    return result;
++}
++
++IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *)
++{
++    if(!client_ok() || !args || !args->structureInput || !lock || !bos)
++        return kIOReturnNotPrivileged;
++    union {
++        msm_param param;msm_gem_new gem_new;msm_gem_info info;
++        msm_gem_cpu_prep prep;msm_gem_submit submit;msm_wait_fence wait;
++        msm_gem_madvise madvise;msm_submitqueue queue;
++        msm_submitqueue_query query;drm_gem_close close;
++    } r={};
++    const size_t size=args->structureInputSize;
++    if(size>sizeof(r))return kIOReturnBadArgument;
++    memcpy(&r,args->structureInput,size);
++    IOReturn result=kIOReturnSuccess;
++    switch(selector){
++    case kGetParam:
++        if(size<sizeof(r.param))return kIOReturnBadArgument;
++        switch(r.param.param){
++        case 1:r.param.value=618;break;
++        case 2:r.param.value=0x80000;break;
++        case 3:r.param.value=0x06010800;break;
++        case 4:r.param.value=800000000;break;
++        case 5:r.param.value=sweet_a618_render_completed();break;
++        case 6:r.param.value=0x100000;break;
++        case 7:r.param.value=1;break;
++        case 8:case 9:case 10:case 0x11:case 0x13:r.param.value=0;break;
++        case 0x10:r.param.value=14;break;
++        case 0x12:r.param.value=7;break;
++        default:result=kIOReturnUnsupported;break;
++        }
++        break;
++    case kSetParam:case kCpuFini:case kQueueClose:break;
++    case kGemNew:{
++        if(size<sizeof(r.gem_new) || !r.gem_new.size ||
++            r.gem_new.size>SWEET_A618_RENDER_BYTES)return kIOReturnBadArgument;
++        const uint64_t bytes=(r.gem_new.size+16383u)&~UINT64_C(16383);
++        const unsigned units=static_cast<unsigned>(bytes/16384u);
++        int first=pool_reserve(units);
++        if(first<0)return kIOReturnNoMemory;
++        auto *bo=OSTypeAlloc(SweetAdrenoBO);
++        if(!bo){
++            IOLockLock(pool_lock);
++            for(unsigned i=0;i<units;i++)allocated[(first+i)/64]&=~(UINT64_C(1)<<((first+i)%64));
++            IOLockUnlock(pool_lock);
++            return kIOReturnNoMemory;
++        }
++        auto *parent=sweet_a618_render_descriptor();
++        const uint64_t offset=static_cast<uint64_t>(first)*16384u;
++        if(!parent || !bo->initSubRange(parent,offset,bytes,kIODirectionInOut)){
++            bo->release();
++            IOLockLock(pool_lock);
++            for(unsigned i=0;i<units;i++)allocated[(first+i)/64]&=~(UINT64_C(1)<<((first+i)%64));
++            IOLockUnlock(pool_lock);
++            return kIOReturnNoMemory;
++        }
++        bzero(static_cast<unsigned char *>(sweet_a618_render_cpu())+offset,bytes);
++        IOLockLock(lock);
++        unsigned handle=0;
++        for(unsigned i=0;i<kHandles;i++){
++            unsigned candidate=(next_handle+i)%kHandles;
++            if(!bos[candidate].memory){handle=candidate+1;break;}
++        }
++        if(handle){
++            bos[handle-1]={bo,bytes,SWEET_A618_RENDER_IOVA+offset,r.gem_new.flags};
++            next_handle=handle%kHandles;
++            r.gem_new.handle=handle;
++        }
++        IOLockUnlock(lock);
++        if(!handle){bo->release();return kIOReturnNoMemory;}
++        break;
++    }
++    case kGemInfo:{
++        if(size<sizeof(r.info))return kIOReturnBadArgument;
++        IOLockLock(lock);sweet_bo *bo=lookup(r.info.handle);
++        if(!bo)result=kIOReturnBadArgument;
++        else switch(r.info.info){
++        case 0:r.info.value=static_cast<uint64_t>(r.info.handle)<<32;break;
++        case 1:r.info.value=bo->iova;break;
++        case 2:break;
++        case 5:r.info.value=bo->flags;break;
++        default:result=kIOReturnUnsupported;break;
++        }
++        IOLockUnlock(lock);break;
++    }
++    case kCpuPrep:
++        if(size<sizeof(r.prep))return kIOReturnBadArgument;
++        IOLockLock(lock);result=lookup(r.prep.handle)?kIOReturnSuccess:kIOReturnBadArgument;
++        IOLockUnlock(lock);break;
++    case kSubmit:
++        if(size<sizeof(r.submit))return kIOReturnBadArgument;
++        result=submit(&r.submit);break;
++    case kWaitFence:
++        if(size<sizeof(r.wait))return kIOReturnBadArgument;
++        result=r.wait.fence<=sweet_a618_render_completed()?
++            kIOReturnSuccess:kIOReturnTimeout;break;
++    case kMadvise:
++        if(size<sizeof(r.madvise))return kIOReturnBadArgument;
++        r.madvise.retained=1;break;
++    case kQueueNew:
++        if(size<sizeof(r.queue) || queue_count>=16)return kIOReturnBadArgument;
++        r.queue.id=++queue_count;break;
++    case kQueueQuery:
++        if(size<sizeof(r.query))return kIOReturnBadArgument;
++        if(r.query.data && r.query.len>=sizeof(uint64_t)){
++            uint64_t zero=0;
++            if(copyout(&zero,static_cast<user_addr_t>(r.query.data),sizeof(zero)))
++                result=kIOReturnVMError;
++        }
++        break;
++    case kGemClose:{
++        if(size<sizeof(r.close))return kIOReturnBadArgument;
++        IOLockLock(lock);sweet_bo *bo=lookup(r.close.handle);
++        if(bo){
++            auto *memory=bo->memory;
++            bo->memory=nullptr;
++            memory->release();
++        }else result=kIOReturnBadArgument;
++        IOLockUnlock(lock);break;
++    }
++    default:result=kIOReturnUnsupported;break;
++    }
++    if(result==kIOReturnSuccess && args->structureOutput){
++        size_t output=args->structureOutputSize;
++        if(output>size)output=size;
++        memcpy(args->structureOutput,&r,output);
++        args->structureOutputSize=static_cast<uint32_t>(output);
++    }
++    return result;
++}
++
++class SweetAdreno : public IOService {
++    OSDeclareDefaultStructors(SweetAdreno);
++public:
++    virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
++        if(!IOService::start(provider))return false;
++        setProperty(kIOUserClientClassKey,"SweetAdrenoUserClient");
++        setName("SweetAdreno");
++        registerService();
++        return true;
++    }
++};
++OSDefineMetaClassAndStructors(SweetAdreno,IOService);
++
++void SweetAdrenoStart(void)
++{
++    if(!sweet_a618_render_ready() || pool_lock)return;
++    pool_lock=IOLockAlloc();
++    IOService *platform=IOService::getPlatform();
++    SweetAdreno *service=OSTypeAlloc(SweetAdreno);
++    if(!pool_lock || !platform || !service || !service->init() || !service->attach(platform)){
++        OSSafeReleaseNULL(service);
++        IOLog("SWEET CA: Adreno service unavailable; CPU renderer retained\n");
++        return;
++    }
++    if(!service->start(platform)){
++        service->detach(platform);
++        IOLog("SWEET CA: Adreno service start failed\n");
++    }
++    service->release();
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_render_bridge.h
+@@ -0,0 +1,17 @@
++#ifndef SWEET_A618_RENDER_BRIDGE_H
++#define SWEET_A618_RENDER_BRIDGE_H
++
++#include <stdint.h>
++#include <stddef.h>
++class IOBufferMemoryDescriptor;
++
++/* Only the signed backboardd client may call the bridge. Every BO must lie in
++ * the pre-pinned pool. A failed GPU publication poisons it until device reset. */
++extern "C" bool sweet_a618_render_ready(void);
++extern "C" IOBufferMemoryDescriptor *sweet_a618_render_descriptor(void);
++extern "C" void *sweet_a618_render_cpu(void);
++extern "C" int sweet_a618_render_submit(const uint64_t *iova,
++    const uint32_t *dwords, unsigned count, uint32_t *fence);
++extern "C" uint32_t sweet_a618_render_completed(void);
++
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_render_ring.inc
+@@ -0,0 +1,87 @@
++/* Kernel ring writer for the renderer's own packets. All callers hold the
++ * GPU submit lock. This is the full 32 KiB ring configured by CP_RB_CNTL.
++ * After publishing WPTR any failure must permanently stop submissions. */
++static int a618_render_ring(persistent_gmu *s, const a618_cp_run &run,
++    const uint32_t *packet, unsigned count, unsigned &tail)
++{
++    constexpr unsigned pages = 8, page_words = 1024, words = pages * page_words;
++    constexpr unsigned last_tail = words - 2; // Stock KGSL leaves room for CP_NOP.
++    constexpr unsigned suffix_words = 3;
++    if (!run.shadow || !packet || !count || count > last_tail - suffix_words || tail > last_tail)
++        return -5;
++    const unsigned size = count + suffix_words;
++    const bool wrap = size > last_tail - tail;
++    if (wrap && size >= tail)
++        return -5;
++    const unsigned start = wrap ? 0 : tail;
++    const unsigned end = start + size;
++
++    if (a618_cp_guard(s, run) || a618_cp_read(run, 0x806) != tail ||
++        a618_cp_read(run, 0x807) != tail || *run.shadow != tail)
++        return -3;
++
++    unsigned dirty = 0;
++    for (unsigned page = start / page_words; page <= (end - 1) / page_words; ++page)
++        dirty |= 1u << page;
++    if (wrap)
++        dirty |= 1u << (tail / page_words);
++
++    uint32_t *page_cpu[pages] = {};
++    for (unsigned page = 0; page < pages; ++page) {
++        if (!(dirty & (1u << page)))
++            continue;
++        void *cpu = nullptr;
++        if (a618_cp_buffer(1, page, 8 + page, &cpu))
++            return -5;
++        page_cpu[page] = static_cast<uint32_t *>(cpu);
++    }
++
++    auto store = [&](unsigned index, uint32_t value) {
++        page_cpu[index / page_words][index % page_words] = value;
++    };
++    if (wrap)
++        store(tail, a618_pkt7(0x10, words - tail - 1)); // CP_NOP; remaining words are ignored.
++    for (unsigned i = 0; i < count; ++i)
++        store(start + i, packet[i]);
++    store(start + count, a618_pkt7(0x62, 2)); // CP_WHERE_AM_I
++    store(start + count + 1, SWEET_A618_SCRATCH_IOVA);
++    store(start + count + 2, 0);
++
++    for (unsigned page = 0; page < pages; ++page) {
++        if ((dirty & (1u << page)) && sweet_gpu_memory_clean(a618_preparation.storage[1], page))
++            return -5;
++    }
++    if (a618_cp_guard(s, run))
++        return -3;
++
++    mmio_write32(a618_cp_register(run, 0x807), end);
++    if (complete(s))
++        return -3;
++    constexpr uint32_t busy_off = 0x23b0cu * 4 - 0x6a000u;
++    auto within = [&](uint32_t pointer) {
++        if (pointer >= words)
++            return false;
++        return wrap ? pointer >= tail || pointer <= end : pointer >= tail && pointer <= end;
++    };
++    for (unsigned waited_ms = 0; waited_ms <= 100; ++waited_ms) {
++        uint32_t status = UINT32_MAX, busy = UINT32_MAX;
++        if (a618_cp_guard(s, run) || post_read(s, a618_fence_status, &status) || status ||
++            post_read(s, busy_off, &busy) || busy == UINT32_MAX || a618_cp_read(run, 0x807) != end)
++            return -3;
++        const uint32_t rptr = a618_cp_read(run, 0x806);
++        if (complete(s))
++            return -3;
++        const uint32_t shadow = *run.shadow;
++        if (!within(rptr) || !within(shadow))
++            return -5;
++        if (rptr == end && shadow == end && !(busy & (1u << 23))) {
++            if (wrap)
++                IOLog("SWEET CA: ring wrap tail=%u end=%u pages=%02x\n", tail, end, dirty);
++            tail = end;
++            return 0;
++        }
++        if (waited_ms < 100)
++            IOSleep(1);
++    }
++    return -4;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_renderer.inc
+@@ -0,0 +1,111 @@
++/* Private synchronous CoreAnimation queue. The existing 0170 fill is the
++ * hardware proof before this is armed. No reset, teardown, OOB release or
++ * submission retry occurs after any uncertain result. */
++#include "sweet_a618_render_bridge.h"
++#include "sweet_a618_render_ring.inc"
++
++static struct {
++    a618_cp_run run;
++    IOLock *lock;
++    unsigned tail;
++    uint32_t fence;
++    bool ready, poisoned;
++} a618_renderer;
++
++extern "C" bool sweet_a618_render_ready(void)
++{
++    return __atomic_load_n(&a618_renderer.ready,__ATOMIC_ACQUIRE) &&
++        !__atomic_load_n(&a618_renderer.poisoned,__ATOMIC_ACQUIRE);
++}
++
++extern "C" IOBufferMemoryDescriptor *sweet_a618_render_descriptor(void)
++{
++    return sweet_a618_render_ready() ?
++        sweet_gpu_render_memory_descriptor(a618_mapping.render_pool) : nullptr;
++}
++
++extern "C" void *sweet_a618_render_cpu(void)
++{
++    return sweet_a618_render_ready() ?
++        sweet_gpu_render_memory_cpu(a618_mapping.render_pool) : nullptr;
++}
++
++extern "C" uint32_t sweet_a618_render_completed(void)
++{
++    return sweet_a618_render_ready() ?
++        __atomic_load_n(&a618_renderer.fence,__ATOMIC_ACQUIRE) : 0;
++}
++
++static void a618_render_arm(const a618_cp_run &run, unsigned tail)
++{
++    if (!a618_mapping.render_ready || a618_renderer.ready ||
++        tail >= 8190 || a618_tree_check() ||
++        a618_cp_guard(&probe,run) ||
++        a618_cp_read(run,0x806)!=tail ||
++        a618_cp_read(run,0x807)!=tail || *run.shadow!=tail) return;
++    void *fill=nullptr;
++    if(a618_cp_buffer(a618_fill_buffer,0,SWEET_A618_DATA_PAGES,&fill))return;
++    a618_renderer.lock=IOLockAlloc();
++    if(!a618_renderer.lock)return;
++    auto *words=static_cast<volatile uint32_t *>(fill);
++    words[16]=0;
++    if(sweet_gpu_memory_clean(a618_preparation.storage[a618_fill_buffer],0))return;
++    a618_renderer.run=run;
++    a618_renderer.tail=tail;
++    __atomic_store_n(&a618_renderer.ready,true,__ATOMIC_RELEASE);
++    IOLog("SWEET CA: renderer armed tail=%u private_pool=%u MiB\n",
++        tail,SWEET_A618_RENDER_BYTES>>20);
++    extern void SweetAdrenoStart(void);
++    SweetAdrenoStart();
++}
++
++extern "C" int sweet_a618_render_submit(const uint64_t *iova,
++    const uint32_t *dwords,unsigned count,uint32_t *fence)
++{
++    if(fence)*fence=0;
++    if(!iova || !dwords || !fence || !count || count>64 ||
++        !sweet_a618_render_ready())return -1;
++    uint32_t packet[64*4+16];
++    unsigned used=0;
++    packet[used++]=a618_pkt7(0x46,1); // CCU invalidate before IB reads.
++    packet[used++]=0x31;
++    for(unsigned i=0;i<count;i++){
++        const uint64_t base=SWEET_A618_RENDER_IOVA;
++        const uint64_t end=base+SWEET_A618_RENDER_BYTES;
++        const uint64_t bytes=static_cast<uint64_t>(dwords[i])*4;
++        if(!dwords[i] || dwords[i]>0x100000 || (iova[i]&3) ||
++            iova[i]<base || iova[i]>=end || bytes>end-iova[i])return -1;
++        packet[used++]=a618_pkt7(0x3f,3); // CP_INDIRECT_BUFFER.
++        packet[used++]=static_cast<uint32_t>(iova[i]);
++        packet[used++]=static_cast<uint32_t>(iova[i]>>32);
++        packet[used++]=dwords[i];
++    }
++    packet[used++]=a618_pkt7(0x26,0); // CP_WAIT_FOR_IDLE.
++    packet[used++]=a618_pkt7(0x46,4); // CACHE_FLUSH_TS.
++    packet[used++]=0x04;
++    packet[used++]=SWEET_A618_FILL_IOVA+64;
++    packet[used++]=0;
++    /* The last word is filled while the single GPU submit lock is held. */
++    IOLockLock(a618_renderer.lock);
++    if(!sweet_a618_render_ready()){
++        IOLockUnlock(a618_renderer.lock);return -3;
++    }
++    uint32_t next=a618_renderer.fence+1;
++    if(!next)next=1;
++    packet[used++]=next;
++    int rc=a618_render_ring(&probe,a618_renderer.run,packet,used,a618_renderer.tail);
++    void *fill=nullptr;
++    if(!rc && a618_cp_buffer(a618_fill_buffer,0,SWEET_A618_DATA_PAGES,&fill))rc=-5;
++    if(!rc && static_cast<volatile uint32_t *>(fill)[16]!=next)rc=-5;
++    if(rc){
++        __atomic_store_n(&a618_renderer.poisoned,true,__ATOMIC_RELEASE);
++        IOLog("SWEET CA: submit disabled rc=%d count=%u tail=%u\n",rc,count,a618_renderer.tail);
++    }else{
++        __atomic_store_n(&a618_renderer.fence,next,__ATOMIC_RELEASE);
++        *fence=next;
++        if(next<=4)IOLog("SWEET CA: hardware submit fence=%u IBs=%u tail=%u\n",
++            next,count,a618_renderer.tail);
++    }
++    IOLockUnlock(a618_renderer.lock);
++    return rc;
++}
+--- a/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -37,6 +37,9 @@
+ #include "sweet_a618_zap_load.inc"
+ #include "sweet_a618_fill.inc"
+ #include "sweet_a618_present.inc"
++#ifdef KERNEL
++#include "sweet_a618_renderer.inc"
++#endif
+ 
+ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
+ {
+@@ -122,5 +125,9 @@
+     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
+         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
+     if (!rc && fill >= 2) a618_present_arm(run, completed_tail, fill == 3 ? a618_present_max_frames : 1u);
++#ifdef KERNEL
++    if (!rc && fill == 1 && a618_mapping.render_ready)
++        a618_render_arm(run, completed_tail);
++#endif
+     return rc;
+ }
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -8,6 +8,9 @@
+ #include "sweet_gpu_memory.h"
+ #include "sweet_gpu_render_memory.h"
+ #include <IOKit/IOLib.h>
++#ifdef KERNEL
++#include <IOKit/IOLocks.h>
++#endif
+ #ifdef KERNEL
+ #include <pexpert/pexpert.h>
+ #endif
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,6 +22,7 @@
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_memory.cpp                            optional iokitcpp
++iokit/Kernel/arm/SweetAdreno.cpp                                  optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp                        optional iokitcpp
+ iokit/Kernel/arm/sweet_gmu_memory.cpp                            optional iokitcpp
+ iokit/Kernel/arm/sweet_gpu_memory_probe.cpp                      optional iokitcpp

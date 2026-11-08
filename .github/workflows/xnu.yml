@@ -115,7 +115,7 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_context.c --exclude=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0137-sweet-smmu-fault-type-check.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_context.c --exclude=bsd/dev/sweet_smmu_context.h --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0138-sweet-smmu-inactive-unmatched-teardown.patch"
           # 0140 corrects the profile against Xiaomi's exact sweet_k6a tree.
-          git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_hfi_table.c --exclude=bsd/dev/sweet_gpu_hfi_table.h --exclude=bsd/dev/sweet_gmu_layout.c --exclude=iokit/Kernel/arm/sweet_gmu_memory.cpp --exclude=iokit/Kernel/arm/sweet_gmu_memory.h --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/conf/files.arm64 --exclude=bsd/dev/sweet_gpu_hfi_table.c --exclude=bsd/dev/sweet_gpu_hfi_table.h --exclude=bsd/dev/sweet_gmu_layout.c --exclude=iokit/Kernel/arm/sweet_gmu_memory.cpp --exclude=iokit/Kernel/arm/sweet_gmu_memory.h --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp "$GITHUB_WORKSPACE/xnu/patches/0139-sweet-gmu-legacy-memory.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0140-sweet-k6a-stock-gmu-profile.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_hfi_transport.c --exclude=bsd/dev/sweet_hfi_transport.h "$GITHUB_WORKSPACE/xnu/patches/0141-sweet-hfi-stock-version-rx-request.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_rpmh.c "$GITHUB_WORKSPACE/xnu/patches/0142-sweet-command-db-snapshot.patch"
@@ -137,7 +137,7 @@ jobs:
           #0156 supersedes all0155 hunks; exact sources verified below.
           git -C dxb/xnu apply --reverse --check --include=bsd/dev/sweet_smmu_context.c --include=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0157-sweet-a618-gpu-oob.patch"
-          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
           # 0160 supersedes the sole 0159 target. Canonical bytes are checked below.
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc "$GITHUB_WORKSPACE/xnu/patches/0160-sweet-a618-cx-traffic.patch"
           # The exact preflight validates the CP and PAS source series in order.
@@ -145,8 +145,9 @@ jobs:
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_a618_fill.inc --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc "$GITHUB_WORKSPACE/xnu/patches/0169-sweet-a618-combined-fill.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exclude=bsd/dev/sweet_a618_address_space.c --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_a618_fill.inc --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc "$GITHUB_WORKSPACE/xnu/patches/0170-sweet-a618-fill-buffer.patch"
           git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_a618_present.inc "$GITHUB_WORKSPACE/xnu/patches/0171-sweet-a618-iosurface-span.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0172-sweet-a618-bounded-present.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0173-sweet-a618-render-pool.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc "$GITHUB_WORKSPACE/xnu/patches/0172-sweet-a618-bounded-present.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0173-sweet-a618-render-pool.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0174-sweet-a618-mesa-client.patch"
           python3 tools/verify-gmu-service-patch.py --patched-tree dxb/xnu
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: boot bandwidth commands=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: PAS AUTH status=' > /dev/null

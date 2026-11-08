@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check 0150–0173 against exact published 0149 Git bytes before a full build.
+"""Check 0150–0174 against exact published 0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -124,6 +124,14 @@ PATCHES += (('xnu/patches/0173-sweet-a618-render-pool.patch', RENDER_POOL_TARGET
     'iokit/Kernel/arm/sweet_gpu_memory.cpp',
     'iokit/Kernel/arm/sweet_a618_mapping.inc',
     'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
+RENDER_CLIENT_TARGETS = {'iokit/Kernel/arm/' + name for name in (
+    'SweetAdreno.cpp', 'sweet_a618_render_bridge.h', 'sweet_a618_render_ring.inc',
+    'sweet_a618_renderer.inc')}
+NEW_TARGETS.update(RENDER_CLIENT_TARGETS)
+TARGETS.update({name: 'xnu/gpu/' + name.rsplit('/', 1)[1] for name in RENDER_CLIENT_TARGETS})
+WIRING.add('iokit/conf/files.arm64')
+PATCHES += (('xnu/patches/0174-sweet-a618-mesa-client.patch', RENDER_CLIENT_TARGETS | {
+    OOB_TARGET, 'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp', 'iokit/conf/files.arm64'}),)
 
 
 def main():
@@ -148,6 +156,10 @@ def main():
                      'sweet_a618_cp_init','sweet_a618_pwrup'):
             if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
                 raise ValueError('actual builder missing unique compile entry: '+name)
+        iokit_files = (args.patched_tree/'iokit/conf/files.arm64').read_text(encoding='utf-8').splitlines()
+        entries = [line.split() for line in iokit_files]
+        if entries.count(['iokit/Kernel/arm/SweetAdreno.cpp', 'optional', 'iokitcpp']) != 1:
+            raise ValueError('actual builder missing unique SweetAdreno compile entry')
         rpmh=(args.patched_tree/'bsd/dev/sweet_rpmh.c').read_text(encoding='utf-8')
         include='#include "sweet_rpmh_gpu_bcm_info.inc"'
         if rpmh.count(include)!=1 or rpmh.index(include)>rpmh.index('#endif /* ARM64_BOARD_CONFIG_SWEET */'):
@@ -194,7 +206,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0173 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0174 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

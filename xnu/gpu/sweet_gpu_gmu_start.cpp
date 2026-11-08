@@ -9,6 +9,9 @@
 #include "sweet_gpu_render_memory.h"
 #include <IOKit/IOLib.h>
 #ifdef KERNEL
+#include <IOKit/IOLocks.h>
+#endif
+#ifdef KERNEL
 #include <pexpert/pexpert.h>
 #endif
 extern "C" {

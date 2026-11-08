@@ -22,6 +22,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "../../../bsd/dev/sweet_gmu_dcvs.h"
 #include "../../../bsd/dev/sweet_a618_firmware.h"
 #include "../../../bsd/dev/sweet_a618_address_space.h"
+#include "../../../bsd/dev/sweet_a618_cp_init.h"
+#include "../../../bsd/dev/sweet_a618_pwrup.h"
 #else
 #include "sweet_smmu_k6a.h"
 #include "sweet_gmu_start.h"
@@ -33,6 +35,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #include "sweet_gmu_dcvs.h"
 #include "sweet_a618_firmware.h"
 #include "sweet_a618_address_space.h"
+#include "sweet_a618_cp_init.h"
+#include "sweet_a618_pwrup.h"
 #endif
 }
 

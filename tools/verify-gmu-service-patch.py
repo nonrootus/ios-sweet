@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0157 against exact published0149 Git bytes before a full build.
+"""Check0150-0158 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -59,6 +59,13 @@ TARGETS[OOB_TARGET] = 'xnu/gpu/sweet_a618_gpu_oob.inc'
 PATCHES += (('xnu/patches/0157-sweet-a618-gpu-oob.patch', {
     OOB_TARGET, PREP_TARGET, 'bsd/dev/sweet_gpu_probe.c',
     'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
+CP_TARGETS = {'bsd/dev/'+n for n in ('sweet_a618_cp_init.c','sweet_a618_cp_init.h',
+    'sweet_a618_pwrup.c','sweet_a618_pwrup.h','sweet_a618_pwrup_profile.h','sweet_a618_protect_profile.h')}
+CP_TARGETS.add('iokit/Kernel/arm/sweet_a618_cp_run.inc')
+NEW_TARGETS.update(CP_TARGETS)
+TARGETS.update({name:'xnu/gpu/'+name.rsplit('/',1)[1] for name in CP_TARGETS})
+PATCHES += (('xnu/patches/0158-sweet-a618-first-cp.patch', CP_TARGETS | {
+    'bsd/conf/files','bsd/dev/sweet_gpu_probe.c','iokit/Kernel/arm/sweet_gpu_gmu_start.cpp',OOB_TARGET}),)
 
 
 def main():
@@ -79,7 +86,8 @@ def main():
             if not path.is_file() or path.read_bytes()!=blob(revision,canonical):
                 raise ValueError('actual builder tree missing or stale: '+target)
         files=(args.patched_tree/'bsd/conf/files').read_text(encoding='utf-8').splitlines()
-        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_pte','sweet_a618_address_space'):
+        for name in ('sweet_hfi_config','sweet_gmu_board_profile','sweet_gmu_dcvs','sweet_a618_pte','sweet_a618_address_space',
+                     'sweet_a618_cp_init','sweet_a618_pwrup'):
             if files.count('bsd/dev/'+name+'.c\t\tstandard')!=1:
                 raise ValueError('actual builder missing unique compile entry: '+name)
         rpmh=(args.patched_tree/'bsd/dev/sweet_rpmh.c').read_text(encoding='utf-8')
@@ -122,7 +130,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0157 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0158 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

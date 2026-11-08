@@ -1,0 +1,557 @@
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -22,6 +22,8 @@
+ #include "../../../bsd/dev/sweet_gmu_dcvs.h"
+ #include "../../../bsd/dev/sweet_a618_firmware.h"
+ #include "../../../bsd/dev/sweet_a618_address_space.h"
++#include "../../../bsd/dev/sweet_a618_cp_init.h"
++#include "../../../bsd/dev/sweet_a618_pwrup.h"
+ #else
+ #include "sweet_smmu_k6a.h"
+ #include "sweet_gmu_start.h"
+@@ -33,6 +35,8 @@
+ #include "sweet_gmu_dcvs.h"
+ #include "sweet_a618_firmware.h"
+ #include "sweet_a618_address_space.h"
++#include "sweet_a618_cp_init.h"
++#include "sweet_a618_pwrup.h"
+ #endif
+ }
+ 
+--- a/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -20,9 +20,16 @@
+     return 0;
+ }
+ 
+-extern "C" int sweet_gpu_a618_oob_probe(void)
++#ifdef KERNEL
++#include "../../../bsd/dev/sweet_a618_protect_profile.h"
++#else
++#include "sweet_a618_protect_profile.h"
++#endif
++#include "sweet_a618_cp_run.inc"
++
++extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp)
+ {
+-    if (!__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
++    if (first_cp > 1 || !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
+     auto *s = &probe;
+     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
+         return -3;
+@@ -69,16 +76,26 @@
+             status, protect, address_mode);
+     }
+ 
++    a618_cp_run run = {};
++    if (first_cp && !rc && !cleanup && acked && ack_cleared) {
++        rc = a618_cp_first(s,run);
++        IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
++            rc,run.writes,run.sqe_attempted,run.rptr,run.wptr,run.shadow_rptr,run.busy,run.fence,run.waited_us);
++    }
+     /* Even an error return from a store could have reached the GMU. Release
+      * only our vote, and only if the same session and MMIO domain are healthy. */
+-    const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
+-    if (!release_guard) {
+-        release_attempted = true;
+-        int release_rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_release);
+-        if (!release_rc) release_rc = a618_gpu_oob_health(s, 0, &irq);
+-        if (!cleanup) cleanup = release_rc;
+-    } else if (!cleanup) {
+-        cleanup = release_guard;
++    if (run.sqe_attempted) {
++        IOLog("SWEET A618 CP: GPU OOB, boot vote and memory retained until reset\n");
++    } else {
++        const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
++        if (!release_guard) {
++            release_attempted = true;
++            int release_rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_release);
++            if (!release_rc) release_rc = a618_gpu_oob_health(s, 0, &irq);
++            if (!cleanup) cleanup = release_rc;
++        } else if (!cleanup) {
++            cleanup = release_guard;
++        }
+     }
+     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
+     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_cp_run.inc
+@@ -0,0 +1,209 @@
++/* First submission on sweet_k6a/A618 only. GPU-relative offsets are DWORDs
++ * from Xiaomi 10c33d40 a6xx_reg.h. Keep the dedicated GPU OOB vote through
++ * this function. The caller must retain it and all memory if SQE is released. */
++struct a618_cp_run {
++    uintptr_t extended;
++    volatile uint32_t *shadow;
++    bool sqe_attempted;
++    bool tsb_preconfigured;
++    unsigned writes, waited_us;
++    uint32_t rptr, wptr, shadow_rptr, busy, fence;
++};
++
++static uintptr_t a618_cp_register(const a618_cp_run &run, unsigned dword)
++{
++    unsigned bytes = dword * 4;
++    return bytes < a618_register_size ? a618_preparation.gpu + bytes :
++        run.extended + bytes - a618_register_size;
++}
++
++static uint32_t a618_cp_read(const a618_cp_run &run, unsigned dword)
++{
++    return mmio_read(a618_cp_register(run, dword));
++}
++
++static int a618_cp_guard(persistent_gmu *s, const a618_cp_run &run)
++{
++    if (a618_gpu_oob_health(s, 0, nullptr)) return -3;
++    /* The regular status may be masked. The GMU mirror exposes raw GPU IRQs.
++     * Only stock A6xx error bits are fatal; idle/CP completion are events. */
++    constexpr uint32_t error_irq = (1u<<1)|(1u<<6)|(1u<<7)|(1u<<9)|
++        (1u<<22)|(1u<<23)|(1u<<24)|(1u<<25)|(1u<<28);
++    constexpr uint32_t cp_error = (1u<<0)|(1u<<1)|(1u<<2)|
++        (1u<<4)|(1u<<5)|(1u<<6)|(1u<<7);
++    uint32_t irq = a618_cp_read(run, 0x201);     // RBBM_INT_0_STATUS
++    uint32_t fault = a618_cp_read(run, 0x821);   // CP_HW_FAULT
++    uint32_t protect = a618_cp_read(run, 0x824); // CP_PROTECT_STATUS
++    uint32_t cp_irq = a618_cp_read(run, 0x823);  // CP_INTERRUPT_STATUS
++    uint32_t unmasked = 0;
++    constexpr uint32_t raw_irq_off = 0x23b15u*4-0x6a000u;
++    if (post_read(s, raw_irq_off, &unmasked)) return -2;
++    if (irq == UINT32_MAX || fault == UINT32_MAX || protect == UINT32_MAX ||
++        cp_irq == UINT32_MAX || unmasked == UINT32_MAX ||
++        ((irq | unmasked) & error_irq) || (cp_irq & cp_error) || fault || protect) {
++        IOLog("SWEET A618 CP: fault IRQ=%08x RAW=%08x CPIRQ=%08x HW=%08x PROTECT=%08x\n",
++            irq, unmasked, cp_irq, fault, protect);
++        return -3;
++    }
++    return 0;
++}
++
++static int a618_cp_set(persistent_gmu *s, a618_cp_run &run, unsigned dword, uint32_t value)
++{
++    if (a618_cp_guard(s, run)) return -3;
++    ++run.writes;
++    mmio_write32(a618_cp_register(run, dword), value);
++    if (complete(s)) return -2;
++    uint32_t readback = a618_cp_read(run, dword);
++    if (readback == value) return 0;
++    IOLog("SWEET A618 CP: readback DWORD=%05x expected=%08x actual=%08x\n", dword, value, readback);
++    return -5;
++}
++
++static int a618_cp_preflight(persistent_gmu *s, a618_cp_run &run)
++{
++    if (a618_cp_guard(s, run)) return -3;
++    uint32_t halt = a618_cp_read(run, 0x3c45), halt_ack = a618_cp_read(run, 0x3c46);
++    uint32_t gx_halt = a618_cp_read(run, 0x16), gx_ack = a618_cp_read(run, 0x17);
++    uint32_t trust = a618_cp_read(run, 0xf400), tsb_lo = a618_cp_read(run, 0xf800);
++    uint32_t tsb_hi = a618_cp_read(run, 0xf801), tsb_size = a618_cp_read(run, 0xf802);
++    uint32_t tsb_ctl = a618_cp_read(run, 0xf803);
++    IOLog("SWEET A618 CP: preflight GBIF=%08x/%08x GX=%08x/%08x TRUST=%08x TSB=%08x%08x/%08x/%08x\n",
++        halt, halt_ack, gx_halt, gx_ack, trust, tsb_hi, tsb_lo, tsb_size, tsb_ctl);
++    if (halt || halt_ack || gx_halt || gx_ack || trust == UINT32_MAX || tsb_ctl || tsb_hi)
++        return -3;
++    /* Stock KGSL 64-bit profile: secure end 0xfc000000, default size 256MiB
++     * (no qcom,secure-size in captured FDT). Only empty or exact stock TSB
++     * is accepted. Never write TRUST_CNTL or move an existing window. */
++    if ((tsb_lo || tsb_size) && (tsb_lo != 0xec000000u || tsb_size != 0x10000000u))
++        return -3;
++    run.tsb_preconfigured = tsb_lo == 0xec000000u && tsb_size == 0x10000000u;
++    static const unsigned reset_registers[] = {0x800,0x801,0x802,0x804,0x805,0x806,0x807,0x808,0x830,0x831,0x842,0x84f};
++    for (unsigned reg : reset_registers)
++        if (a618_cp_read(run, reg)) return -3;
++    for (unsigned slot = SWEET_A618_PROTECT_COUNT; slot < SWEET_A618_PROTECT_SLOTS; ++slot)
++        if (a618_cp_read(run, SWEET_A618_PROTECT_FIRST_SLOT+slot)) return -3;
++    return 0;
++}
++
++static int a618_cp_configure(persistent_gmu *s, a618_cp_run &run)
++{
++    /* _set_secvid, a6xx_enable_64bit, and the A618 paths of a6xx_start.
++     * FDT HBB=14, MAL=32, UBWC=2, no macrotiling or two-pass WFI quirk.
++     * Stock GMEM size 512KiB, with a 1MiB aligned UCHE GMEM base. */
++    static const struct { unsigned reg; uint32_t value; } setup[] = {
++        {0x842,1}, {0xc01,1}, {0x8601,1}, {0x8e05,1}, {0x9e01,1}, {0xbe05,1},
++        {0xa601,1}, {0x9601,1}, {0xe00,1}, {0xae01,1}, {0xb601,1}, {0xf810,1},
++        {0x10,3}, {0x50b,0xffffffff}, {0xe05,0xffffffc0}, {0xe06,0x1ffff},
++        {0xe09,0xfffff000}, {0xe0a,0x1ffff}, {0xe07,0xfffff000}, {0xe08,0x1ffff},
++        {0xe0b,0x100000}, {0xe0c,0}, {0xe0d,0x17ffff}, {0xe0e,0}, {0xe18,0x804}, {0xe17,4},
++        {0x8c2,0x010000c0}, {0x8c1,0x8040362c}, {0x8c3,128}, {0x9e00,0x00180000},
++        {0x98d,1}, {0x500,1}, {0x8e08,2}, {0xb604,2}, {0xae02,2}, {0xe01,0x00200000},
++        {0x1f,0x40cfffff}, {0xe19,1}, {SWEET_A618_PROTECT_CONTROL,SWEET_A618_PROTECT_ENABLE},
++    };
++    if (!run.tsb_preconfigured) {
++        static const struct { unsigned reg; uint32_t value; } tsb[] = {
++            {0xf803,0}, {0xf800,0xec000000}, {0xf801,0}, {0xf802,0x10000000},
++        };
++        for (const auto &item : tsb) {
++            int rc = a618_cp_set(s, run, item.reg, item.value);
++            if (rc) return rc;
++        }
++    }
++    for (const auto &item : setup) {
++        int rc = a618_cp_set(s, run, item.reg, item.value);
++        if (rc) return rc;
++    }
++    for (unsigned i = 0; i < SWEET_A618_PROTECT_COUNT; ++i) {
++        int rc = a618_cp_set(s, run, SWEET_A618_PROTECT_FIRST_SLOT+i, sweet_a618_protect_values[i]);
++        if (rc) return rc;
++    }
++    return 0;
++}
++
++static int a618_cp_buffer(unsigned buffer, unsigned page, unsigned pa_index, void **cpu)
++{
++    uint64_t pa = 0;
++    if (sweet_gpu_memory_page(a618_preparation.storage[buffer], page, cpu, &pa) || !*cpu ||
++        (reinterpret_cast<uintptr_t>(*cpu) & 4095) || pa != a618_preparation.physical[pa_index])
++        return -5;
++    return 0;
++}
++
++static int a618_cp_publish(persistent_gmu *s, a618_cp_run &run)
++{
++    uint32_t values[SWEET_A618_PWRUP_REGISTERS], packet[SWEET_A618_CP_BOOT_WORDS];
++    for (unsigned i = 0; i < SWEET_A618_PWRUP_REGISTERS; ++i) {
++        uint32_t reg;
++        if (sweet_a618_pwrup_dword_offset(i, &reg) || reg >= 0x10000 || a618_cp_guard(s, run)) return -3;
++        values[i] = a618_cp_read(run, reg);
++        if (values[i] == UINT32_MAX) return -2;
++    }
++    void *pwrup = nullptr, *scratch = nullptr, *ring[8] = {};
++    if (a618_cp_buffer(3,0,17,&pwrup) || a618_cp_buffer(2,0,16,&scratch) ||
++        sweet_a618_cp_boot_encode(packet,SWEET_A618_CP_BOOT_WORDS,SWEET_A618_PWRUP_IOVA,SWEET_A618_SCRATCH_IOVA))
++        return -5;
++    for (unsigned i = 0; i < 8; ++i)
++        if (a618_cp_buffer(1,i,8+i,&ring[i])) return -5;
++    if (sweet_a618_pwrup_build(pwrup,4096,values,SWEET_A618_PWRUP_REGISTERS)) return -5;
++    run.shadow = static_cast<volatile uint32_t *>(scratch);
++    *run.shadow = 0;
++    for (unsigned page = 0; page < 8; ++page) {
++        auto *words = static_cast<uint32_t *>(ring[page]);
++        for (unsigned i = 0; i < 1024; ++i)
++            words[i] = page == 0 && i < SWEET_A618_CP_BOOT_WORDS ? packet[i] : 0xaaaaaaaau;
++        if (sweet_gpu_memory_clean(a618_preparation.storage[1],page)) return -5;
++    }
++    if (sweet_gpu_memory_clean(a618_preparation.storage[2],0) ||
++        sweet_gpu_memory_clean(a618_preparation.storage[3],0) || complete(s)) return -5;
++    return sweet_a618_address_space_check(a618_mapping.tables,a618_preparation.physical) ? -5 : 0;
++}
++
++static int a618_cp_first(persistent_gmu *s, a618_cp_run &run)
++{
++    constexpr unsigned extended_size = 0x40000 - a618_register_size;
++    run.extended = ml_io_map(a618_register_base+a618_register_size,extended_size);
++    if (!run.extended) return -2;
++    int rc = a618_cp_preflight(s,run);
++    if (rc) return rc;
++    rc = a618_cp_configure(s,run);
++    if (rc) return rc;
++    rc = a618_cp_publish(s,run);
++    if (rc) return rc;
++    static const struct { unsigned reg; uint32_t value; } ring_setup[] = {
++        {0x804,SWEET_A618_SCRATCH_IOVA},{0x805,0},{0x802,0x0800020c},
++        {0x800,SWEET_A618_RING_IOVA},{0x801,0},{0x830,SWEET_A618_SQE_IOVA},{0x831,0},
++    };
++    for (const auto &item : ring_setup) {
++        rc = a618_cp_set(s,run,item.reg,item.value);
++        if (rc) return rc;
++    }
++    // GMU-relative byte offsets of A6XX_GPU_GMU_AO_GPU_CX_BUSY_STATUS and AHB_FENCE_STATUS.
++    constexpr uint32_t busy_off = 0x23b0cu*4-0x6a000u;
++    constexpr uint32_t fence_off = 0x23b13u*4-0x6a000u;
++    if (a618_cp_guard(s,run) || post_read(s,fence_off,&run.fence) ||
++        run.fence == UINT32_MAX || (run.fence & 1u) ||
++        a618_cp_read(run,0x806) || a618_cp_read(run,0x807) || *run.shadow) return -3;
++    IOLog("SWEET A618 CP: armed words=%u; releasing SQE with GPU OOB held\n",SWEET_A618_CP_BOOT_WORDS);
++    run.sqe_attempted = true;
++    mmio_write32(a618_cp_register(run,0x808),1);
++    if (complete(s) || a618_cp_guard(s,run)) return -3;
++    mmio_write32(a618_cp_register(run,0x807),SWEET_A618_CP_BOOT_WORDS);
++    if (complete(s) || post_read(s,fence_off,&run.fence) ||
++        run.fence == UINT32_MAX || (run.fence & 1u)) return -2;
++
++    for (;;) {
++        if (a618_cp_guard(s,run) || post_read(s,busy_off,&run.busy) || run.busy == UINT32_MAX) return -3;
++        run.rptr = a618_cp_read(run,0x806);
++        run.wptr = a618_cp_read(run,0x807);
++        if (complete(s)) return -2;
++        run.shadow_rptr = *run.shadow; // Normal-NC canonical pointer, no cached alias.
++        if (run.wptr != SWEET_A618_CP_BOOT_WORDS || run.rptr > SWEET_A618_CP_BOOT_WORDS ||
++            run.shadow_rptr > SWEET_A618_CP_BOOT_WORDS) return -5;
++        if (run.rptr == SWEET_A618_CP_BOOT_WORDS && run.shadow_rptr == SWEET_A618_CP_BOOT_WORDS &&
++            !(run.busy & (1u<<23))) return a618_cp_guard(s,run);
++        if (run.waited_us == 2000000) return -4;
++        IODelay(1000);
++        run.waited_us += 1000;
++    }
++}
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -176,7 +176,7 @@
+ {
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
+-    int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0;
++    int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0,requested_gpu_cp=0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+@@ -188,6 +188,10 @@
+     PE_parse_boot_argn("sweetgpumap",&requested_mapping,sizeof(requested_mapping));
+     PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
+     PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
++    PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
++    if(requested_gpu_cp && (requested_gpu_cp!=1 || requested_gpu_oob!=1)) {
++        printf("SWEET A618 CP: requires cp=1 oob=1\n");return;
++    }
+     if(requested_gpu_oob && (requested_gpu_oob!=1 || requested_mapping!=1)) {
+         printf("SWEET A618 OOB: requires oob=1 map=1\n");return;
+     }
+@@ -448,8 +452,8 @@
+                                                                         int mapping_rc=sweet_gpu_a618_mapping_verify();
+                                                                         printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
+                                                                         if(!mapping_rc && requested_gpu_oob==1) {
+-                                                                            extern int sweet_gpu_a618_oob_probe(void);
+-                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe());
++                                                                            extern int sweet_gpu_a618_oob_probe(unsigned);
++                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe((unsigned)requested_gpu_cp));
+                                                                         }
+                                                                     } else {
+                                                                         extern int sweet_gpu_a618_prepare(void);
+--- /dev/null
++++ b/bsd/dev/sweet_a618_cp_init.c
+@@ -0,0 +1,29 @@
++#include "sweet_a618_cp_init.h"
++int sweet_a618_cp_init_encode(uint32_t *out,size_t words,uint64_t reglist_iova)
++{
++    if(!out || ((uintptr_t)out&3) || words<SWEET_A618_CP_INIT_WORDS ||
++        !reglist_iova || (reglist_iova&4095) || reglist_iova>UINT64_C(0xfffff000))return -1;
++    /* Type7 opcode0x48,11payload words; stock odd parity. Ordinal mask0x16f:
++     * max-context/error/header/default-reset/ucode/op-mode/list-with-spinlock.
++     * Do not silently omit the required register-list address or change masks. */
++    const uint32_t packet[SWEET_A618_CP_INIT_WORDS]={
++        0x70c8000bu,0x16fu,3u,0x20000000u,0,0,0,2u,
++        (uint32_t)reglist_iova,0,0,0
++    };
++    for(unsigned i=0;i<SWEET_A618_CP_INIT_WORDS;i++)out[i]=packet[i];
++    return 0;
++}
++
++int sweet_a618_cp_boot_encode(uint32_t *out, size_t words, uint64_t reglist_iova,
++    uint64_t scratch_iova)
++{
++    if (words < SWEET_A618_CP_BOOT_WORDS || !scratch_iova || (scratch_iova & 4095) ||
++        scratch_iova > UINT64_C(0xfffff000) || scratch_iova == reglist_iova) return -1;
++    if (sweet_a618_cp_init_encode(out, words, reglist_iova)) return -1;
++    /* cp_type7_packet(CP_WHERE_AM_I=0x62, 2), followed by the RB0 shadow IOVA.
++     * For both count and opcode, the number of one bits is already odd. */
++    out[12] = 0x70620002u;
++    out[13] = (uint32_t)scratch_iova;
++    out[14] = 0;
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_cp_init.h
+@@ -0,0 +1,19 @@
++#ifndef SWEET_A618_CP_INIT_H
++#define SWEET_A618_CP_INIT_H
++#include <stdint.h>
++#include <stddef.h>
++#define SWEET_A618_CP_INIT_WORDS 12u
++#define SWEET_A618_CP_BOOT_WORDS 15u
++/* Offline packet encoder, no MMIO/queue submission. Pinned Xiaomi10c33d40
++ * _set_ordinals / CP_ME_INIT, with the current32-bit IOVA bring-up profile.
++ * reglist_iova must name an owned, mapped4KiB powerup-register-list page with
++ * the stock spinlock/list layout and captured register values prepared.
++ * This function validates address/format only, NOT that mapping or contents.
++ * Caller owns the output buffer. Failure leaves all output unchanged. */
++int sweet_a618_cp_init_encode(uint32_t *,size_t words,uint64_t reglist_iova);
++/* Stock cold submission appends CP_WHERE_AM_I with the address of the RB0
++ * read pointer shadow. The caller owns a separate mapped, writable page at
++ * scratch_iova. Successful encoding changes exactly 15 DWORDs. */
++int sweet_a618_cp_boot_encode(uint32_t *, size_t words, uint64_t reglist_iova,
++    uint64_t scratch_iova);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_a618_pwrup.c
+@@ -0,0 +1,29 @@
++#include "sweet_a618_pwrup.h"
++#include "sweet_a618_pwrup_profile.h"
++static void put32(unsigned char *p,uint32_t v)
++{
++    for(unsigned i=0;i<4;i++)p[i]=(unsigned char)(v>>(8*i));
++}
++int sweet_a618_pwrup_dword_offset(unsigned index,uint32_t *offset)
++{
++    if(!offset || index>=SWEET_A618_PWRUP_REGISTERS)return -1;
++    *offset=sweet_a618_pwrup_offsets[index];return 0;
++}
++int sweet_a618_pwrup_build(void *page,size_t bytes,const uint32_t *values,size_t count)
++{
++    const size_t n=SWEET_A618_PWRUP_REGISTERS*sizeof(uint32_t);
++    uintptr_t a=(uintptr_t)page,b=(uintptr_t)values;
++    if(!page || !values || (b&3) || bytes<SWEET_A618_PWRUP_PAGE_BYTES ||
++        count!=SWEET_A618_PWRUP_REGISTERS || a>UINTPTR_MAX-SWEET_A618_PWRUP_PAGE_BYTES ||
++        b>UINTPTR_MAX-n || (a<b+n && b<a+SWEET_A618_PWRUP_PAGE_BYTES))return -1;
++    unsigned char *out=(unsigned char *)page;
++    for(unsigned i=0;i<SWEET_A618_PWRUP_PAGE_BYTES;i++)out[i]=0;
++    /* cpu_gpu_lock: three32-bit zero flags, then two16-bit DWORD counts.
++     * list_length134 includes all67pairs; list_offset76 skips IFPC38pairs. */
++    put32(out+12,(76u<<16)|134u);
++    for(unsigned i=0;i<SWEET_A618_PWRUP_REGISTERS;i++){
++        put32(out+16+8*i,sweet_a618_pwrup_offsets[i]);
++        put32(out+20+8*i,values[i]);
++    }
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/sweet_a618_pwrup.h
+@@ -0,0 +1,16 @@
++#ifndef SWEET_A618_PWRUP_H
++#define SWEET_A618_PWRUP_H
++#include <stdint.h>
++#include <stddef.h>
++#define SWEET_A618_PWRUP_REGISTERS 67u
++#define SWEET_A618_PWRUP_PAGE_BYTES 4096u
++/* Offline/unlinked serializer. Caller supplies captured values in exact stock
++ * IFPC38/shared28/A615extra1 order. This does not read hardware, validate the
++ * values, publish memory or establish a GPU mapping. Future capture must use
++ * a fully initialized owned GPU and its own access checks before these values
++ * can be supplied to CP_ME_INIT. Do not substitute zero for unavailable data.
++ * Fails without modifying output for invalid size/count/overlap. */
++int sweet_a618_pwrup_build(void *page,size_t bytes,const uint32_t *values,size_t count);
++/* Returns the pinned GPU-relative DWORD index; not a CPU/runtime address. */
++int sweet_a618_pwrup_dword_offset(unsigned index,uint32_t *offset);
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_a618_pwrup_profile.h
+@@ -0,0 +1,74 @@
++/* Generated by tools/import-a618-pwrup-profile.py from Xiaomi10c33d40.
++ * GPU-relative DWORD indices. This file neither reads nor writes MMIO. */
++#ifndef SWEET_A618_PWRUP_PROFILE_H
++#define SWEET_A618_PWRUP_PROFILE_H
++static const uint32_t sweet_a618_pwrup_offsets[67] = {
++    0x00010u, /* A6XX_RBBM_VBIF_CLIENT_QOS_CNTL */
++    0x00011u, /* A6XX_RBBM_GBIF_CLIENT_QOS_CNTL */
++    0x00841u, /* A6XX_CP_CHICKEN_DBG */
++    0x00843u, /* A6XX_CP_DBG_ECO_CNTL */
++    0x0084fu, /* A6XX_CP_PROTECT_CNTL */
++    0x00850u, /* A6XX_CP_PROTECT_REG */
++    0x00851u, /* A6XX_CP_PROTECT_REG+1 */
++    0x00852u, /* A6XX_CP_PROTECT_REG+2 */
++    0x00853u, /* A6XX_CP_PROTECT_REG+3 */
++    0x00854u, /* A6XX_CP_PROTECT_REG+4 */
++    0x00855u, /* A6XX_CP_PROTECT_REG+5 */
++    0x00856u, /* A6XX_CP_PROTECT_REG+6 */
++    0x00857u, /* A6XX_CP_PROTECT_REG+7 */
++    0x00858u, /* A6XX_CP_PROTECT_REG+8 */
++    0x00859u, /* A6XX_CP_PROTECT_REG+9 */
++    0x0085au, /* A6XX_CP_PROTECT_REG+10 */
++    0x0085bu, /* A6XX_CP_PROTECT_REG+11 */
++    0x0085cu, /* A6XX_CP_PROTECT_REG+12 */
++    0x0085du, /* A6XX_CP_PROTECT_REG+13 */
++    0x0085eu, /* A6XX_CP_PROTECT_REG+14 */
++    0x0085fu, /* A6XX_CP_PROTECT_REG+15 */
++    0x00860u, /* A6XX_CP_PROTECT_REG+16 */
++    0x00861u, /* A6XX_CP_PROTECT_REG+17 */
++    0x00862u, /* A6XX_CP_PROTECT_REG+18 */
++    0x00863u, /* A6XX_CP_PROTECT_REG+19 */
++    0x00864u, /* A6XX_CP_PROTECT_REG+20 */
++    0x00865u, /* A6XX_CP_PROTECT_REG+21 */
++    0x00866u, /* A6XX_CP_PROTECT_REG+22 */
++    0x00867u, /* A6XX_CP_PROTECT_REG+23 */
++    0x00868u, /* A6XX_CP_PROTECT_REG+24 */
++    0x00869u, /* A6XX_CP_PROTECT_REG+25 */
++    0x0086au, /* A6XX_CP_PROTECT_REG+26 */
++    0x0086bu, /* A6XX_CP_PROTECT_REG+27 */
++    0x0086cu, /* A6XX_CP_PROTECT_REG+28 */
++    0x0086du, /* A6XX_CP_PROTECT_REG+29 */
++    0x0086eu, /* A6XX_CP_PROTECT_REG+30 */
++    0x0086fu, /* A6XX_CP_PROTECT_REG+31 */
++    0x0098du, /* A6XX_CP_AHB_CNTL */
++    0x00c01u, /* A6XX_VSC_ADDR_MODE_CNTL */
++    0x08601u, /* A6XX_GRAS_ADDR_MODE_CNTL */
++    0x08e05u, /* A6XX_RB_ADDR_MODE_CNTL */
++    0x09e01u, /* A6XX_PC_ADDR_MODE_CNTL */
++    0x0be05u, /* A6XX_HLSQ_ADDR_MODE_CNTL */
++    0x0a601u, /* A6XX_VFD_ADDR_MODE_CNTL */
++    0x09601u, /* A6XX_VPC_ADDR_MODE_CNTL */
++    0x00e00u, /* A6XX_UCHE_ADDR_MODE_CNTL */
++    0x0ae01u, /* A6XX_SP_ADDR_MODE_CNTL */
++    0x0b601u, /* A6XX_TPL1_ADDR_MODE_CNTL */
++    0x00e05u, /* A6XX_UCHE_WRITE_RANGE_MAX_LO */
++    0x00e06u, /* A6XX_UCHE_WRITE_RANGE_MAX_HI */
++    0x00e09u, /* A6XX_UCHE_TRAP_BASE_LO */
++    0x00e0au, /* A6XX_UCHE_TRAP_BASE_HI */
++    0x00e07u, /* A6XX_UCHE_WRITE_THRU_BASE_LO */
++    0x00e08u, /* A6XX_UCHE_WRITE_THRU_BASE_HI */
++    0x00e0bu, /* A6XX_UCHE_GMEM_RANGE_MIN_LO */
++    0x00e0cu, /* A6XX_UCHE_GMEM_RANGE_MIN_HI */
++    0x00e0du, /* A6XX_UCHE_GMEM_RANGE_MAX_LO */
++    0x00e0eu, /* A6XX_UCHE_GMEM_RANGE_MAX_HI */
++    0x00e18u, /* A6XX_UCHE_FILTER_CNTL */
++    0x00e17u, /* A6XX_UCHE_CACHE_WAYS */
++    0x00e01u, /* A6XX_UCHE_MODE_CNTL */
++    0x08e08u, /* A6XX_RB_NC_MODE_CNTL */
++    0x0b604u, /* A6XX_TPL1_NC_MODE_CNTL */
++    0x0ae02u, /* A6XX_SP_NC_MODE_CNTL */
++    0x09e00u, /* A6XX_PC_DBG_ECO_CNTL */
++    0x08e50u, /* A6XX_RB_CONTEXT_SWITCH_GMEM_SAVE_RESTORE */
++    0x00e3au, /* A6XX_UCHE_GBIF_GX_CONFIG */
++};
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_a618_protect_profile.h
+@@ -0,0 +1,43 @@
++/* Generated by tools/import-a618-protect-profile.py from Xiaomi10c33d40
++ * and the captured sweet_k6a FDT. Register offsets are DWORDs. */
++#ifndef SWEET_A618_PROTECT_PROFILE_H
++#define SWEET_A618_PROTECT_PROFILE_H
++#include <stdint.h>
++#define SWEET_A618_PROTECT_CONTROL 0x84fu
++#define SWEET_A618_PROTECT_FIRST_SLOT 0x850u
++#define SWEET_A618_PROTECT_ENABLE 3u
++#define SWEET_A618_PROTECT_SLOTS 32u
++#define SWEET_A618_PROTECT_COUNT 30u
++static const uint32_t sweet_a618_protect_values[SWEET_A618_PROTECT_COUNT] = {
++    0x01440600u, /* slot 0: 0x00600-0x00651 */
++    0x8008ae50u, /* slot 1: 0x0ae50-0x0ae52 */
++    0x804c9624u, /* slot 2: 0x09624-0x09637 */
++    0x80208630u, /* slot 3: 0x08630-0x08638 */
++    0x80049e70u, /* slot 4: 0x09e70-0x09e71 */
++    0x861c9e78u, /* slot 5: 0x09e78-0x09fff */
++    0xa040f000u, /* slot 6: 0x0f000-0x0f810 */
++    0x000cfc00u, /* slot 7: 0x0fc00-0x0fc03 */
++    0x8000050eu, /* slot 8: 0x0050e-0x0050e */
++    0x0000050fu, /* slot 9: 0x0050f-0x0050f */
++    0x80000510u, /* slot 10: 0x00510-0x00510 */
++    0x13e40000u, /* slot 11: 0x00000-0x004f9 */
++    0x00280501u, /* slot 12: 0x00501-0x0050b */
++    0x01100511u, /* slot 13: 0x00511-0x00555 */
++    0x80040e00u, /* slot 14: 0x00e00-0x00e01 */
++    0x802c0e03u, /* slot 15: 0x00e03-0x00e0e */
++    0x80008e00u, /* slot 16: 0x08e00-0x08e00 */
++    0x803c8e50u, /* slot 17: 0x08e50-0x08e5f */
++    0x8000be02u, /* slot 18: 0x0be02-0x0be02 */
++    0xc7ccbe20u, /* slot 19: 0x0be20-0x0d013 */
++    0x82080800u, /* slot 20: 0x00800-0x00882 */
++    0x802008a0u, /* slot 21: 0x008a0-0x008a8 */
++    0x806408abu, /* slot 22: 0x008ab-0x008c4 */
++    0x81340900u, /* slot 23: 0x00900-0x0094d */
++    0x81d8098du, /* slot 24: 0x0098d-0x00a03 */
++    0x008c08d0u, /* slot 25: 0x008d0-0x008f3 */
++    0x00100980u, /* slot 26: 0x00980-0x00984 */
++    0x8000a630u, /* slot 27: 0x0a630-0x0a630 */
++    0xfffd0000u, /* slot 28: 0x10000-0x11fff */
++    0xfffd2000u, /* slot 29: 0x12000-0x13fff */
++};
++#endif
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -676,3 +676,5 @@
+ bsd/dev/sweet_gmu_dcvs.c		standard
+ bsd/dev/sweet_a618_pte.c		standard
+ bsd/dev/sweet_a618_address_space.c		standard
++bsd/dev/sweet_a618_cp_init.c		standard
++bsd/dev/sweet_a618_pwrup.c		standard

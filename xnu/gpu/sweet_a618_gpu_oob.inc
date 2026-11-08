@@ -20,9 +20,16 @@ static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value
     return 0;
 }
 
-extern "C" int sweet_gpu_a618_oob_probe(void)
+#ifdef KERNEL
+#include "../../../bsd/dev/sweet_a618_protect_profile.h"
+#else
+#include "sweet_a618_protect_profile.h"
+#endif
+#include "sweet_a618_cp_run.inc"
+
+extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp)
 {
-    if (!__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
+    if (first_cp > 1 || !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
     auto *s = &probe;
     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
         return -3;
@@ -69,16 +76,26 @@ extern "C" int sweet_gpu_a618_oob_probe(void)
             status, protect, address_mode);
     }
 
+    a618_cp_run run = {};
+    if (first_cp && !rc && !cleanup && acked && ack_cleared) {
+        rc = a618_cp_first(s,run);
+        IOLog("SWEET A618 CP: done rc=%d configured_writes=%u sqe_attempted=%u RPTR=%u WPTR=%u shadow=%u busy=%08x fence=%08x waited_us=%u\n",
+            rc,run.writes,run.sqe_attempted,run.rptr,run.wptr,run.shadow_rptr,run.busy,run.fence,run.waited_us);
+    }
     /* Even an error return from a store could have reached the GMU. Release
      * only our vote, and only if the same session and MMIO domain are healthy. */
-    const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
-    if (!release_guard) {
-        release_attempted = true;
-        int release_rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_release);
-        if (!release_rc) release_rc = a618_gpu_oob_health(s, 0, &irq);
-        if (!cleanup) cleanup = release_rc;
-    } else if (!cleanup) {
-        cleanup = release_guard;
+    if (run.sqe_attempted) {
+        IOLog("SWEET A618 CP: GPU OOB, boot vote and memory retained until reset\n");
+    } else {
+        const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
+        if (!release_guard) {
+            release_attempted = true;
+            int release_rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_release);
+            if (!release_rc) release_rc = a618_gpu_oob_health(s, 0, &irq);
+            if (!cleanup) cleanup = release_rc;
+        } else if (!cleanup) {
+            cleanup = release_guard;
+        }
     }
     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",

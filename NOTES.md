@@ -20,6 +20,17 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0158 first A618 command preparation
+
+Opt-in `sweetgpucp=1` requires the cold SMMU mapping and dedicated GPU
+power vote. It configures the stock protected registers, publishes the
+powerup list and first 15-word command, then checks the hardware read
+pointer and GPU-written shadow for two seconds. Raw GPU errors, protected
+memory setup, bus halt, SMMU and power faults are guarded. After SQE
+release, the GPU vote and DMA buffers remain pinned until reset. Host
+sanitizers, ARM64 compile, patch checks and synthetic log validation pass.
+Full build and device evidence pending; no rendering claim.
+
 ## 0157 dedicated A618 power vote
 
 Opt-in diagnostic after the cold mapping and DCVS checks. Requests the

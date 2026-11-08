@@ -1,0 +1,120 @@
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -194,9 +194,9 @@
+     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
+     PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
+     PE_parse_boot_argn("sweetgpufill", &requested_fill, sizeof(requested_fill));
+-    if (requested_fill && ((requested_fill != 1 && requested_fill != 2) ||
++    if (requested_fill && ((requested_fill != 1 && requested_fill != 2 && requested_fill != 3) ||
+         requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+-        printf("SWEET A618 FILL: requires fill=1 or 2, pasprobe=1 and cp=1\n");
++        printf("SWEET A618 FILL: requires fill=1, 2 or 3, pasprobe=1 and cp=1\n");
+         return;
+     }
+     if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {
+--- a/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -40,7 +40,7 @@
+ 
+ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
+ {
+-    if (first_cp > 1 || pas_probe > first_cp || fill > 2 || (fill && !pas_probe) ||
++    if (first_cp > 1 || pas_probe > first_cp || fill > 3 || (fill && !pas_probe) ||
+         !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
+     auto *s = &probe;
+     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
+@@ -121,6 +121,6 @@
+     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
+     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
+         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
+-    if (!rc && fill == 2) a618_present_arm(run, completed_tail);
++    if (!rc && fill >= 2) a618_present_arm(run, completed_tail, fill == 3 ? a618_present_max_frames : 1u);
+     return rc;
+ }
+--- a/iokit/Kernel/arm/sweet_a618_present.inc
++++ b/iokit/Kernel/arm/sweet_a618_present.inc
+@@ -4,6 +4,9 @@
+ static constexpr unsigned a618_present_source = 0x100 / 4;
+ static constexpr unsigned a618_present_destination = 0x800 / 4;
+ static constexpr unsigned a618_present_fence = 4;
++static constexpr unsigned a618_present_max_frames = 16;
++static constexpr unsigned a618_present_ring_words = 1024;
++static constexpr unsigned a618_present_submit_words = 23; // Including CP_WHERE_AM_I.
+ static constexpr uint32_t a618_present_done = 0x1710c0de;
+ static constexpr uint32_t a618_present_guard = 0xa5a5a5a5;
+ static_assert(a618_present_source + a618_present_words < a618_present_destination);
+@@ -12,14 +15,20 @@
+ static struct {
+     a618_cp_run run;
+     unsigned tail;
++    unsigned budget;
++    unsigned committed;
+     unsigned armed;
+ } a618_present;
+ 
+-static void a618_present_arm(const a618_cp_run &run, unsigned tail)
++static void a618_present_arm(const a618_cp_run &run, unsigned tail, unsigned budget)
+ {
++    if (!budget || budget > a618_present_max_frames || tail >= a618_present_ring_words ||
++        budget > (a618_present_ring_words - tail) / a618_present_submit_words) return;
+     a618_present.run = run;
+     a618_present.tail = tail;
+-    IOLog("SWEET A618 PRESENT: armed after verified 2D fill\n");
++    a618_present.budget = budget;
++    a618_present.committed = 0;
++    IOLog("SWEET A618 PRESENT: armed after verified 2D fill budget=%u\n", budget);
+     __atomic_store_n(&a618_present.armed, 1u, __ATOMIC_RELEASE);
+ }
+ 
+@@ -33,7 +42,8 @@
+     bool varies = false;
+     for (uint32_t word : expected) varies |= word != expected[0];
+     if (!varies) return false;
+-    // A failed or uncertain submission consumes the single attempt as well.
++    // Keep other callers on the CPU path until this submission is verified.
++    // On failure leave the queue disarmed.
+     if (!__sync_bool_compare_and_swap(&a618_present.armed, 1u, 0u)) return false;
+ 
+     void *cpu = nullptr;
+@@ -55,17 +65,20 @@
+ 
+     constexpr uint32_t base = SWEET_A618_FILL_IOVA;
+     constexpr uint32_t fence = base + a618_present_fence * 4;
++    const unsigned ordinal = a618_present.committed + 1;
++    const uint32_t done = a618_present_done + ordinal - 1;
+     const uint32_t packet[] = {
+         a618_pkt7(0x46,1), 0x31, // A6xx CACHE_INVALIDATE after reusing the fill page
+         a618_pkt7(0x26,0),
+         a618_pkt7(0x75,5), a618_present_words, // CP_MEMCPY: DWORD count, source, destination
+         base + a618_present_source * 4, 0, base + a618_present_destination * 4, 0,
+         a618_pkt7(0x26,0), // CP_WAIT_FOR_IDLE
+-        a618_pkt7(0x46,4), 0x04, fence, 0, a618_present_done,
+-        a618_pkt7(0x14,4), 0, fence, 0, a618_present_done,
++        a618_pkt7(0x46,4), 0x04, fence, 0, done,
++        a618_pkt7(0x14,4), 0, fence, 0, done,
+     };
++    static_assert(sizeof(packet) / sizeof(packet[0]) + 3 == a618_present_submit_words);
+     auto &run = a618_present.run;
+-    IOLog("SWEET A618 PRESENT: IOSurface copy bytes=%zu\n", bytes);
++    IOLog("SWEET A618 PRESENT: IOSurface copy ordinal=%u bytes=%zu\n", ordinal, bytes);
+     int rc = a618_fill_submit(&probe, run, "present", packet,
+         sizeof(packet)/sizeof(packet[0]), a618_present.tail, 5000);
+     if (rc) {
+@@ -88,11 +101,14 @@
+         }
+     }
+     const uint32_t observed = words[a618_present_fence];
+-    const bool valid = matches == a618_present_words && !changed && observed == a618_present_done &&
++    const bool valid = matches == a618_present_words && !changed && observed == done &&
+         !a618_cp_guard(&probe, run);
+-    IOLog("SWEET A618 PRESENT: words=%u/%u changed=%u fence=%08x verified=%u\n",
+-        matches, a618_present_words, changed, observed, unsigned(valid));
++    IOLog("SWEET A618 PRESENT: ordinal=%u words=%u/%u changed=%u fence=%08x verified=%u\n",
++        ordinal, matches, a618_present_words, changed, observed, unsigned(valid));
+     if (!valid) return false;
+     memcpy(destination, output, sizeof(output));
++    a618_present.committed = ordinal;
++    if (ordinal < a618_present.budget)
++        __atomic_store_n(&a618_present.armed, 1u, __ATOMIC_RELEASE);
+     return true;
+ }

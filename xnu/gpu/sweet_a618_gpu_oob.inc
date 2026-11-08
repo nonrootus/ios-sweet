@@ -40,7 +40,7 @@ static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value
 
 extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 0, unsigned fill = 0)
 {
-    if (first_cp > 1 || pas_probe > first_cp || fill > 2 || (fill && !pas_probe) ||
+    if (first_cp > 1 || pas_probe > first_cp || fill > 3 || (fill && !pas_probe) ||
         !__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
     auto *s = &probe;
     if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
@@ -121,6 +121,6 @@ extern "C" int sweet_gpu_a618_oob_probe(unsigned first_cp, unsigned pas_probe = 
     if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
     IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
         rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
-    if (!rc && fill == 2) a618_present_arm(run, completed_tail);
+    if (!rc && fill >= 2) a618_present_arm(run, completed_tail, fill == 3 ? a618_present_max_frames : 1u);
     return rc;
 }

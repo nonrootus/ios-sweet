@@ -194,9 +194,9 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgpucp",&requested_gpu_cp,sizeof(requested_gpu_cp));
     PE_parse_boot_argn("sweetgpupasprobe", &requested_pas_probe, sizeof(requested_pas_probe));
     PE_parse_boot_argn("sweetgpufill", &requested_fill, sizeof(requested_fill));
-    if (requested_fill && ((requested_fill != 1 && requested_fill != 2) ||
+    if (requested_fill && ((requested_fill != 1 && requested_fill != 2 && requested_fill != 3) ||
         requested_pas_probe != 1 || requested_gpu_cp != 1)) {
-        printf("SWEET A618 FILL: requires fill=1 or 2, pasprobe=1 and cp=1\n");
+        printf("SWEET A618 FILL: requires fill=1, 2 or 3, pasprobe=1 and cp=1\n");
         return;
     }
     if (requested_pas_probe && (requested_pas_probe != 1 || requested_gpu_cp != 1)) {

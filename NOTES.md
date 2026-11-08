@@ -10,6 +10,16 @@ The generated A618 protection profile combines 28 stock groups with two
 from the FDT SMMU range. It matches the stock constructor and preserves
 the final two slots. Both inputs are outside the compiled 0157 kernel.
 
+## 0157 GPU power hardware result
+
+Full kernel CI42449703601 passed. The checked temporary boot image
+returned fastboot Sending/Booting OKAY. The owner confirms iOS booted
+and returned to recovery. The fresh log shows the dedicated GPU OOB
+request received a new ACK on the first poll. Status/protect/address
+mode were 1/0/0 while the vote was held. ACK clear, vote release,
+and the GMU/SMMU checks after release all passed. First CP submission
+remains the next device test.
+
 ## 0157 dedicated A618 power vote
 
 Opt-in diagnostic after the cold mapping and DCVS checks. Requests the
@@ -17,7 +27,7 @@ stock A615-family GPU OOB vote and verifies a new response, reads three
 GPU registers under the vote, then releases it while checking the same
 GMU and SMMU session. No SQE release or GPU command submission. Host
 sanitizers, ARM64 target-header compile and exact patch checks pass.
-Full kernel build and device evidence pending.
+Full kernel build and device evidence recorded above.
 
 ## 0156 GPU SMMU hardware result
 

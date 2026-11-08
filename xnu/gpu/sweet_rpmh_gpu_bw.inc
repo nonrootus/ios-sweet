@@ -24,7 +24,7 @@ static const struct sweet_bcm_boot_command sweet_bcm_zap[6] = {
     {"CE0",  0x500a0, 0x6fffffff,    6802, 0x00060008},
     {"ACV",  0x5000c, 0x60000008,       1, 0x000b0000},
 };
-static int sweet_bcm_boot_bindings(const struct sweet_bcm_boot_command *commands, unsigned count)
+static int sweet_bcm_boot_bindings(const struct sweet_bcm_boot_command *commands, unsigned command_count)
 {
     unsigned matches[6] = {0};
     for (unsigned i = 0; i < 8; ++i) {
@@ -37,7 +37,7 @@ static int sweet_bcm_boot_bindings(const struct sweet_bcm_boot_command *commands
             !rh_range(entries, count*RH_DB_ENTRY) || !rh_range(aux,0)) return EINVAL;
         for (unsigned j = 0; j < count; ++j) {
             uint32_t e = entries + j*RH_DB_ENTRY;
-            for (unsigned k = 0; k < count; ++k) {
+            for (unsigned k = 0; k < command_count; ++k) {
                 const struct sweet_bcm_boot_command *cmd = &commands[k];
                 uint32_t key = 0;
                 for (unsigned n = 0; cmd->name[n]; ++n)
@@ -53,7 +53,7 @@ static int sweet_bcm_boot_bindings(const struct sweet_bcm_boot_command *commands
             }
         }
     }
-    for (unsigned k = 0; k < count; ++k) if (matches[k] != 1) return ENODEV;
+    for (unsigned k = 0; k < command_count; ++k) if (matches[k] != 1) return ENODEV;
     return 0;
 }
 static bool sweet_bcm_banks_idle(void)
@@ -71,6 +71,7 @@ static bool sweet_bcm_zap_history_ok(void)
             for (unsigned i = 0; i < 6; ++i) {
                 if (addr != sweet_bcm_zap[i].address) continue;
                 uint32_t old = rh_read(rh_tcs, off + RH_DATA), floor = sweet_bcm_zap[i].data;
+                if (old == UINT32_MAX) return false;
                 if (!(old & (1u << 29))) break;
                 bool decreases = i == 5 ? ((old & 0x0fffffffu) & ~floor) != 0 :
                     ((old >> 14) & 0x3fffu) > ((floor >> 14) & 0x3fffu) ||

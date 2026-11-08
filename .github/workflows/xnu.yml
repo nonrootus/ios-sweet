@@ -132,8 +132,10 @@ jobs:
           #0156 supersedes all0155 hunks; exact sources verified below.
           git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=iokit/Kernel/arm/sweet_a618_prepare.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
           git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0157-sweet-a618-gpu-oob.patch"
-          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
+          git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0159-sweet-a618-bus-preflight.patch"
           python3 tools/verify-gmu-service-patch.py --patched-tree dxb/xnu
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 BUS: CX halt ack' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 CP: done rc=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'sweetgpucp' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 OOB: done rc=' > /dev/null

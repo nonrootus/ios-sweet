@@ -20,6 +20,17 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0159 A618 bus preflight
+
+On sweet_k6a, 0158 booted iOS and passed GMU, SMMU and GPU power checks.
+The command was held before SQE startup. CX reported halt request 0 with
+ACK 3 and the generic GX pair returned inaccessible values.
+
+0159 checks A615-family GX status and performs the stock CX halt deassert
+once when the request reads 0 and an ACK is still set. It checks for a clear
+ACK before CP setup, with a 100 ms bound. Host model, ARM64 compile and
+patch checks pass. The device result is pending.
+
 ## 0158 first A618 command preparation
 
 Opt-in `sweetgpucp=1` requires the cold SMMU mapping and dedicated GPU

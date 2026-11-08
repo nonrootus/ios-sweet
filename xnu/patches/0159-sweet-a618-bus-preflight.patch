@@ -1,0 +1,54 @@
+--- a/iokit/Kernel/arm/sweet_a618_cp_run.inc
++++ b/iokit/Kernel/arm/sweet_a618_cp_run.inc
+@@ -62,15 +62,22 @@
+ 
+ static int a618_cp_preflight(persistent_gmu *s, a618_cp_run &run)
+ {
++    constexpr unsigned gbif_halt = 0x3c45, gbif_ack = 0x3c46;
++    constexpr uint32_t cx_ack_mask = 3;
++    constexpr uint32_t unavailable = 0xdeafbead;
+     if (a618_cp_guard(s, run)) return -3;
+-    uint32_t halt = a618_cp_read(run, 0x3c45), halt_ack = a618_cp_read(run, 0x3c46);
+-    uint32_t gx_halt = a618_cp_read(run, 0x16), gx_ack = a618_cp_read(run, 0x17);
++    uint32_t halt = a618_cp_read(run, gbif_halt), halt_ack = a618_cp_read(run, gbif_ack);
++    /* Stock adreno_clear_pending_transactions uses GPR0_CNTL and
++     * VBIF_GX_RESET_STATUS for the A615 family, which includes A618. */
++    uint32_t gx_halt = a618_cp_read(run, 0x18), gx_ack = a618_cp_read(run, 0x215);
+     uint32_t trust = a618_cp_read(run, 0xf400), tsb_lo = a618_cp_read(run, 0xf800);
+     uint32_t tsb_hi = a618_cp_read(run, 0xf801), tsb_size = a618_cp_read(run, 0xf802);
+     uint32_t tsb_ctl = a618_cp_read(run, 0xf803);
+     IOLog("SWEET A618 CP: preflight GBIF=%08x/%08x GX=%08x/%08x TRUST=%08x TSB=%08x%08x/%08x/%08x\n",
+         halt, halt_ack, gx_halt, gx_ack, trust, tsb_hi, tsb_lo, tsb_size, tsb_ctl);
+-    if (halt || halt_ack || gx_halt || gx_ack || trust == UINT32_MAX || tsb_ctl || tsb_hi)
++    if (halt || (halt_ack & ~cx_ack_mask) || gx_halt == unavailable || gx_ack == unavailable ||
++        (gx_halt & 0x1e0u) || (gx_ack & 0xf0u) || trust == UINT32_MAX || trust == unavailable ||
++        tsb_ctl || tsb_hi)
+         return -3;
+     /* Stock KGSL 64-bit profile: secure end 0xfc000000, default size 256MiB
+      * (no qcom,secure-size in captured FDT). Only empty or exact stock TSB
+@@ -83,6 +90,25 @@
+         if (a618_cp_read(run, reg)) return -3;
+     for (unsigned slot = SWEET_A618_PROTECT_COUNT; slot < SWEET_A618_PROTECT_SLOTS; ++slot)
+         if (a618_cp_read(run, SWEET_A618_PROTECT_FIRST_SLOT+slot)) return -3;
++    if (halt_ack) {
++        /* Stock startup deasserts CX GBIF_HALT. When a request is already
++         * clear but its acknowledgement remains, issue only that zero write
++         * and require deassertion before any CP configuration. Stock does not
++         * poll the ACK. Here a persistent ACK leaves bus readiness unproven. */
++        if (a618_cp_guard(s, run) || a618_cp_read(run, gbif_halt)) return -3;
++        int rc = a618_cp_set(s, run, gbif_halt, 0);
++        if (rc) return rc;
++        for (unsigned waited = 0;; waited += 100) {
++            if (a618_cp_guard(s, run) || a618_cp_read(run, gbif_halt)) return -3;
++            uint32_t ack = a618_cp_read(run, gbif_ack);
++            if (ack & ~cx_ack_mask) return -3;
++            if (!ack || waited == 100000) {
++                IOLog("SWEET A618 BUS: CX halt ack %08x -> %08x in %uus\n", halt_ack, ack, waited);
++                return ack ? -4 : 0;
++            }
++            IODelay(100);
++        }
++    }
+     return 0;
+ }
+ 

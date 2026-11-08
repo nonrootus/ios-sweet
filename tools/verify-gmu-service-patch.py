@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0158 against exact published0149 Git bytes before a full build.
+"""Check0150-0159 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -66,6 +66,7 @@ NEW_TARGETS.update(CP_TARGETS)
 TARGETS.update({name:'xnu/gpu/'+name.rsplit('/',1)[1] for name in CP_TARGETS})
 PATCHES += (('xnu/patches/0158-sweet-a618-first-cp.patch', CP_TARGETS | {
     'bsd/conf/files','bsd/dev/sweet_gpu_probe.c','iokit/Kernel/arm/sweet_gpu_gmu_start.cpp',OOB_TARGET}),)
+PATCHES += (('xnu/patches/0159-sweet-a618-bus-preflight.patch', {'iokit/Kernel/arm/sweet_a618_cp_run.inc'}),)
 
 
 def main():
@@ -130,7 +131,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0158 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0159 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

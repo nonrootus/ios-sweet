@@ -20,6 +20,17 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0160 A618 CX traffic check
+
+On sweet_k6a, 0159 booted iOS. GX status was clean, but CX halt ACK stayed
+at 3 for 100 ms after the stock deassert. SQE release was not attempted.
+
+0160 uses the stock AXI counters around existing HFI configuration. A
+persistent ACK can proceed to the one-shot first command only with a clean
+read and write delta and verified restoration of counter controls. These
+counts establish CX traffic, not GX command fetch or rendering. Local
+host, ARM64 and patch checks pass. Device result pending.
+
 ## 0159 A618 bus preflight
 
 On sweet_k6a, 0158 booted iOS and passed GMU, SMMU and GPU power checks.

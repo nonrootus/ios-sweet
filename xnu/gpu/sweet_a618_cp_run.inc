@@ -91,6 +91,11 @@ static int a618_cp_preflight(persistent_gmu *s, a618_cp_run &run)
     for (unsigned slot = SWEET_A618_PROTECT_COUNT; slot < SWEET_A618_PROTECT_SLOTS; ++slot)
         if (a618_cp_read(run, SWEET_A618_PROTECT_FIRST_SLOT+slot)) return -3;
     if (halt_ack) {
+        if (a618_bus.axi_moved && halt_ack==3) {
+            IOLog("SWEET A618 BUS: ACK3 held with measured AXI traffic\n");
+            return 0;
+        }
+        if (a618_bus.halt_attempted) return -4;
         /* Stock startup deasserts CX GBIF_HALT. When a request is already
          * clear but its acknowledgement remains, issue only that zero write
          * and require deassertion before any CP configuration. Stock does not
@@ -187,8 +192,8 @@ static int a618_cp_publish(persistent_gmu *s, a618_cp_run &run)
 
 static int a618_cp_first(persistent_gmu *s, a618_cp_run &run)
 {
-    constexpr unsigned extended_size = 0x40000 - a618_register_size;
-    run.extended = ml_io_map(a618_register_base+a618_register_size,extended_size);
+    run.extended = a618_bus.window ? a618_bus.window :
+        ml_io_map(a618_register_base+a618_register_size,a618_extended_size);
     if (!run.extended) return -2;
     int rc = a618_cp_preflight(s,run);
     if (rc) return rc;

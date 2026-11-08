@@ -128,6 +128,7 @@ static unsigned gpu_oob_mode, gpu_oob_writes;
 static bool gpu_oob_held;
 static unsigned cp_mode, cp_writes;
 static bool cp_started;
+static unsigned cx_mode, cx_writes;
 extern "C" sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) {
  ++prep_creates;assert(prep_creates<=5);if(prep_creates==prep_create_fail)return nullptr;
  auto *m=&prep_memory[prep_creates-1];*m={prep_creates-1,(unsigned)pages};
@@ -160,6 +161,7 @@ model=model.replace('    released=fw_timeout=',r"""    a618_preparation={};a618_
     cold_map_enabled=false;cold_fault=gpu_smmu_writes=0;
     gpu_oob_mode=gpu_oob_writes=0;gpu_oob_held=false;a618_gpu_oob_attempted=0;
     cp_mode=cp_writes=0;cp_started=false;
+    cx_mode=cx_writes=0;a618_bus={};
     a618_mapping={};a618_mapping_attempted=a618_mapping_verify_attempted=a618_storage_attempted=0;
     prep_creates=prep_clean=prep_pages=gpu_reads=prep_clean_fail=prep_page_fail=prep_create_fail=0;
     prep_map_fail=prep_bad_pa=prep_alias=prep_bad_cpu=prep_corrupt=prep_sqe_missing=prep_sqe_bad=prep_late_irq=false;
@@ -188,9 +190,25 @@ model=model.replace('        if(a==uintptr_t(gmu_full)+0x14644){',r"""        if
             return;
         }
         if(a==uintptr_t(gmu_full)+0x14644){""",1)
+model=model.replace('                    uint32_t ack[]={126u',r"""                    if(cx_mode && (gpu_regs[0x3cc0]&15)==15){
+                        gpu_regs[0x3cc4]+=4;
+                        if(cx_mode!=2)gpu_regs[0x3cc7]+=2;
+                        if(cx_mode==5)gpu_regs[0x3c46]=0;
+                    }
+                    uint32_t ack[]={126u""",1)
 model=model.replace('    if(!is_smmu(a)) {',r"""    if(in_range(a,gpu_regs,sizeof(gpu_regs))) {
-        assert(gpu_oob_held && released && allocated->latched);
         unsigned dword=(a-uintptr_t(gpu_regs))/4;
+        if(cx_mode && !gpu_oob_held){
+            assert(released && allocated->latched && !cp_started);
+            assert(dword==0x3c45 || dword==0x3cc0 || dword==0x3cc2);
+            if(dword==0x3c45)assert(v==0 && gpu_regs[0x3c46]==3);
+            if(dword==0x3cc0)assert(v==0 || v==15);
+            if(dword==0x3cc2)assert(v==0x2f2e2322 || v==0x12345678);
+            ++cx_writes;
+            if(cx_mode==4 && dword==0x3cc0 && !v)return;
+            gpu_regs[dword]=v;return;
+        }
+        assert(gpu_oob_held && released && allocated->latched);
         ++cp_writes;
         assert(dword!=0xf400 && dword!=0x86e && dword!=0x86f);
         assert(dword!=0x16 && dword!=0x17 && dword!=0x18 && dword!=0x215 && dword!=0x3c46);
@@ -501,6 +519,29 @@ int main(){
   unsigned prior=writes;assert(sweet_gpu_a618_oob_probe(1)==-1 && writes==prior);retained();
  }
  puts("PASS0159 first CP model: A615-family GX status, CX deassert and stuck ACK, stock setup, packet/shadow, TSB refusal, raw IRQ/CP and SMMU/fence faults, timeout and retained ownership");
+ for(unsigned mode=1;mode<=6;mode++){
+  reset();cold_map_enabled=true;assert(!run());
+  post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start());cx_mode=mode;
+  gpu_regs[0x3c46]=3;gpu_regs[0x3cc2]=0x12345678;
+  if(mode==3)gpu_regs[0x3cc0]=1;
+  if(mode==6)gpu_regs[0x3cc1]=1;
+  int rc=sweet_gpu_a618_configure(167);
+  assert((rc==0)==(mode!=4) && a618_bus.axi_moved==(mode==1));
+  assert(cx_writes==(mode==3||mode==6?1:mode==4?4:5));
+  assert(gpu_regs[0x3cc0]==(mode==3?1u:mode==4?15u:0u));
+  assert(gpu_regs[0x3cc2]==(mode==4?0x2f2e2322u:0x12345678u));
+  unsigned prior=writes;assert(sweet_gpu_a618_configure(167)==-1 && writes==prior);
+  if(!rc){
+   assert(!sweet_gpu_gmu_dcvs_start() && !sweet_gpu_a618_mapping_verify());
+   rc=sweet_gpu_a618_oob_probe(1);
+   const bool ready=mode==1 || mode==5;
+   assert((rc==0)==ready && cp_started==ready && gpu_oob_held==cp_started);
+   if(!ready)assert(!cp_writes);
+  }
+  retained();
+ }
+ puts("PASS0160 AXI proof: bidirectional and read-only traffic, busy and held-clear counters, failed restore and deasserted ACK");
  reset();puts("PASS persistent adapter+real SMMU/CM3 helpers: full boot model, 27 power gates, faults/timeouts, latch before writes, no teardown/free or retry");
 }
 '''

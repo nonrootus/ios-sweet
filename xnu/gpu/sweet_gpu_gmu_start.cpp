@@ -416,4 +416,5 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
 #include "sweet_a618_prepare.inc"
 
 #include "sweet_a618_mapping.inc"
+#include "sweet_a618_bus.inc"
 #include "sweet_a618_gpu_oob.inc"

@@ -438,7 +438,10 @@ sweet_gpu_probe(void)
                                                         printf("SWEET GMU HFI: entry rc=%d\n",hfi_rc);
                                                         if(!hfi_rc && requested_config==1) {
                                                             extern int sweet_gpu_gmu_configure(unsigned);
-                                                            int config_rc=sweet_gpu_gmu_configure((unsigned)selected_profile);
+                                                            extern int sweet_gpu_a618_configure(unsigned);
+                                                            int config_rc=requested_gpu_cp==1 ?
+                                                                sweet_gpu_a618_configure((unsigned)selected_profile) :
+                                                                sweet_gpu_gmu_configure((unsigned)selected_profile);
                                                             printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
                                                             if(!config_rc && requested_dcvs==1) {
                                                                 extern int sweet_gpu_gmu_dcvs_start(void);

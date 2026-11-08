@@ -1,0 +1,139 @@
+/* CX measurement around the existing HFI configuration. Offsets and the
+ * four 8-bit countables are from Xiaomi 10c33d40 a6xx_reg.h and
+ * adreno_perfcounter_enable_vbif. No new HFI command or counter reset. */
+static constexpr unsigned a618_cx_halt = 0x3c45, a618_cx_ack = 0x3c46;
+static constexpr unsigned a618_cx_enable = 0x3cc0, a618_cx_clear = 0x3cc1, a618_cx_select = 0x3cc2;
+static constexpr uint32_t a618_cx_select_axi = 34u | (35u << 8) | (46u << 16) | (47u << 24);
+static constexpr uint32_t a618_cx_counter_mask = 0xf;
+static constexpr unsigned a618_extended_size = 0x40000 - a618_register_size;
+
+static struct {
+    uintptr_t window;
+    uint32_t enable, select;
+    uint64_t before[4];
+    bool halt_attempted, select_attempted, enable_attempted, sampled, axi_moved;
+} a618_bus;
+
+static int a618_cx_health(persistent_gmu *s)
+{
+    if (!s->cold_gpu_requested || !a618_mapping.published || !a618_mapping.pinned ||
+        post_check(s) || sweet_smmu_gpu_context_check(&a618_mapping.context,&s->context)) return -3;
+    const uint32_t gx=mmio_read(s->region[0]+A6XX_GMU_SPTPRAC_PWR_CLK_STATUS);
+    const uint32_t cfg=mmio_read(s->cc+0x010);
+    if ((gx&0xdcu)!=8u || (cfg&0x18000u)!=0x10000u) return -3;
+    return 0;
+}
+
+static uintptr_t a618_cx_reg(unsigned dword)
+{
+    return a618_bus.window + 4u*dword - a618_register_size;
+}
+
+static uint32_t a618_cx_read(unsigned dword)
+{
+    return mmio_read(a618_cx_reg(dword));
+}
+
+static int a618_cx_set(persistent_gmu *s,unsigned dword,uint32_t value)
+{
+    if (a618_cx_health(s)) return -3;
+    mmio_write32(a618_cx_reg(dword),value);
+    if (complete(s) || a618_cx_health(s) || a618_cx_read(dword)!=value) return -5;
+    return 0;
+}
+
+static bool a618_cx_valid(uint32_t v)
+{
+    return v != UINT32_MAX && v != 0xdeafbeadu;
+}
+
+static int a618_cx_sample(persistent_gmu *s,uint64_t out[4])
+{
+    if (a618_cx_health(s) || a618_cx_read(a618_cx_halt) || a618_cx_read(a618_cx_ack)!=3 ||
+        (a618_cx_read(a618_cx_clear)&a618_cx_counter_mask) || a618_cx_read(a618_cx_select)!=a618_cx_select_axi ||
+        a618_cx_read(a618_cx_enable)!=(a618_bus.enable|a618_cx_counter_mask)) return -3;
+    for (unsigned i=0;i<4;i++) {
+        uint32_t high=a618_cx_read(0x3cc8+i), low=a618_cx_read(0x3cc4+i);
+        if (!a618_cx_valid(high) || !a618_cx_valid(low) || high!=a618_cx_read(0x3cc8+i)) return -5;
+        out[i]=(static_cast<uint64_t>(high)<<32)|low;
+    }
+    if (a618_cx_health(s) || a618_cx_read(a618_cx_halt) || a618_cx_read(a618_cx_ack)!=3 ||
+        (a618_cx_read(a618_cx_clear)&a618_cx_counter_mask) || a618_cx_read(a618_cx_select)!=a618_cx_select_axi ||
+        a618_cx_read(a618_cx_enable)!=(a618_bus.enable|a618_cx_counter_mask)) return -3;
+    return 0;
+}
+
+static int a618_cx_begin(persistent_gmu *s)
+{
+    if (s->postboot.stage!=SWEET_GMU_POST_READY || a618_cx_health(s)) return -3;
+    a618_bus.window=ml_io_map(a618_register_base+a618_register_size,a618_extended_size);
+    if (!a618_bus.window) return -2;
+    IOLog("SWEET A618 BUS: before CX halt status read\n");
+    IODelay(1000000); // Let the persistent logger preserve the first MMIO boundary.
+    if (a618_cx_health(s)) return -3;
+    const uint32_t halt=a618_cx_read(a618_cx_halt), ack=a618_cx_read(a618_cx_ack);
+    if (halt || (ack!=0 && ack!=3)) return -3;
+    if (!ack) return 0;
+    a618_bus.halt_attempted=true;
+    int rc=a618_cx_set(s,a618_cx_halt,0);
+    if (rc) return rc;
+    const uint32_t after=a618_cx_read(a618_cx_ack);
+    if (after!=3) return after==0 ? 0 : -3;
+    IOLog("SWEET A618 BUS: before CX counter control read halt=%08x ack=%08x\n",halt,after);
+    IODelay(1000000);
+    if (a618_cx_health(s) || a618_cx_read(a618_cx_halt) || a618_cx_read(a618_cx_ack)!=3) return -3;
+    a618_bus.enable=a618_cx_read(a618_cx_enable);
+    a618_bus.select=a618_cx_read(a618_cx_select);
+    const uint32_t clear=a618_cx_read(a618_cx_clear);
+    IOLog("SWEET A618 BUS: CX counter controls enable=%08x select=%08x clear=%08x\n",
+        a618_bus.enable,a618_bus.select,clear);
+    if (!a618_cx_valid(a618_bus.enable) || !a618_cx_valid(a618_bus.select) || !a618_cx_valid(clear) ||
+        ((a618_bus.enable|clear)&a618_cx_counter_mask)) return -3;
+    a618_bus.select_attempted=true;
+    rc=a618_cx_set(s,a618_cx_select,a618_cx_select_axi);
+    if (rc) return rc;
+    a618_bus.enable_attempted=true;
+    rc=a618_cx_set(s,a618_cx_enable,a618_bus.enable|a618_cx_counter_mask);
+    if (rc) return rc;
+    rc=a618_cx_sample(s,a618_bus.before);
+    a618_bus.sampled=rc==0;
+    return rc;
+}
+
+static int a618_cx_restore(persistent_gmu *s)
+{
+    if (!a618_bus.select_attempted) return 0;
+    if (a618_cx_health(s)) return -3;
+    uint32_t enable=a618_cx_read(a618_cx_enable), select=a618_cx_read(a618_cx_select);
+    if ((enable!=a618_bus.enable &&
+         (!a618_bus.enable_attempted || enable!=(a618_bus.enable|a618_cx_counter_mask))) ||
+        (select!=a618_bus.select && select!=a618_cx_select_axi)) return -3;
+    if (enable!=a618_bus.enable && a618_cx_set(s,a618_cx_enable,a618_bus.enable)) return -5;
+    if (select!=a618_bus.select && a618_cx_set(s,a618_cx_select,a618_bus.select)) return -5;
+    return 0;
+}
+
+extern "C" int sweet_gpu_a618_configure(unsigned selected_profile)
+{
+    auto *s=&probe;
+    if (config_attempted) return -1; // The sole early-root caller owns this session.
+    const int begin_rc=a618_cx_begin(s);
+    const int config_rc=sweet_gpu_gmu_configure(selected_profile);
+    uint64_t after[4]={}, delta[4]={};
+    int sample_rc=-3;
+    if (!begin_rc && !config_rc && a618_bus.sampled) {
+        sample_rc=a618_cx_sample(s,after);
+        if (!sample_rc) for (unsigned i=0;i<4;i++) {
+            if (after[i]<a618_bus.before[i]) sample_rc=-5;
+            else delta[i]=after[i]-a618_bus.before[i];
+        }
+    }
+    const int restore_rc=a618_cx_restore(s);
+    /* Counts show traffic crossed CX, not its source or the GX route. */
+    a618_bus.axi_moved=!sample_rc && !restore_rc && (delta[0]||delta[1]) && (delta[2]||delta[3]);
+    IOLog("SWEET A618 BUS: AXI read=%llu/%llu write=%llu/%llu begin=%d config=%d sample=%d restore=%d proven=%u\n",
+        static_cast<unsigned long long>(delta[0]),static_cast<unsigned long long>(delta[1]),
+        static_cast<unsigned long long>(delta[2]),static_cast<unsigned long long>(delta[3]),
+        begin_rc,config_rc,sample_rc,restore_rc,a618_bus.axi_moved);
+    return config_rc ? config_rc : restore_rc;
+}

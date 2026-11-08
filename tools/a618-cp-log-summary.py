@@ -17,6 +17,9 @@ def load(name):
 mapping = load('a618-map-log-summary')
 OOB = 'SWEET A618 OOB: '
 CP = 'SWEET A618 CP: '
+BUS = 'SWEET A618 BUS: '
+BUS_AX = r'AXI read=(\d+)/(\d+) write=(\d+)/(\d+) begin=(-?\d+) config=(-?\d+) sample=(-?\d+) restore=(-?\d+) proven=([01])'
+BUS_ACK = 'ACK3 held with measured AXI traffic'
 PATTERNS = {
     'request': (OOB, r'request=00010000 expected_ack=01000000 timeout_us=100000'),
     'held': (OOB, r'held status=([0-9a-f]{8}) protect=([0-9a-f]{8}) addr_mode=([0-9a-f]{8})'),
@@ -34,7 +37,16 @@ def analyze(text, meta):
     issues = ['mapping evidence missing or failed'] if base['exit_code'] else []
     records = {key: [] for key in PATTERNS}
     diagnostics = []
+    bus_measurement, bus_acceptance = [], []
     for line_no, line in enumerate(text.splitlines(), 1):
+        if line.startswith(BUS):
+            payload = line[len(BUS):]
+            match = re.fullmatch(BUS_AX, payload)
+            if match:
+                bus_measurement.append((line_no, tuple(map(int, match.groups()))))
+            elif payload == BUS_ACK:
+                bus_acceptance.append(line_no)
+            continue
         if not line.startswith((OOB, CP)):
             continue
         for key, (prefix, pattern) in PATTERNS.items():
@@ -73,9 +85,21 @@ def analyze(text, meta):
             issues.append('out-of-order first command evidence')
         if diagnostics:
             issues.append('unexpected GPU diagnostic record')
+        if bus_acceptance:
+            preflight, preflight_values = records['preflight'][0]
+            armed = records['armed'][0][0]
+            if (len(bus_acceptance) != 1 or len(bus_measurement) != 1 or
+                preflight_values[:2] != ('00000000', '00000003') or
+                not bus_measurement[0][0] < preflight < bus_acceptance[0] < armed):
+                issues.append('inconsistent AXI readiness evidence')
+            else:
+                r0, r1, w0, w1, begin, config, sample, restore, proof = bus_measurement[0][1]
+                if (begin, config, sample, restore, proof) != (0, 0, 0, 0, 1) or not ((r0 or r1) and (w0 or w1)):
+                    issues.append('AXI readiness proof missing traffic or clean restore')
     code = 4 if failed else 3 if issues else 0
     return {'state': 'log_reports_failure' if failed else 'incomplete_or_inconsistent' if issues else 'log_reports_first_command_complete',
-            'exit_code': code, 'issues': issues, 'records': records, 'diagnostics': diagnostics, 'capture': meta}
+            'exit_code': code, 'issues': issues, 'records': records, 'diagnostics': diagnostics,
+            'bus_measurement': bus_measurement, 'bus_acceptance': bus_acceptance, 'capture': meta}
 
 
 def main():

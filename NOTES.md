@@ -20,6 +20,13 @@ mode were 1/0/0 while the vote was held. ACK clear, vote release,
 and the GMU/SMMU checks after release all passed. First CP submission
 remains the next device test.
 
+## 0162 A618 GMEM limit readback
+
+On sweet_k6a, 0161 passed the busy mask comparison. The stock inclusive
+GMEM end write 0x0017ffff read back as 0x0017f000. SQE stayed halted.
+0162 keeps the stock write and expects the observed last page base for
+this one pair. Host, ARM64 and patch checks pass. Device result pending.
+
 ## 0161 A618 busy mask readback
 
 On sweet_k6a, 0160 booted iOS and measured CX traffic in both directions.

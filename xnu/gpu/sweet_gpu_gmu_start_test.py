@@ -223,6 +223,11 @@ model=model.replace('    if(!is_smmu(a)) {',r"""    if(in_range(a,gpu_regs,sizeo
             gpu_regs[dword]=cp_mode==19 ? 0x002f7ffeu : 0x002f7fffu;
             return;
         }
+        if(dword==0xe0d){
+            assert(v==0x0017ffffu);
+            gpu_regs[dword]=cp_mode==20 ? 0x0017e000u : 0x0017f000u;
+            return;
+        }
         if(dword==0x808){assert(v==1 && prep_clean==31);cp_started=true;}
         if(dword==0x807){
             assert(v==15 && cp_started && gpu_regs[0x804]==0x40020000 && gpu_regs[0x800]==0x40010000 && gpu_regs[0x830]==0x40001000);
@@ -492,7 +497,7 @@ int main(){
   retained();
  }
  puts("PASS0157 dedicated GPU OOB: clean ACK and release, timeout, sticky/stale ACK, service and SMMU faults, unavailable GPU register, no retry");
- for(unsigned mode=0;mode<20;mode++){
+ for(unsigned mode=0;mode<21;mode++){
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
   assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
@@ -522,6 +527,7 @@ int main(){
   if(mode==4)assert(rc==-3);
   if(mode==5)assert(rc==-2);
   if(mode==19)assert(rc==-5 && cp_writes==18);
+  if(mode==20)assert(rc==-5 && cp_writes==27);
   unsigned prior=writes;assert(sweet_gpu_a618_oob_probe(1)==-1 && writes==prior);retained();
  }
  puts("PASS0159 first CP model: A615-family GX status, CX deassert and stuck ACK, stock setup, packet/shadow, TSB refusal, raw IRQ/CP and SMMU/fence faults, timeout and retained ownership");

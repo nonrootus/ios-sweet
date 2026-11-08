@@ -55,9 +55,11 @@ static int a618_cp_set(persistent_gmu *s, a618_cp_run &run, unsigned dword, uint
     mmio_write32(a618_cp_register(run, dword), value);
     if (complete(s)) return -2;
     uint32_t readback = a618_cp_read(run, dword);
-    /* Preserve the stock all-ones performance counter write. This A618
-     * returned 0x002f7fff on hardware after that write in 0160. */
-    const uint32_t expected = dword == 0x50b && value == UINT32_MAX ? 0x002f7fffu : value;
+    /* Preserve stock writes, with exact exceptions for observed A618
+     * readbacks. The GMEM limit reports the last page base (0161). */
+    uint32_t expected = value;
+    if (dword == 0x50b && value == UINT32_MAX) expected = 0x002f7fffu;
+    if (dword == 0xe0d && value == 0x0017ffffu) expected = 0x0017f000u;
     if (readback == expected) return 0;
     IOLog("SWEET A618 CP: readback DWORD=%05x expected=%08x actual=%08x\n", dword, expected, readback);
     return -5;

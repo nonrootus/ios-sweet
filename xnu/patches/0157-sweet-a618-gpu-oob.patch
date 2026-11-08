@@ -1,0 +1,162 @@
+--- a/iokit/Kernel/arm/sweet_a618_prepare.inc
++++ b/iokit/Kernel/arm/sweet_a618_prepare.inc
+@@ -32,7 +32,8 @@
+ static unsigned a618_prepare_attempted;
+ static unsigned a618_storage_attempted;
+ 
+-static int a618_prepare_guard(persistent_gmu *s)
++static int a618_prepare_guard(persistent_gmu *s, uint32_t allowed_irq = 0,
++    uint32_t *observed_irq = nullptr)
+ {
+     if (!dcvs_succeeded || post_check(s) || !s->config.configured ||
+         s->postboot.stage!=SWEET_GMU_CONFIG_READY || s->postboot.next_sequence!=6 ||
+@@ -41,6 +42,7 @@
+     }
+     /* Fresh post-DCVS-clear sample, not the DCVS helper's earlier sample. */
+     uint32_t irq=mmio_read(s->region[0]+A6XX_GMU_GMU2HOST_INTR_INFO);
++    if (observed_irq) *observed_irq = irq;
+     uint32_t ao=mmio_read(s->region[0]+A6XX_GMU_AO_HOST_INTERRUPT_STATUS);
+     uint32_t gx=mmio_read(s->region[0]+A6XX_GMU_SPTPRAC_PWR_CLK_STATUS);
+     uint32_t hfi=mmio_read(s->region[0]+A6XX_GMU_HFI_CTRL_STATUS);
+@@ -48,7 +50,7 @@
+     /* GMU owns GX. Do not infer power from the unobserved software-collapse
+      * field. Captured qcom,poll-cfg-gdscr uses CFG UP/DOWN completion bits;
+      * SPTPRAC must independently report GX powered/clocked and SPTP on. */
+-    bool bad=irq || ao || gx==UINT32_MAX || (gx&0xdcu)!=8u || hfi!=1 ||
++    bool bad=(irq & ~allowed_irq) || ao || gx==UINT32_MAX || (gx&0xdcu)!=8u || hfi!=1 ||
+         gdsc==UINT32_MAX || complete_status==UINT32_MAX ||
+         (complete_status&0x18000u)!=0x10000u;
+     if (++a618_preparation.guards==1 || bad)
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -412,3 +412,4 @@
+ #include "sweet_a618_prepare.inc"
+ 
+ #include "sweet_a618_mapping.inc"
++#include "sweet_a618_gpu_oob.inc"
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -176,7 +176,7 @@
+ {
+     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
+     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
+-    int requested_mapping=0,requested_preparation=0;
++    int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0;
+     vm_offset_t gcc;
+     uint32_t state;
+ 
+@@ -187,6 +187,10 @@
+     PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
+     PE_parse_boot_argn("sweetgpumap",&requested_mapping,sizeof(requested_mapping));
+     PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
++    PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
++    if(requested_gpu_oob && (requested_gpu_oob!=1 || requested_mapping!=1)) {
++        printf("SWEET A618 OOB: requires oob=1 map=1\n");return;
++    }
+     if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
+         printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
+     }
+@@ -441,7 +445,12 @@
+                                                                 if(!dcvs_rc && prepare==1) {
+                                                                     if(requested_mapping==1) {
+                                                                         extern int sweet_gpu_a618_mapping_verify(void);
+-                                                                        printf("SWEET A618 MAP: entry rc=%d\n",sweet_gpu_a618_mapping_verify());
++                                                                        int mapping_rc=sweet_gpu_a618_mapping_verify();
++                                                                        printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
++                                                                        if(!mapping_rc && requested_gpu_oob==1) {
++                                                                            extern int sweet_gpu_a618_oob_probe(void);
++                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe());
++                                                                        }
+                                                                     } else {
+                                                                         extern int sweet_gpu_a618_prepare(void);
+                                                                         printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_a618_gpu_oob.inc
+@@ -0,0 +1,87 @@
++/* Xiaomi 10c33d40, adreno_a6xx_gmu.c and kgsl_gmu_core.h:
++ * A618 is in the A615 family, and oob_gpu is request zero. The direction and
++ * register disambiguate ACK and release even though both use bit 24. */
++static constexpr uint32_t a618_gpu_request = 1u << 16;
++static constexpr uint32_t a618_gpu_ack = 1u << 24;
++static constexpr uint32_t a618_gpu_release = 1u << 24;
++static constexpr unsigned a618_gpu_oob_timeout_us = 100000;
++static unsigned a618_gpu_oob_attempted;
++
++static int a618_gpu_oob_health(persistent_gmu *s, uint32_t allowed_irq, uint32_t *irq)
++{
++    if (a618_prepare_guard(s, allowed_irq, irq) ||
++        sweet_smmu_gpu_context_check(&a618_mapping.context, &s->context)) return -3;
++    return 0;
++}
++
++static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value)
++{
++    if (post_write(s, offset, value) || complete(s)) return -2;
++    return 0;
++}
++
++extern "C" int sweet_gpu_a618_oob_probe(void)
++{
++    if (!__sync_bool_compare_and_swap(&a618_gpu_oob_attempted, 0u, 1u)) return -1;
++    auto *s = &probe;
++    if (a618_mapping.observations != 3 || !a618_mapping.pinned || !a618_preparation.gpu)
++        return -3;
++
++    uint32_t irq = 0;
++    int rc = a618_gpu_oob_health(s, 0, &irq);
++    if (rc) return rc; // Includes an already pending ACK.
++    IOLog("SWEET A618 OOB: request=%08x expected_ack=%08x timeout_us=%u\n",
++        a618_gpu_request, a618_gpu_ack, a618_gpu_oob_timeout_us);
++    rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_request);
++
++    bool acked = false, ack_cleared = false, release_attempted = false;
++    unsigned waited = 0;
++    while (!rc) {
++        rc = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
++        if (rc) break;
++        if (irq & a618_gpu_ack) { acked = true; break; }
++        if (waited == a618_gpu_oob_timeout_us) { rc = -4; break; }
++        IODelay(100);
++        waited += 100;
++    }
++
++    int cleanup = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
++    if (!cleanup) {
++        /* The stock driver clears the dedicated response even after timeout.
++         * Other pending bits are treated as a fault, never acknowledged here. */
++        cleanup = a618_gpu_oob_write(s, A6XX_GMU_GMU2HOST_INTR_CLR, a618_gpu_ack);
++        if (!cleanup) {
++            cleanup = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
++            ack_cleared = !cleanup && !(irq & a618_gpu_ack);
++        }
++    }
++
++    uint32_t status = 0, protect = 0, address_mode = 0;
++    if (!rc && !cleanup && acked && ack_cleared) {
++        /* Reads use the 0156 mapping, while the dedicated GX vote is held. */
++        const uintptr_t gpu = a618_preparation.gpu;
++        status = mmio_read(gpu + 4 * 0x210u);       // RBBM_STATUS
++        protect = mmio_read(gpu + 4 * 0x84fu);      // CP_PROTECT_CNTL
++        address_mode = mmio_read(gpu + 4 * 0x842u); // CP_ADDR_MODE_CNTL
++        if (status == UINT32_MAX || protect == UINT32_MAX || address_mode == UINT32_MAX)
++            rc = -2;
++        IOLog("SWEET A618 OOB: held status=%08x protect=%08x addr_mode=%08x\n",
++            status, protect, address_mode);
++    }
++
++    /* Even an error return from a store could have reached the GMU. Release
++     * only our vote, and only if the same session and MMIO domain are healthy. */
++    const int release_guard = a618_gpu_oob_health(s, a618_gpu_ack, &irq);
++    if (!release_guard) {
++        release_attempted = true;
++        int release_rc = a618_gpu_oob_write(s, A6XX_GMU_HOST2GMU_INTR_SET, a618_gpu_release);
++        if (!release_rc) release_rc = a618_gpu_oob_health(s, 0, &irq);
++        if (!cleanup) cleanup = release_rc;
++    } else if (!cleanup) {
++        cleanup = release_guard;
++    }
++    if (!rc) rc = cleanup ? cleanup : acked && ack_cleared ? 0 : -3;
++    IOLog("SWEET A618 OOB: done rc=%d ack=%u ack_clear=%u release=%u cleanup=%d waited_us=%u irq=%08x\n",
++        rc, acked, ack_cleared, release_attempted, cleanup, waited, irq);
++    return rc;
++}

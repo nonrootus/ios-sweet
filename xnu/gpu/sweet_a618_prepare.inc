@@ -32,7 +32,8 @@ static struct {
 static unsigned a618_prepare_attempted;
 static unsigned a618_storage_attempted;
 
-static int a618_prepare_guard(persistent_gmu *s)
+static int a618_prepare_guard(persistent_gmu *s, uint32_t allowed_irq = 0,
+    uint32_t *observed_irq = nullptr)
 {
     if (!dcvs_succeeded || post_check(s) || !s->config.configured ||
         s->postboot.stage!=SWEET_GMU_CONFIG_READY || s->postboot.next_sequence!=6 ||
@@ -41,6 +42,7 @@ static int a618_prepare_guard(persistent_gmu *s)
     }
     /* Fresh post-DCVS-clear sample, not the DCVS helper's earlier sample. */
     uint32_t irq=mmio_read(s->region[0]+A6XX_GMU_GMU2HOST_INTR_INFO);
+    if (observed_irq) *observed_irq = irq;
     uint32_t ao=mmio_read(s->region[0]+A6XX_GMU_AO_HOST_INTERRUPT_STATUS);
     uint32_t gx=mmio_read(s->region[0]+A6XX_GMU_SPTPRAC_PWR_CLK_STATUS);
     uint32_t hfi=mmio_read(s->region[0]+A6XX_GMU_HFI_CTRL_STATUS);
@@ -48,7 +50,7 @@ static int a618_prepare_guard(persistent_gmu *s)
     /* GMU owns GX. Do not infer power from the unobserved software-collapse
      * field. Captured qcom,poll-cfg-gdscr uses CFG UP/DOWN completion bits;
      * SPTPRAC must independently report GX powered/clocked and SPTP on. */
-    bool bad=irq || ao || gx==UINT32_MAX || (gx&0xdcu)!=8u || hfi!=1 ||
+    bool bad=(irq & ~allowed_irq) || ao || gx==UINT32_MAX || (gx&0xdcu)!=8u || hfi!=1 ||
         gdsc==UINT32_MAX || complete_status==UINT32_MAX ||
         (complete_status&0x18000u)!=0x10000u;
     if (++a618_preparation.guards==1 || bad)

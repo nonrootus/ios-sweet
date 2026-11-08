@@ -176,7 +176,7 @@ sweet_gpu_probe(void)
 {
     int enabled = 0, k6a = 0, requested_start = 0, requested_hfi = 0;
     int requested_config = 0, selected_profile = 0, requested_dcvs = 0;
-    int requested_mapping=0,requested_preparation=0;
+    int requested_mapping=0,requested_preparation=0,requested_gpu_oob=0;
     vm_offset_t gcc;
     uint32_t state;
 
@@ -187,6 +187,10 @@ sweet_gpu_probe(void)
     PE_parse_boot_argn("sweetgmudcvs", &requested_dcvs, sizeof(requested_dcvs));
     PE_parse_boot_argn("sweetgpumap",&requested_mapping,sizeof(requested_mapping));
     PE_parse_boot_argn("sweetgpuprep",&requested_preparation,sizeof(requested_preparation));
+    PE_parse_boot_argn("sweetgpuoob",&requested_gpu_oob,sizeof(requested_gpu_oob));
+    if(requested_gpu_oob && (requested_gpu_oob!=1 || requested_mapping!=1)) {
+        printf("SWEET A618 OOB: requires oob=1 map=1\n");return;
+    }
     if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
         printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
     }
@@ -441,7 +445,12 @@ sweet_gpu_probe(void)
                                                                 if(!dcvs_rc && prepare==1) {
                                                                     if(requested_mapping==1) {
                                                                         extern int sweet_gpu_a618_mapping_verify(void);
-                                                                        printf("SWEET A618 MAP: entry rc=%d\n",sweet_gpu_a618_mapping_verify());
+                                                                        int mapping_rc=sweet_gpu_a618_mapping_verify();
+                                                                        printf("SWEET A618 MAP: entry rc=%d\n",mapping_rc);
+                                                                        if(!mapping_rc && requested_gpu_oob==1) {
+                                                                            extern int sweet_gpu_a618_oob_probe(void);
+                                                                            printf("SWEET A618 OOB: entry rc=%d\n",sweet_gpu_a618_oob_probe());
+                                                                        }
                                                                     } else {
                                                                         extern int sweet_gpu_a618_prepare(void);
                                                                         printf("SWEET A618 PREP: entry rc=%d\n",sweet_gpu_a618_prepare());

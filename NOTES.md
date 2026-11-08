@@ -1,6 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## 0157 dedicated A618 power vote
+
+Opt-in diagnostic after the cold mapping and DCVS checks. Requests the
+stock A615-family GPU OOB vote and verifies a new response, reads three
+GPU registers under the vote, then releases it while checking the same
+GMU and SMMU session. No SQE release or GPU command submission. Host
+sanitizers, ARM64 target-header compile and exact patch checks pass.
+Full kernel build and device evidence pending.
+
 ## 0156 GPU SMMU hardware result
 
 The owner confirms iOS loaded and returned to recovery. A fresh log shows

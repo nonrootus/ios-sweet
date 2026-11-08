@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check0150-0156 against exact published0149 Git bytes before a full build.
+"""Check0150-0157 against exact published0149 Git bytes before a full build.
 
 Usage: verify-gmu-service-patch.py BUILD_DIRECTORY [--revision HEAD]
 Requires the baseline commit object. A Windows development commit with the
@@ -53,6 +53,12 @@ TARGETS['iokit/Kernel/arm/sweet_a618_mapping.inc']='xnu/gpu/sweet_a618_mapping.i
 PATCHES+=(('xnu/patches/0156-sweet-a618-cold-context.patch',MAP_TARGETS|{
     'bsd/dev/sweet_smmu_context.c','bsd/dev/sweet_smmu_context.h','bsd/dev/sweet_gpu_probe.c',
     'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp',PREP_TARGET,'bsd/conf/files'}),)
+OOB_TARGET = 'iokit/Kernel/arm/sweet_a618_gpu_oob.inc'
+NEW_TARGETS.add(OOB_TARGET)
+TARGETS[OOB_TARGET] = 'xnu/gpu/sweet_a618_gpu_oob.inc'
+PATCHES += (('xnu/patches/0157-sweet-a618-gpu-oob.patch', {
+    OOB_TARGET, PREP_TARGET, 'bsd/dev/sweet_gpu_probe.c',
+    'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 
 
 def main():
@@ -116,7 +122,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0156 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0157 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

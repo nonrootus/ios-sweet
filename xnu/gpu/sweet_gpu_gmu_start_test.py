@@ -124,6 +124,8 @@ static bool prep_check_active;
 static unsigned prep_guard_reads,prep_fail_guard;
 static bool cold_map_enabled;
 static unsigned cold_fault,gpu_smmu_writes;
+static unsigned gpu_oob_mode, gpu_oob_writes;
+static bool gpu_oob_held;
 extern "C" sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) {
  ++prep_creates;assert(prep_creates<=5);if(prep_creates==prep_create_fail)return nullptr;
  auto *m=&prep_memory[prep_creates-1];*m={prep_creates-1,(unsigned)pages};
@@ -153,6 +155,7 @@ model=model.replace('    assert(!(a&3));',r"""    assert(!(a&3));
 model=model.replace('    released=fw_timeout=',r"""    a618_preparation={};a618_prepare_attempted=0;dcvs_succeeded=false;
     prep_check_active=false;prep_guard_reads=prep_fail_guard=0;
     cold_map_enabled=false;cold_fault=gpu_smmu_writes=0;
+    gpu_oob_mode=gpu_oob_writes=0;gpu_oob_held=false;a618_gpu_oob_attempted=0;
     a618_mapping={};a618_mapping_attempted=a618_mapping_verify_attempted=a618_storage_attempted=0;
     prep_creates=prep_clean=prep_pages=gpu_reads=prep_clean_fail=prep_page_fail=prep_create_fail=0;
     prep_map_fail=prep_bad_pa=prep_alias=prep_bad_cpu=prep_corrupt=prep_sqe_missing=prep_sqe_bad=prep_late_irq=false;
@@ -165,6 +168,22 @@ model=model.replace('    if(is_smmu(a)) {\n        unsigned off=a-uintptr_t(smmu
         unsigned off=(unsigned)(a-uintptr_t(smmu));
         if(off==0x9058)return smmu[off/4]|((smmu[0x1804/4]&1)?0x400u:0u);
         if(off==0x97f4 && cold_fault==4)return 1;""",1)
+model=model.replace('        if(a==uintptr_t(gmu_full)+0x14644){',r"""        if(a==uintptr_t(gmu_full)+0x14650 && (v==(1u<<16) || v==(1u<<24))){
+            ++gpu_oob_writes;
+            if(v==(1u<<16)){
+                assert(!gpu_oob_held);gpu_oob_held=true;
+                if(gpu_oob_mode!=1)gmu_full[0x14648/4]|=1u<<24;
+                if(gpu_oob_mode==3)gmu_full[0x14648/4]|=4;
+                if(gpu_oob_mode==5)smmu[0x9058/4]|=2;
+            }else{assert(gpu_oob_held);gpu_oob_held=false;}
+            return;
+        }
+        if(a==uintptr_t(gmu_full)+0x14644 && v==(1u<<24)){
+            assert(gpu_oob_held);++gpu_oob_writes;
+            if(gpu_oob_mode!=2)gmu_full[0x14648/4]&=~v;
+            return;
+        }
+        if(a==uintptr_t(gmu_full)+0x14644){""",1)
 model=model.replace('    unsigned off=a-uintptr_t(smmu);\n    if(off>=0xc00',r"""    unsigned off=a-uintptr_t(smmu);
     if(prep_creates){
       assert(!released && !allocated->latched && prep_clean==21);
@@ -403,6 +422,24 @@ int main(){
   assert(run()!=0 && !released && !gpu_smmu_writes && !a618_mapping.pinned);retained();
  }
  puts("PASS0156 actual cold adapter: context1 writes only before CM3 release,42 storage failures,GMU/context/timeout failures,pinned lifetime,read-only postboot observations");
+ reset();assert(sweet_gpu_a618_oob_probe()==-3 && !writes);
+ for(unsigned mode=0;mode<7;mode++){
+  reset();cold_map_enabled=true;assert(!run());
+  post_active=post_compact_ack=true;post_gx_status=0x28;
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_a618_mapping_verify());
+  if(mode==4)gpu_regs[0x84f]=UINT32_MAX;
+  if(mode==6)gmu_full[0x14648/4]|=1u<<24;
+  gpu_oob_mode=mode;unsigned prior=writes,reads=gpu_reads;
+  int rc=sweet_gpu_a618_oob_probe();
+  assert((mode==0)==(rc==0) && writes==prior+gpu_oob_writes);
+  assert(gpu_oob_writes==(mode==6?0:mode==3||mode==5?1:3));
+  assert(gpu_reads==reads+(mode==0||mode==4?3:0));
+  assert(gpu_oob_held==(mode==3||mode==5));
+  assert(sweet_gpu_a618_oob_probe()==-1 && writes==prior+gpu_oob_writes);
+  retained();
+ }
+ puts("PASS0157 dedicated GPU OOB: clean ACK and release, timeout, sticky/stale ACK, service and SMMU faults, unavailable GPU register, no retry");
  reset();puts("PASS persistent adapter+real SMMU/CM3 helpers: full boot model, 27 power gates, faults/timeouts, latch before writes, no teardown/free or retry");
 }
 '''

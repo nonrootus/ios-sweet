@@ -6,7 +6,7 @@
 int sweet_a618_pte_page(uint64_t pa,enum sweet_a618_page_role role,uint64_t *out)
 {
     uint64_t descriptor;
-    if (!out || !pa || role<SWEET_A618_PAGE_SQE || role>SWEET_A618_PAGE_PWRUP)
+    if (!out || !pa || role<SWEET_A618_PAGE_SQE || role>SWEET_A618_PAGE_FILL)
         return -1;
     int read_only=role==SWEET_A618_PAGE_SQE || role==SWEET_A618_PAGE_RING;
     int privileged=role==SWEET_A618_PAGE_SCRATCH || role==SWEET_A618_PAGE_PWRUP;

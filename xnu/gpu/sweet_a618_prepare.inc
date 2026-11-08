@@ -19,11 +19,12 @@ static const struct { const char *name; uint32_t dword; } a618_snapshot_regs[] =
     {"CP_INTERRUPT_STATUS",0x823}, {"CP_PROTECT_STATUS",0x824}, {"CP_STATUS_1",0x825}
 };
 static constexpr unsigned a618_register_count = sizeof(a618_snapshot_regs)/sizeof(a618_snapshot_regs[0]);
-static const unsigned a618_buffer_pages[] = {8,8,1,1};
-static const char *const a618_buffer_names[] = {"SQE","ring","scratch","pwrup-reserved"};
+static constexpr unsigned a618_fill_buffer = 4;
+static const unsigned a618_buffer_pages[] = {8,8,1,1,1};
+static const char *const a618_buffer_names[] = {"SQE","ring","scratch","pwrup-reserved","fill"};
 static struct {
-    sweet_gpu_memory *storage[4];
-    uint64_t physical[18];
+    sweet_gpu_memory *storage[a618_fill_buffer+1];
+    uint64_t physical[SWEET_A618_DATA_PAGES+1];
     uint32_t registers[a618_register_count];
     uintptr_t gpu;
     unsigned pages, buffers, reads, guards;
@@ -59,10 +60,11 @@ static int a618_prepare_guard(persistent_gmu *s, uint32_t allowed_irq = 0,
     return bad?-3:0;
 }
 
-static int a618_storage_prepare(bool legacy_log)
+static int a618_storage_prepare(bool legacy_log, bool fill = false)
 {
     auto &a=a618_preparation;
-    if(a.storage_ready)return 0;
+    const unsigned buffers = a618_fill_buffer + unsigned(fill);
+    if(a.storage_ready)return a.buffers == buffers ? 0 : -3;
     if(!__sync_bool_compare_and_swap(&a618_storage_attempted,0u,1u))return -1;
     const char *prefix=legacy_log?"SWEET A618 PREP:":"SWEET A618 COLD MEM:";
     const void *gmu=nullptr,*sqe=nullptr;size_t gmu_size=0,sqe_size=0;
@@ -76,7 +78,7 @@ static int a618_storage_prepare(bool legacy_log)
     /* Bounded allocations remain private and retained even on failure. No
      * device address exists yet; never fill a register with these host PAs.
      * Reserved powerup storage is NOT a valid initialized register list. */
-    for (unsigned b=0;b<4;b++) {
+    for (unsigned b=0;b<buffers;b++) {
         a.storage[b]=sweet_gpu_memory_create_nc(a618_buffer_pages[b]);
         if (!a.storage[b]) return -5;
         ++a.buffers;

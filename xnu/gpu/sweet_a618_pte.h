@@ -11,11 +11,13 @@ enum sweet_a618_page_role {
     SWEET_A618_PAGE_SQE=0,
     SWEET_A618_PAGE_RING=1,
     SWEET_A618_PAGE_SCRATCH=2,
-    SWEET_A618_PAGE_PWRUP=3
+    SWEET_A618_PAGE_PWRUP=3,
+    SWEET_A618_PAGE_FILL=4
 };
 /* Format only:4KiB,nonzero36-bit PA. On error leaves *out unchanged.
  * SQE:read-only/unprivileged/executable; ring:read-only/unprivileged/XN;
- * scratch/pwrup:read-write/privileged/XN. XN sets both PXN and UXN.
+ * scratch/pwrup:read-write/privileged/XN; fill:read-write/unprivileged/XN.
+ * XN sets both PXN and UXN.
  */
 int sweet_a618_pte_page(uint64_t pa,enum sweet_a618_page_role role,uint64_t *out);
 #endif

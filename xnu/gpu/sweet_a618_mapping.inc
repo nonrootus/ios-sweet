@@ -15,7 +15,8 @@ static int a618_pin_tables(void *opaque,uint64_t *root)
 {
     auto *s=static_cast<persistent_gmu *>(opaque);auto &m=a618_mapping;
     if(!root || m.pinned || !m.published || stopped(s) ||
-        sweet_a618_address_space_check(m.tables,a618_preparation.physical))return -1;
+        sweet_a618_address_space_check(m.tables,a618_preparation.physical,
+            a618_preparation.physical[SWEET_A618_DATA_PAGES]))return -1;
     m.pinned=true;*root=m.tables[0].pa;return 0;
 }
 static void a618_unpin_before_write(void *)
@@ -24,13 +25,14 @@ static void a618_unpin_before_write(void *)
      * Allocations still stay retained; this is not a teardown/free path. */
     a618_mapping.pinned=false;
 }
-static int a618_cold_prepare_and_attach(persistent_gmu *s)
+static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
 {
     if(!__sync_bool_compare_and_swap(&a618_mapping_attempted,0u,1u))return -1;
     auto &m=a618_mapping;auto &a=a618_preparation;
     if(stopped(s) || s->boot.release_attempted)return -3;
     IOLog("SWEET A618 COLD MAP: begin; CM3 reset and GX collapsed\n");
-    int rc=a618_storage_prepare(false);if(rc)return rc;
+    int rc=a618_storage_prepare(false,fill);if(rc)return rc;
+    const uint64_t fill_pa = a.physical[SWEET_A618_DATA_PAGES];
     m.memory=sweet_gpu_memory_create_nc(SWEET_A618_TABLE_PAGES);
     if(!m.memory)return -5;
     for(unsigned i=0;i<SWEET_A618_TABLE_PAGES;i++){
@@ -38,14 +40,14 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s)
         if(sweet_gpu_memory_page(m.memory,i,&cpu,&pa))return -5;
         m.tables[i]={static_cast<uint64_t *>(cpu),pa};
     }
-    if(sweet_a618_address_space_build(m.tables,a.physical) ||
-        sweet_a618_address_space_check(m.tables,a.physical))return -5;
+    if(sweet_a618_address_space_build(m.tables,a.physical,fill_pa) ||
+        sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
     /* Fixed three-level tree: complete children before the parent root. */
     for(unsigned i=3;i;i--)if(sweet_gpu_memory_clean(m.memory,i-1))return -5;
-    if(complete(s) || sweet_a618_address_space_check(m.tables,a.physical))return -5;
+    if(complete(s) || sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
     m.published=true;
-    IOLog("SWEET A618 COLD MAP: tree root=%llx tables=3 data=18 SQE=%08x ring=%08x scratch=%08x pwrup=%08x; powerup contents still reserved\n",
-        static_cast<unsigned long long>(m.tables[0].pa),SWEET_A618_SQE_IOVA,SWEET_A618_RING_IOVA,
+    IOLog("SWEET A618 COLD MAP: tree root=%llx tables=3 data=%u SQE=%08x ring=%08x scratch=%08x pwrup=%08x; powerup contents still reserved\n",
+        static_cast<unsigned long long>(m.tables[0].pa),a.pages,SWEET_A618_SQE_IOVA,SWEET_A618_RING_IOVA,
         SWEET_A618_SCRATCH_IOVA,SWEET_A618_PWRUP_IOVA);
     sweet_smmu_context_ops ops={s,read32,write32,write64,complete,pause_us,stopped,a618_pin_tables,a618_unpin_before_write};
     rc=sweet_smmu_gpu_cold_install(&m.context,&ops,&s->context);
@@ -61,11 +63,14 @@ extern "C" int sweet_gpu_a618_mapping_verify(void)
 {
     if(!__sync_bool_compare_and_swap(&a618_mapping_verify_attempted,0u,1u))return -1;
     auto *s=&probe;auto &m=a618_mapping;auto &a=a618_preparation;
+    const uint64_t fill_pa = a.physical[SWEET_A618_DATA_PAGES];
+    const unsigned extra = fill_pa != 0;
     if(!a618_mapping_attempted || !m.published || !m.pinned || !a.storage_ready ||
-        a.pages!=18 || a.buffers!=4 || m.context.state!=SWEET_SMMU_CONTEXT_ACTIVE ||
+        a.pages!=SWEET_A618_DATA_PAGES+extra || a.buffers!=a618_fill_buffer+extra ||
+        m.context.state!=SWEET_SMMU_CONTEXT_ACTIVE ||
         a618_prepare_guard(s))return -3;
     IOLog("SWEET A618 MAP: begin retained cold context check; no GPU command submission\n");
-    if(sweet_a618_address_space_check(m.tables,a.physical))return -5;
+    if(sweet_a618_address_space_check(m.tables,a.physical,fill_pa))return -5;
     a.gpu=ml_io_map(a618_register_base,a618_register_size);if(!a.gpu)return -2;
     for(unsigned i=0;i<a618_register_count;i++){
         if(a618_prepare_guard(s))return -3;
@@ -86,7 +91,7 @@ extern "C" int sweet_gpu_a618_mapping_verify(void)
         IOLog("SWEET A618 MAP: observed %us global=%08x GMU_FSR=%08x GPU_FSR=%08x GPU_FAR=%08x%08x\n",
             seconds[i],global,gmu_fsr,gpu_fsr,farhi,farlo);
     }
-    IOLog("SWEET A618 MAP: done rc=0 tables=3 data=18 observations=%u SID=0 bank=1; both contexts retained\n",m.observations);
+    IOLog("SWEET A618 MAP: done rc=0 tables=3 data=%u observations=%u SID=0 bank=1; both contexts retained\n",a.pages,m.observations);
     IOLog("SWEET A618 MAP: register acceptance only; GPU transaction, valid powerup list, SQE and rendering not started\n");
     return 0;
 }

@@ -113,11 +113,11 @@ model=model.replace('probe={};attempted=0;', 'probe={};attempted=postboot_attemp
 
 model=model.replace('#include "sweet_gmu_memory.h"','#include "sweet_gmu_memory.h"\n#include "sweet_gpu_memory.h"')
 model=model.replace('static unsigned writes,',r"""
-alignas(4096) static uint8_t prep_data[5][8*4096];
+alignas(4096) static uint8_t prep_data[6][8*4096];
 static uint32_t gpu_regs[0x40000/4];
 static uint8_t sqe_file[32136];
 struct sweet_gpu_memory { unsigned index,pages; };
-static sweet_gpu_memory prep_memory[5];
+static sweet_gpu_memory prep_memory[6];
 static unsigned prep_creates,prep_clean,prep_pages,gpu_reads,prep_clean_fail,prep_page_fail,prep_create_fail;
 static bool prep_map_fail,prep_bad_pa,prep_alias,prep_bad_cpu,prep_corrupt,prep_sqe_missing,prep_sqe_bad,prep_late_irq;
 static bool prep_check_active;
@@ -130,9 +130,9 @@ static unsigned cp_mode, cp_writes, roq_reads;
 static bool cp_started;
 static unsigned cx_mode, cx_writes;
 extern "C" sweet_gpu_memory *sweet_gpu_memory_create_nc(size_t pages) {
- ++prep_creates;assert(prep_creates<=5);if(prep_creates==prep_create_fail)return nullptr;
+ ++prep_creates;assert(prep_creates<=6);if(prep_creates==prep_create_fail)return nullptr;
  auto *m=&prep_memory[prep_creates-1];*m={prep_creates-1,(unsigned)pages};
- if(m->index==4)memset(prep_data[4],0,pages*4096);
+ if(m->index>=4)memset(prep_data[m->index],0,pages*4096);
  return m;
 }
 extern "C" int sweet_gpu_memory_page(sweet_gpu_memory *m,size_t p,void **cpu,uint64_t *pa){
@@ -253,7 +253,7 @@ model=model.replace('    if(!is_smmu(a)) {',r"""    if(in_range(a,gpu_regs,sizeo
     if(!is_smmu(a)) {""",1)
 model=model.replace('    unsigned off=a-uintptr_t(smmu);\n    if(off>=0xc00',r"""    unsigned off=a-uintptr_t(smmu);
     if(prep_creates){
-      assert(!released && !allocated->latched && prep_clean==21);
+        assert(!released && !allocated->latched && prep_clean==21+(prep_creates==6));
       assert(off==0x1804 || off==0x1004 || off==0x804 || off==0xc04 || (off>=0x9000 && off<0xa000));
       ++gpu_smmu_writes;
       if(cold_fault==1 && off==0x1804)return;
@@ -265,12 +265,12 @@ model=model.replace('    unsigned off=a-uintptr_t(smmu);\n    if(off>=0xc00',r""
     if(off>=0xc00""",1)
 model=model.replace('    assert(smmu[0x8000/4]==0);',r"""    unsigned off=(unsigned)(a-uintptr_t(smmu));
     if(prep_creates){
-      assert(!released && !allocated->latched && prep_clean==21);
+      assert(!released && !allocated->latched && prep_clean==21+(prep_creates==6));
       assert(off==0x9020 || off==0x9028);++gpu_smmu_writes;
     }
     assert(smmu[(off>=0x9000?0x9000:0x8000)/4]==0);""",1)
 model+=r'''
-static int run(){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu),cold_map_enabled?1u:0u);}
+static int run(unsigned fill=0){return sweet_gpu_gmu_start(uintptr_t(gcc),uintptr_t(cc),uintptr_t(gmu),cold_map_enabled?1u:0u,fill);}
 static unsigned pas_mode, pas_calls, pas_writes;
 static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target){
  const uint32_t ids[]={0x02000201u,0x02000202u,0x02000205u,0x02000206u};
@@ -296,7 +296,7 @@ static a618_scm_reply a618_scm_info_query(uint32_t flags, uint32_t target){
 static void once(){unsigned w=writes,m=maps,c=creates;assert(run()==-1);assert(w==writes&&m==maps&&c==creates);}
 static void retained(){assert(live==1&&allocated&&pins==1&&!unpins&&!destroys&&allocated->refs==1);assert(probe.context.retained);once();}
 int main(){
- reset();assert(sweet_gpu_gmu_start(0,uintptr_t(cc),uintptr_t(gmu),0)==-1 && !attempted);
+ reset();assert(sweet_gpu_gmu_start(0,uintptr_t(cc),uintptr_t(gmu),0,0)==-1 && !attempted);
  reset();assert(run()==0);retained();assert(allocated->latched&&released&&probe.boot.stage==SWEET_GMU_START_READY);
  uint64_t ttbr=(uint64_t(smmu[0x8024/4])<<32)|smmu[0x8020/4];
  assert(smmu[0x800/4]==0x80000005 && (ttbr&0x0000ffffffffffffull)==0x10456c000ull && (ttbr>>48)==1);
@@ -511,6 +511,16 @@ int main(){
   assert(run()!=0 && !released && !gpu_smmu_writes && !a618_mapping.pinned);retained();
  }
  puts("PASS0156 actual cold adapter: context1 writes only before CM3 release,42 storage failures,GMU/context/timeout failures,pinned lifetime,read-only postboot observations");
+ reset();assert(run(1)==-1 && !attempted);
+ reset();cold_map_enabled=true;assert(!run(1) && released && a618_mapping.pinned);
+ assert(a618_preparation.pages==19 && prep_creates==6 && a618_mapping.context.root_pa==0x105050000ull);
+ assert(a618_mapping.tables[2].cpu[0x22]==(0x105040000ull | 0x60000000000e43ull));
+ assert(a618_mapping.tables[2].cpu[0x20]==(0x105020000ull | 0x60000000000e03ull));
+ post_active=post_compact_ack=true;post_gx_status=0x28;
+ assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+ assert(!sweet_gpu_a618_mapping_verify() && a618_mapping.observations==3);retained();
+ reset();cold_map_enabled=true;prep_create_fail=5;
+ assert(run(1)!=0 && !released && !gpu_smmu_writes && !a618_mapping.pinned);retained();
  reset();assert(sweet_gpu_a618_oob_probe(0)==-3 && !writes);
  for(unsigned mode=0;mode<7;mode++){
   reset();cold_map_enabled=true;assert(!run());

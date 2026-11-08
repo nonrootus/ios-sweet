@@ -18,7 +18,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern void sweet_gpu_smmu_probe(uintptr_t, uintptr_t, uintptr_t);
-extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned);
+extern int sweet_gpu_gmu_start(uintptr_t, uintptr_t, uintptr_t, unsigned, unsigned);
 extern void sweet_a618_zap_reserve_probe(void);
 extern int sweet_a618_zap_low_check(void);
 void sweet_gpu_probe(void);
@@ -453,7 +453,8 @@ sweet_gpu_probe(void)
                                             if (requested_start == 1) {
                                                 if (bw_rc) printf("SWEET GMU BOOT: skipped after failed DDR handoff\n");
                                                 else {
-                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,(unsigned)requested_mapping);
+                                                    int start_rc=sweet_gpu_gmu_start(gcc,cc,gmu,
+                                                        (unsigned)requested_mapping,(unsigned)requested_fill);
                                                     printf("SWEET GMU BOOT: entry rc=%d\n",start_rc);
                                                     if(!start_rc && requested_hfi==1) {
                                                         extern int sweet_gpu_gmu_hfi_start(void);

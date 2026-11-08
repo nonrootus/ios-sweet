@@ -20,11 +20,21 @@ static uint32_t a618_pkt4(uint32_t reg)
 }
 
 static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
-    const uint32_t *packet, unsigned count, unsigned &tail)
+    const char *phase, const uint32_t *packet, unsigned count, unsigned &tail)
 {
-    if (tail >= 1024 || count + 3 > 1024 - tail || a618_cp_guard(s, run) ||
-        a618_cp_read(run,0x806) != tail || a618_cp_read(run,0x807) != tail || *run.shadow != tail)
+    if (tail >= 1024 || count + 3 > 1024 - tail) return -5;
+    if (a618_cp_guard(s, run)) {
+        IOLog("SWEET A618 RING: %s preflight guard failed\n", phase);
         return -3;
+    }
+    const uint32_t previous_rptr = a618_cp_read(run,0x806);
+    const uint32_t previous_wptr = a618_cp_read(run,0x807);
+    const uint32_t previous_shadow = *run.shadow;
+    if (previous_rptr != tail || previous_wptr != tail || previous_shadow != tail) {
+        IOLog("SWEET A618 RING: %s preflight tail=%u RPTR=%u WPTR=%u shadow=%u\n",
+            phase, tail, previous_rptr, previous_wptr, previous_shadow);
+        return -3;
+    }
     void *cpu = nullptr;
     if (a618_cp_buffer(1, 0, 8, &cpu)) return -5;
     auto *ring = static_cast<uint32_t *>(cpu);
@@ -32,24 +42,48 @@ static int a618_fill_submit(persistent_gmu *s, a618_cp_run &run,
     ring[tail + count] = a618_pkt7(0x62, 2); // CP_WHERE_AM_I
     ring[tail + count + 1] = SWEET_A618_SCRATCH_IOVA;
     ring[tail + count + 2] = 0;
-    if (sweet_gpu_memory_clean(a618_preparation.storage[1], 0) || a618_cp_guard(s, run)) return -5;
+    if (sweet_gpu_memory_clean(a618_preparation.storage[1], 0)) return -5;
+    if (a618_cp_guard(s, run)) {
+        IOLog("SWEET A618 RING: %s publication guard failed\n", phase);
+        return -3;
+    }
     const unsigned end = tail + count + 3;
     mmio_write32(a618_cp_register(run,0x807), end);
     if (complete(s)) return -3;
+    IOLog("SWEET A618 RING: %s WPTR written=%u\n", phase, end);
     constexpr uint32_t busy_off = 0x23b0cu*4-0x6a000u;
     for (unsigned waited = 0; waited <= 2000000; waited += 1000) {
-        uint32_t fence = 0, busy = 0;
-        if (a618_cp_guard(s, run) || post_read(s, a618_fence_status, &fence) || fence ||
-            post_read(s, busy_off, &busy) || busy == UINT32_MAX || a618_cp_read(run,0x807) != end)
+        if (a618_cp_guard(s, run)) {
+            IOLog("SWEET A618 RING: %s polling guard failed at %u us\n", phase, waited);
             return -3;
+        }
+        uint32_t fence = UINT32_MAX, busy = UINT32_MAX;
+        if (post_read(s, a618_fence_status, &fence) || fence ||
+            post_read(s, busy_off, &busy) || busy == UINT32_MAX) {
+            IOLog("SWEET A618 RING: %s polling fence=%08x busy=%08x at %u us\n", phase, fence, busy, waited);
+            return -3;
+        }
+        uint32_t wptr = a618_cp_read(run,0x807);
+        if (wptr != end) {
+            IOLog("SWEET A618 RING: %s WPTR read=%u expected=%u at %u us\n", phase, wptr, end, waited);
+            return -3;
+        }
         uint32_t rptr = a618_cp_read(run,0x806);
         if (complete(s)) return -3;
         uint32_t shadow = *run.shadow;
-        if (rptr < tail || rptr > end || shadow < tail || shadow > end) return -5;
+        if (rptr < tail || rptr > end || shadow < tail || shadow > end) {
+            IOLog("SWEET A618 RING: %s pointer range=%u..%u RPTR=%u shadow=%u\n",
+                phase, tail, end, rptr, shadow);
+            return -5;
+        }
         if (rptr == end && shadow == end && !(busy & (1u << 23))) {
+            IOLog("SWEET A618 RING: %s complete RPTR=%u WPTR=%u shadow=%u\n", phase, rptr, wptr, shadow);
             tail = end;
             return 0;
         }
+        if (waited == 2000000)
+            IOLog("SWEET A618 RING: %s timeout RPTR=%u WPTR=%u shadow=%u busy=%08x\n",
+                phase, rptr, wptr, shadow, busy);
         if (waited != 2000000) IODelay(1000);
     }
     return -4;
@@ -59,23 +93,25 @@ static int a618_fill_first(persistent_gmu *s, a618_cp_run &run)
 {
     constexpr uint32_t sentinel = 0xa5a5a5a5, pixel = 0x42424242;
     constexpr uint32_t color_fence = 0x13579bdf, cache_fence = 0x2468ace0;
-    constexpr uint32_t scratch = SWEET_A618_SCRATCH_IOVA, target = scratch + 0x400;
+    constexpr uint32_t buffer = SWEET_A618_FILL_IOVA, target = buffer + 0x400;
     constexpr unsigned first_pixel = 0x400 / 4, pixels = 16 * 16;
     unsigned tail = SWEET_A618_CP_BOOT_WORDS;
     if (!run.zap_attempted || a618_cp_read(run,0xf400) != 1) return -3;
+    void *cpu = nullptr;
+    if (a618_cp_buffer(a618_fill_buffer,0,SWEET_A618_DATA_PAGES,&cpu)) return -5;
     const uint32_t mode[] = {a618_pkt7(0x66,1), 0}; // CP_SET_SECURE_MODE
     IOLog("SWEET A618 FILL: normal mode begin\n");
-    int rc = a618_fill_submit(s, run, mode, sizeof(mode)/sizeof(mode[0]), tail);
+    int rc = a618_fill_submit(s, run, "mode", mode, sizeof(mode)/sizeof(mode[0]), tail);
     if (rc) return rc;
     uint32_t trust = a618_cp_read(run,0xf400);
     IOLog("SWEET A618 FILL: normal mode rc=0 TRUST=%08x\n", trust);
     if (trust) return -6;
 
-    auto *words = run.shadow;
-    for (unsigned i = 1; i < 1024; ++i) words[i] = sentinel;
+    auto *words = static_cast<volatile uint32_t *>(cpu);
+    for (unsigned i = 0; i < 1024; ++i) words[i] = sentinel;
     words[4] = 0;
     words[8] = 0;
-    if (sweet_gpu_memory_clean(a618_preparation.storage[2],0)) return -5;
+    if (sweet_gpu_memory_clean(a618_preparation.storage[a618_fill_buffer],0)) return -5;
     const uint32_t draw[] = {
         a618_pkt7(0x26,0),                  // WFI before changing CCU mode
         a618_pkt4(0x8e07), 0x08000000u,     // A618 sysmem CCU profile
@@ -97,20 +133,24 @@ static int a618_fill_first(persistent_gmu *s, a618_cp_run &run)
         a618_pkt7(0x26,0),                  // A618 blitter WFI quirk
         a618_pkt7(0x2c,1), 3,               // CP_BLIT scale
         a618_pkt7(0x26,0),
-        a618_pkt7(0x46,4), 0x1d, scratch + 16, 0, color_fence,
-        a618_pkt7(0x14,4), 0, scratch + 16, 0, color_fence,
-        a618_pkt7(0x46,4), 0x04, scratch + 32, 0, cache_fence,
-        a618_pkt7(0x14,4), 0, scratch + 32, 0, cache_fence,
+        a618_pkt7(0x46,4), 0x1d, buffer + 16, 0, color_fence,
+        a618_pkt7(0x14,4), 0, buffer + 16, 0, color_fence,
+        a618_pkt7(0x46,4), 0x04, buffer + 32, 0, cache_fence,
+        a618_pkt7(0x14,4), 0, buffer + 32, 0, cache_fence,
     };
     IOLog("SWEET A618 FILL: 16x16 submit\n");
-    rc = a618_fill_submit(s, run, draw, sizeof(draw)/sizeof(draw[0]), tail);
+    rc = a618_fill_submit(s, run, "draw", draw, sizeof(draw)/sizeof(draw[0]), tail);
     if (rc) return rc;
     unsigned matches = 0, guards = 0;
-    for (unsigned i = 1; i < 1024; ++i) {
+    for (unsigned i = 0; i < 1024; ++i) {
         if (i >= first_pixel && i < first_pixel + pixels) matches += words[i] == pixel;
         else if (i != 4 && i != 8) guards += words[i] != sentinel;
     }
     const uint32_t color = words[4], cache = words[8];
+    if (a618_cp_guard(s, run)) {
+        IOLog("SWEET A618 RING: draw readback guard failed\n");
+        return -3;
+    }
     IOLog("SWEET A618 FILL: pixels=%u/256 guards_changed=%u fences=%08x/%08x\n",
         matches, guards, color, cache);
     return matches == pixels && !guards && color == color_fence && cache == cache_fence ? 0 : -5;

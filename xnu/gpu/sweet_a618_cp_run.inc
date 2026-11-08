@@ -290,7 +290,8 @@ static int a618_cp_publish(persistent_gmu *s, a618_cp_run &run)
     }
     if (sweet_gpu_memory_clean(a618_preparation.storage[2],0) ||
         sweet_gpu_memory_clean(a618_preparation.storage[3],0) || complete(s)) return -5;
-    return sweet_a618_address_space_check(a618_mapping.tables,a618_preparation.physical) ? -5 : 0;
+    return sweet_a618_address_space_check(a618_mapping.tables,a618_preparation.physical,
+        a618_preparation.physical[SWEET_A618_DATA_PAGES]) ? -5 : 0;
 }
 
 static int a618_zap_load(persistent_gmu *, a618_cp_run &);

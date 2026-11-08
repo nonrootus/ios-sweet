@@ -22,7 +22,8 @@ int sweet_a618_address_space_page(unsigned index,uint32_t *iova,
     else {*iova=SWEET_A618_PWRUP_IOVA;*role=SWEET_A618_PAGE_PWRUP;}
     return 0;
 }
-static int prepare(const struct sweet_gpu_table_page t[3],const uint64_t pa[18],uint64_t leaves[18])
+static int prepare(const struct sweet_gpu_table_page t[3], const uint64_t pa[18],
+    uint64_t fill_pa, uint64_t leaves[19])
 {
     if(!t || !pa || ((uintptr_t)t%_Alignof(struct sweet_gpu_table_page)) ||
         ((uintptr_t)pa%_Alignof(uint64_t))) return -1;
@@ -45,12 +46,18 @@ static int prepare(const struct sweet_gpu_table_page t[3],const uint64_t pa[18],
     }
     for(unsigned i=0;i<21;i++)for(unsigned j=0;j<i;j++)
         if(addresses[i]==addresses[j])return -1;
+    leaves[18] = 0;
+    if (fill_pa) {
+        for (unsigned i=0;i<21;i++) if (addresses[i]==fill_pa) return -1;
+        if (sweet_a618_pte_page(fill_pa,SWEET_A618_PAGE_FILL,&leaves[18])) return -1;
+    }
     return 0;
 }
-static uint64_t expected(const struct sweet_gpu_table_page t[3],const uint64_t leaves[18],unsigned level,unsigned index)
+static uint64_t expected(const struct sweet_gpu_table_page t[3],const uint64_t leaves[19],unsigned level,unsigned index)
 {
     if(level==0)return index==1 ? t[1].pa|3u : 0;
     if(level==1)return index==0 ? t[2].pa|3u : 0;
+    if(index==((SWEET_A618_FILL_IOVA>>12)&511u))return leaves[18];
     for(unsigned i=0;i<18;i++){
         uint32_t va;enum sweet_a618_page_role role;
         (void)sweet_a618_address_space_page(i,&va,&role);
@@ -58,10 +65,10 @@ static uint64_t expected(const struct sweet_gpu_table_page t[3],const uint64_t l
     }
     return 0;
 }
-int sweet_a618_address_space_build(const struct sweet_gpu_table_page t[3],const uint64_t pa[18])
+int sweet_a618_address_space_build(const struct sweet_gpu_table_page t[3],const uint64_t pa[18],uint64_t fill_pa)
 {
-    uint64_t leaves[18];
-    if(prepare(t,pa,leaves))return -1;
+    uint64_t leaves[19];
+    if(prepare(t,pa,fill_pa,leaves))return -1;
     for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
         if(t[level].cpu[i])return -1;
     /* No callbacks or fallible operations after the first store. */
@@ -69,10 +76,10 @@ int sweet_a618_address_space_build(const struct sweet_gpu_table_page t[3],const 
         t[level].cpu[i]=expected(t,leaves,level,i);
     return 0;
 }
-int sweet_a618_address_space_check(const struct sweet_gpu_table_page t[3],const uint64_t pa[18])
+int sweet_a618_address_space_check(const struct sweet_gpu_table_page t[3],const uint64_t pa[18],uint64_t fill_pa)
 {
-    uint64_t leaves[18];
-    if(prepare(t,pa,leaves))return -1;
+    uint64_t leaves[19];
+    if(prepare(t,pa,fill_pa,leaves))return -1;
     for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++)
         if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
     return 0;

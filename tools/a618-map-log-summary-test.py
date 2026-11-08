@@ -16,6 +16,12 @@ good='\n'.join(cold)+'\n'+f.good+'\n'.join(post)+'\n'
 def analyze(t):return s.analyze(*s.dcvs.configuration.initial.decode(t.encode()))
 class Test(unittest.TestCase):
     def test_complete(self):self.assertEqual(analyze(good)['exit_code'],0,analyze(good))
+    def test_fill_page(self):
+        fill = s.MEM+'buffer=fill pages=1 CPU verified; no IOVA assigned\n'
+        mapped = good.replace('data=18','data=19').replace(s.COLD+'tree',fill+s.COLD+'tree')
+        self.assertEqual(analyze(mapped)['exit_code'],0)
+        self.assertNotEqual(analyze(mapped.replace(fill,''))['exit_code'],0)
+        self.assertNotEqual(analyze(mapped.replace('done rc=0 tables=3 data=19','done rc=0 tables=3 data=18'))['exit_code'],0)
     def test_missing_duplicate(self):
         for line in cold+post:
             self.assertNotEqual(analyze(good.replace(line+'\n','',1))['exit_code'],0,line)

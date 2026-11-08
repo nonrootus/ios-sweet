@@ -28,29 +28,30 @@ header+='\n'.join(defines)+'\n'+'\n'.join('#define '+f+' (1u<<'+str(i)+')' for i
 body=r'''
 int main(void) {
  struct arm_lpae_io_pgtable data={{ARM_64_LPAE_S1}};
- for(unsigned role=0;role<4;role++)for(uint64_t page=1;page<(1ull<<24);page+=1543){
+ for(unsigned role=0;role<=SWEET_A618_PAGE_FILL;role++)for(uint64_t page=1;page<(1ull<<24);page+=1543){
    uint64_t pa=page<<12,actual=0;
    int prot=IOMMU_READ;
-   if(role>=2)prot|=IOMMU_WRITE|IOMMU_PRIV;
+   if(role>=2)prot|=IOMMU_WRITE;
+   if(role==2 || role==3)prot|=IOMMU_PRIV;
    if(role!=0)prot|=IOMMU_NOEXEC;
    uint64_t expected=pa|ARM_LPAE_PTE_TYPE_PAGE|ARM_LPAE_PTE_AF|ARM_LPAE_PTE_SH_OS|arm_lpae_prot_to_pte(&data,prot);
    assert(!sweet_a618_pte_page(pa,(enum sweet_a618_page_role)role,&actual));assert(actual==expected);
  }
  const uint64_t valid[]={0x1000,0xfffff000,0x100000000,0xffffff000ull};
- for(unsigned i=0;i<4;i++)for(unsigned role=0;role<4;role++){
+ for(unsigned i=0;i<4;i++)for(unsigned role=0;role<=SWEET_A618_PAGE_FILL;role++){
    uint64_t d=0;assert(!sweet_a618_pte_page(valid[i],(enum sweet_a618_page_role)role,&d));
    assert((d&0x0000000ffffff000ull)==valid[i]);assert((d>>53)==(role?3:0));
-   assert(((d>>6)&3)==(role<2?3:0));assert((d&0xe3f)==0xe03);
+   assert(((d>>6)&3)==(role<2?3:role==SWEET_A618_PAGE_FILL?1:0));assert((d&0xe3f)==0xe03);
  }
  for(int role=-3;role<8;role++){
    const uint64_t bad[]={0,1,0x1001,1ull<<36,UINT64_MAX};
    for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++){
      uint64_t d=0xabcdef;assert(sweet_a618_pte_page(bad[i],(enum sweet_a618_page_role)role,&d));assert(d==0xabcdef);
    }
-   if(role<0 || role>3){uint64_t d=0xabcdef;assert(sweet_a618_pte_page(0x1000,(enum sweet_a618_page_role)role,&d));assert(d==0xabcdef);}
+   if(role<0 || role>SWEET_A618_PAGE_FILL){uint64_t d=0xabcdef;assert(sweet_a618_pte_page(0x1000,(enum sweet_a618_page_role)role,&d));assert(d==0xabcdef);}
    assert(sweet_a618_pte_page(0x1000,(enum sweet_a618_page_role)role,0));
  }
- puts("PASS A618 offline leaf policy: unchanged stock S1 converter, four roles across36-bit PA range, boundaries and invalid inputs; no hardware mapping");
+ puts("PASS A618 offline leaf policy: unchanged stock S1 converter, five roles across 36-bit PA range, boundaries and invalid inputs");
 }
 '''
 (work/'stock-compare.c').write_text(header+function+body)

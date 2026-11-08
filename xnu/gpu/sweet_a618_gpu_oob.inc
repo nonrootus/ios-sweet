@@ -9,9 +9,16 @@ static unsigned a618_gpu_oob_attempted;
 
 static int a618_gpu_oob_health(persistent_gmu *s, uint32_t allowed_irq, uint32_t *irq)
 {
-    if (a618_prepare_guard(s, allowed_irq, irq) ||
-        sweet_smmu_gpu_context_check(&a618_mapping.context, &s->context)) return -3;
-    return 0;
+    if (a618_prepare_guard(s, allowed_irq, irq)) return -3;
+    int rc = sweet_smmu_gpu_context_check(&a618_mapping.context, &s->context);
+    if (!rc) return 0;
+    uint32_t global = 0, gmu_fsr = 0, gpu_fsr = 0, low = 0, high = 0, syndrome = 0;
+    if (!read32(s,0x48,&global) && !read32(s,0x8058,&gmu_fsr) && !read32(s,0x9058,&gpu_fsr) &&
+        !read32(s,0x9060,&low) && !read32(s,0x9064,&high) && !read32(s,0x9068,&syndrome))
+        IOLog("SWEET A618 SMMU: context rc=%d GFSR=%08x GMU_FSR=%08x GPU_FSR=%08x GPU_FAR=%08x%08x GPU_FSYNR0=%08x\n",
+            rc, global, gmu_fsr, gpu_fsr, high, low, syndrome);
+    else IOLog("SWEET A618 SMMU: context rc=%d snapshot unavailable\n", rc);
+    return -3;
 }
 
 static int a618_gpu_oob_write(persistent_gmu *s, uint32_t offset, uint32_t value)

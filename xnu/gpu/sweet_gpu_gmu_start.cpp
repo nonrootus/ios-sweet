@@ -232,10 +232,11 @@ static void report_faults(persistent_gmu *s)
     IOLog("SWEET GMU BOOT: SMMU global=%08x fsr=%08x far=%08x%08x syndrome=%08x\n",
         global,fsr,farhi,farlo,syndrome);
 }
-static int a618_cold_prepare_and_attach(persistent_gmu *);
-extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu,unsigned gpu_mapping)
+static int a618_cold_prepare_and_attach(persistent_gmu *,bool);
+extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu,unsigned gpu_mapping,unsigned fill)
 {
-    if (!gcc || !cc || !gmu || gpu_mapping>1 || !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
+    if (!gcc || !cc || !gmu || gpu_mapping>1 || fill>gpu_mapping ||
+        !__sync_bool_compare_and_swap(&attempted,0u,1u)) return -1;
     auto *s=&probe;s->gcc=gcc;s->cc=cc;s->gmu=gmu;s->cold_gpu_requested=gpu_mapping==1;
     const void *firmware=nullptr;size_t bytes=0;
     IOLog("SWEET GMU BOOT: begin first CM3 boot; no teardown or retry\n");
@@ -264,7 +265,7 @@ extern "C" int sweet_gpu_gmu_start(uintptr_t gcc,uintptr_t cc,uintptr_t gmu,unsi
         static_cast<unsigned long long>(s->context.root_pa));
     if (rc) return rc;
     if(gpu_mapping) {
-        rc=a618_cold_prepare_and_attach(s);
+        rc=a618_cold_prepare_and_attach(s,fill != 0);
         IOLog("SWEET A618 COLD MAP: entry rc=%d; CM3 has not been released\n",rc);
         if(rc)return rc;
     }

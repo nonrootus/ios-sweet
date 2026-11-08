@@ -13,13 +13,13 @@ END=MAP+'register acceptance only; GPU transaction, valid powerup list, SQE and 
 patterns={
  'firmware':(MEM,r'SQE bytes=(\d+) version=([\da-fA-F]{8}) patch=([\da-fA-F]{8}); header excluded'),
  'buffers':(MEM,r'buffer=(\S+) pages=(\d+) CPU verified; no IOVA assigned'),
- 'tree':(COLD,r'tree root=([\da-fA-F]+) tables=3 data=18 SQE=40001000 ring=40010000 scratch=40020000 pwrup=40021000; powerup contents still reserved'),
+ 'tree':(COLD,r'tree root=([\da-fA-F]+) tables=3 data=(18|19) SQE=40001000 ring=40010000 scratch=40020000 pwrup=40021000; powerup contents still reserved'),
  'install':(COLD,r'install rc=(-?\d+) state=(\d+) retained=(\d+) bank=(\d+) slot=(\d+) SID=(\d+) ASID=(\d+) root=([\da-fA-F]+)'),
  'pair':(COLD,r'pair rc=(-?\d+); no global reset, CP writes or producer release'),
  'cold_entry':(COLD,r'entry rc=(-?\d+); CM3 has not been released'),
  'registers':(MAP,r'reg=(\w+) value=([\da-fA-F]{8})'),
  'observed':(MAP,r'observed (\d+)s global=([\da-fA-F]{8}) GMU_FSR=([\da-fA-F]{8}) GPU_FSR=([\da-fA-F]{8}) GPU_FAR=([\da-fA-F]{16})'),
- 'done':(MAP,r'done rc=(-?\d+) tables=3 data=18 observations=(\d+) SID=0 bank=1; both contexts retained'),
+ 'done':(MAP,r'done rc=(-?\d+) tables=3 data=(18|19) observations=(\d+) SID=0 bank=1; both contexts retained'),
  'entry':(MAP,r'entry rc=(-?\d+)')}
 def analyze(text,meta):
     base=dcvs.analyze(text,meta);issues=[];rows={k:[] for k in (*patterns,'begin','post','end')}
@@ -34,7 +34,9 @@ def analyze(text,meta):
         else:issues.append('malformed mapping record')
     for k in rows:
         if k not in ('buffers','registers','observed') and len(rows[k])!=1:issues.append('missing/duplicate '+k)
-    if [(v[0],int(v[1])) for _,v in rows['buffers']]!=list(prep.BUFFERS):issues.append('incomplete storage')
+    data_pages = int(rows['tree'][0][1][1]) if len(rows['tree'])==1 else 18
+    buffers = list(prep.BUFFERS) + ([('fill',1)] if data_pages==19 else [])
+    if [(v[0],int(v[1])) for _,v in rows['buffers']]!=buffers:issues.append('incomplete storage')
     if [v[0] for _,v in rows['registers']]!=[n for n,_ in prep.REGS]:issues.append('incomplete registers')
     registers={v[0]:int(v[1],16) for _,v in rows['registers']}
     if 0xffffffff in registers.values():issues.append('unavailable register sentinel')
@@ -48,7 +50,7 @@ def analyze(text,meta):
     for _,v in rows['observed']:
         global_fault,gmu,gpu,far=map(lambda x:int(x,16),v[1:])
         if global_fault or gmu&~0x600 or gpu&~0x600 or far:issues.append('SMMU fault/address reported')
-    if len(rows['done'])==1 and tuple(map(int,rows['done'][0][1]))!=(0,3):issues.append('incomplete mapping check')
+    if len(rows['done'])==1 and tuple(map(int,rows['done'][0][1]))!=(0,data_pages,3):issues.append('incomplete mapping check')
     failed=base['exit_code']==4 or any(int(v[0]) for k in ('install','pair','cold_entry','done','entry') for _,v in rows[k])
     if failed:issues.append('failure return')
     if not issues:

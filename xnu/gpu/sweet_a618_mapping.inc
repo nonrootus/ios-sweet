@@ -9,6 +9,9 @@ static struct {
     sweet_gpu_render_memory *render_pool;
     sweet_gpu_table_page tables[3];
     sweet_gpu_table_page render_tables[SWEET_A618_RENDER_TABLES];
+    sweet_gpu_memory *panel_tables_memory;
+    sweet_gpu_table_page panel_tables[SWEET_A618_PANEL_TABLES];
+    bool panel_ready;
     sweet_smmu_context context;
     bool published, pinned, render_ready;
     unsigned observations;
@@ -79,6 +82,28 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
                 m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)))return -5;
             for(unsigned i=0;i<SWEET_A618_RENDER_TABLES;i++)
                 if(sweet_gpu_memory_clean(m.render_tables_memory,i))return -5;
+            /* Only the console this kernel found and the geometry the renderer assumes. */
+            PE_Video video;
+            bzero(&video,sizeof(video));
+            PE_current_console(&video);
+            if(video.v_baseAddr==SWEET_A618_PANEL_PA && video.v_rowBytes==4320 &&
+                video.v_width==1080 && video.v_height==2400){
+                m.panel_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_PANEL_TABLES);
+                if(!m.panel_tables_memory)return -5;
+                for(unsigned i=0;i<SWEET_A618_PANEL_TABLES;i++){
+                    void *cpu=nullptr;uint64_t pa=0;
+                    if(sweet_gpu_memory_page(m.panel_tables_memory,i,&cpu,&pa))return -5;
+                    m.panel_tables[i]={static_cast<uint64_t *>(cpu),pa};
+                }
+                if(sweet_a618_panel_attach(m.tables,m.panel_tables))return -5;
+                for(unsigned i=0;i<SWEET_A618_PANEL_TABLES;i++)
+                    if(sweet_gpu_memory_clean(m.panel_tables_memory,i))return -5;
+                m.panel_ready=true;
+                IOLog("SWEET CA: panel memory at GPU VA %x before SID0 install\n",SWEET_A618_PANEL_IOVA);
+            }else{
+                IOLog("SWEET CA: panel memory not mapped: console %llx %lux%lu stride %lu\n",
+                    static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
+            }
             m.render_ready=true;
             IOLog("SWEET CA: pinned 128 MiB private GPU BO pool before SID0 install\n");
         }

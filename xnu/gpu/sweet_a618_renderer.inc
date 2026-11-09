@@ -30,6 +30,11 @@ extern "C" void *sweet_a618_render_cpu(void)
         sweet_gpu_render_memory_cpu(a618_mapping.render_pool) : nullptr;
 }
 
+extern "C" bool sweet_a618_panel_ready(void)
+{
+    return sweet_a618_render_ready() && a618_mapping.panel_ready;
+}
+
 extern "C" uint32_t sweet_a618_render_completed(void)
 {
     return sweet_a618_render_ready() ?

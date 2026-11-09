@@ -55,14 +55,17 @@ typedef void *IOSurfaceRef;
 
 struct image {
 	IOSurfaceRef surface;
-	bool invert;
+	bool invert, target;
+	GLenum internal, format;
 	GLsizei width, height;
 	int damage[4], damage_effective[4];
 	bool damage_any, damage_full, damage_seen, damage_effective_full;
 };
+struct redwood_gl;
 struct eagl {
 	unsigned frames;
 	uint8_t *b3a8_pixels;
+	struct redwood_gl *gl;
 	struct sweet_probe probe;
 };
 struct xr10_planes {
@@ -85,8 +88,10 @@ static bool bgra_refused;
 static char log_text[8192];
 
 static IOSurfaceRef fake_surface = (IOSurfaceRef)1;
-static uint32_t IOSurfaceGetPixelFormat(IOSurfaceRef s) { (void)s; return SWEET_B3A8_FORMAT; }
+static uint32_t fake_surface_format = SWEET_B3A8_FORMAT;
+static uint32_t IOSurfaceGetPixelFormat(IOSurfaceRef s) { (void)s; return fake_surface_format; }
 static uint32_t IOSurfaceGetID(IOSurfaceRef s) { (void)s; return 2; }
+static size_t IOSurfaceGetBytesPerElement(IOSurfaceRef s) { (void)s; return 4; }
 static uint64_t now_us(void) { static uint64_t t; return t += 7; }
 static void say(const char *format, ...)
 {
@@ -98,6 +103,51 @@ static void say(const char *format, ...)
 	va_end(ap);
 }
 void sweet_gpu_calls_sample(struct sweet_gpu_calls *out) { memset(out, 0, sizeof(*out)); }
+
+/* ---- the interlaced buffers: [0] the pool's shadow, [1] the panel, at pitch 8640 ---- */
+#define FIELD_FB 100
+#define FIELD_PITCH 8640
+#define FIELD_BYTES 10375168u
+#define FIELD_OFFSET(index) (((index) & 1) ? 4288u : 0u)
+static uint8_t *field_memory[2];
+static int pending_field = -1, fake_centre_shift, fake_odd_shift;
+static uint64_t fake_kernel_guards;
+static uint32_t fake_display = 2, fake_presented;
+struct redwood_gl;
+
+static int
+redwood_gl_surface_texture(struct redwood_gl *gl, uint32_t surface)
+{
+	(void)gl;
+	assert(surface >= 0xf5ee0000u && surface <= 0xf5ee0003u);
+	pending_field = (int)(surface - 0xf5ee0000u);
+	return 1;
+}
+
+int
+sweet_gpu_call(uint32_t selector, void *data, size_t size)
+{
+	struct { uint32_t op, surface; uint64_t user, bytes, result; } *r = data;
+
+	assert(selector == 0x7f && size == 32);
+	switch (r->op) {
+	case 1:
+		memcpy((void *)(uintptr_t)r->user, field_memory[0], r->bytes);
+		r->result = fake_kernel_guards;
+		return 0;
+	case 2:
+		fake_presented = r->surface;
+		return 0;
+	case 3:
+		memcpy((void *)(uintptr_t)r->user, field_memory[1], r->bytes);
+		return 0;
+	case 4:
+		r->result = r->surface == fake_display;
+		return 0;
+	default:
+		abort();
+	}
+}
 
 static void b3a8_transfer_state(bool pack, GLint saved[5], bool restore)
 {
@@ -119,7 +169,12 @@ static void glFlush(void) {}
 static GLsync glFenceSync(GLenum c, GLbitfield f) { (void)c; (void)f; return (GLsync)1; }
 static GLenum glClientWaitSync(GLsync s, GLbitfield f, uint64_t t) { (void)s; (void)f; (void)t; return 0; }
 static void glDeleteSync(GLsync s) { (void)s; }
-static void glGenFramebuffers(GLsizei n, GLuint *f) { (void)n; *f = PROBE_FB; }
+static void glGenFramebuffers(GLsizei n, GLuint *f)
+{
+	(void)n;
+	*f = pending_field >= 0 ? (GLuint)(FIELD_FB + pending_field) : PROBE_FB;
+	pending_field = -1;
+}
 static void glDeleteFramebuffers(GLsizei n, const GLuint *f) { (void)n; (void)f; }
 static void glGenTextures(GLsizei n, GLuint *t) { (void)n; *t = 88; }
 static void glDeleteTextures(GLsizei n, const GLuint *t) { (void)n; (void)t; }
@@ -161,7 +216,23 @@ static void glGetBooleanv(GLenum p, GLboolean *v) { (void)p; memcpy(v, write_mas
 
 static void glClear(GLbitfield mask)
 {
-	assert(mask == GL_COLOR_BUFFER_BIT && draw_fb == PROBE_FB && scissor_on);
+	assert(mask == GL_COLOR_BUFFER_BIT && scissor_on);
+	if (draw_fb >= FIELD_FB) {
+		int index = draw_fb - FIELD_FB;
+
+		for (int y = scissor_box[1]; y < scissor_box[1] + scissor_box[3]; y++) {
+			for (int x = scissor_box[0]; x < scissor_box[0] + scissor_box[2]; x++) {
+				uint8_t *p = field_memory[index / 2] + FIELD_OFFSET(index) + (size_t)y * FIELD_PITCH + (size_t)x * 4;
+
+				p[0] = (uint8_t)(clear_colour[2] * 255.0f + 0.5f);
+				p[1] = (uint8_t)(clear_colour[1] * 255.0f + 0.5f);
+				p[2] = (uint8_t)(clear_colour[0] * 255.0f + 0.5f);
+				p[3] = (uint8_t)(clear_colour[3] * 255.0f + 0.5f);
+			}
+		}
+		return;
+	}
+	assert(draw_fb == PROBE_FB);
 	for (int y = scissor_box[1]; y < scissor_box[1] + scissor_box[3]; y++) {
 		for (int x = scissor_box[0]; x < scissor_box[0] + scissor_box[2]; x++) {
 			uint8_t *p = target + ((size_t)y * SWEET_PANEL_WIDTH + (size_t)x) * 4;
@@ -177,6 +248,28 @@ static void glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint 
 {
 	(void)m;
 	(void)f;
+	if (draw_fb >= FIELD_FB) {
+		int index = draw_fb - FIELD_FB;
+
+		assert(scissor_on && read_fb == READER && dy0 == 0 && dy1 == 1200 && sy1 - sy0 == 2400 && dx1 - dx0 == SWEET_PANEL_WIDTH);
+		assert(scissor_box[0] == dx0 && scissor_box[2] == SWEET_PANEL_WIDTH && scissor_box[1] == 0 && scissor_box[3] == 1200);
+		for (int d = 0; d < 1200; d++) {
+			/* the centre of each destination row, twice as far along in the source */
+			int row = sy0 + 2 * d + 1 + fake_centre_shift;
+
+			for (int x = 0; x < SWEET_PANEL_WIDTH; x++) {
+				const uint8_t *in = source + ((size_t)row * SWEET_LOGICAL_WIDTH + (size_t)(sx0 + x)) * 4;
+				uint8_t *out = field_memory[index / 2] + FIELD_OFFSET(index) + (size_t)d * FIELD_PITCH +
+				    (size_t)(dx0 + x + ((index & 1) ? fake_odd_shift : 0)) * 4;
+
+				out[0] = in[2];
+				out[1] = in[1];
+				out[2] = in[0];
+				out[3] = in[3];
+			}
+		}
+		return;
+	}
 	assert(!scissor_on && read_fb == READER && draw_fb == PROBE_FB);
 	assert(sx1 - sx0 == SWEET_PANEL_WIDTH && sy1 - sy0 == SWEET_PANEL_HEIGHT && dx0 == 0 && dx1 == SWEET_PANEL_WIDTH);
 	bool flip = dy0 > dy1;
@@ -200,6 +293,16 @@ static void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenu
 		next_error = 0x502;
 		return;
 	}
+	if (read_fb >= FIELD_FB) {
+		int index = read_fb - FIELD_FB;
+
+		assert(f == GL_BGRA);
+		for (int r = 0; r < h; r++) {
+			memcpy((uint8_t *)pixels + (size_t)r * (size_t)w * 4,
+			    field_memory[index / 2] + FIELD_OFFSET(index) + (size_t)(y + r) * FIELD_PITCH + (size_t)x * 4, (size_t)w * 4);
+		}
+		return;
+	}
 	const uint8_t *from = read_fb == PROBE_FB ? target : source;
 	int source_width = read_fb == PROBE_FB ? SWEET_PANEL_WIDTH : SWEET_LOGICAL_WIDTH;
 	size_t stride = (size_t)(pack_row ? pack_row : w) * 4;
@@ -220,6 +323,10 @@ static void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenu
 	}
 }
 
+#define SWEET_PROBE_ROUNDS 1
+#define SWEET_PROBE_VERIFY_DAMAGE 1
+#define SWEET_DIRECT_STAGE_ZERO 1
+#define SWEET_DIRECT_PANEL_FRAMES 1
 #include "sweet-readback-probe.inc"
 
 /* ---- the frame ---- */
@@ -304,6 +411,168 @@ run_direct(bool invert, unsigned *pattern_bad, unsigned *frame_bad, unsigned *pa
 	assert(e.probe.direct_state == SWEET_DIRECT_DONE && e.probe.framebuffer == 0 && e.probe.texture == 0);
 }
 
+static void
+field_image(struct eagl *e, struct image *image)
+{
+	memset(e, 0, sizeof(*e));
+	memset(image, 0, sizeof(*image));
+	image->surface = fake_surface;
+	image->width = SWEET_LOGICAL_WIDTH;
+	image->height = SWEET_LOGICAL_HEIGHT;
+	read_fb = READER;
+	draw_fb = 9;
+	scissor_on = true;
+	glScissor(3, 4, 5, 6);
+	log_text[0] = 0;
+	memset(field_memory[0], 0, FIELD_BYTES);
+	memset(field_memory[1], 0x33, FIELD_BYTES);
+}
+
+static void
+assert_state_back(void)
+{
+	assert(read_fb == READER && draw_fb == 9 && scissor_on && scissor_box[0] == 3 && scissor_box[3] == 6);
+	assert(clear_colour[0] == .25f && write_mask[1] == 0 && pack_row == 0 && pack_align == 1);
+}
+
+/* What the panel would show for this frame, against the bytes of a buffer of panel layout. */
+static uint64_t
+panel_differences(const uint8_t *memory)
+{
+	uint64_t wrong = 0;
+
+	for (int y = 0; y < SWEET_PANEL_HEIGHT; y++) {
+		for (int x = 0; x < SWEET_PANEL_WIDTH; x++) {
+			const uint8_t *in = source + ((size_t)(y + SWEET_PANEL_CROP_Y) * SWEET_LOGICAL_WIDTH + (size_t)(x + SWEET_PANEL_CROP_X)) * 4;
+			const uint8_t *out = memory + (size_t)y * SWEET_PANEL_STRIDE + (size_t)x * 4;
+
+			wrong += out[0] != in[2] || out[1] != in[1] || out[2] != in[0];
+		}
+	}
+	return wrong;
+}
+
+/* The checks in order, each on its frame, and what they refuse. */
+static void
+run_fields(void)
+{
+	struct eagl e;
+	struct image image;
+
+	field_memory[0] = malloc(FIELD_BYTES);
+	field_memory[1] = malloc(FIELD_BYTES);
+	assert(field_memory[0] != NULL && field_memory[1] != NULL);
+	frame_setup(false);
+
+	field_image(&e, &image);
+	e.frames = 23;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_SHADOW);
+	e.frames = 24;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_PANEL_READ && e.probe.field_bias == 0);
+	assert(strstr(log_text, "bias=0") != NULL && strstr(log_text, "mismatches=0") != NULL);
+	assert(panel_differences(field_memory[0]) == 0);
+	assert(e.probe.field_framebuffer[0] == 0);          /* the test buffer is given back */
+	assert_state_back();
+
+	e.frames = 32;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_STRIPE && strstr(log_text, "different=0") != NULL);
+	assert_state_back();
+
+	e.frames = 44;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_DONE);
+	assert_state_back();
+	for (int y = 0; y < SWEET_STRIPE_ROWS; y++) {
+		for (int x = 0; x < SWEET_PANEL_WIDTH; x++) {
+			const uint8_t *out = field_memory[1] + (size_t)y * SWEET_PANEL_STRIDE + (size_t)x * 4;
+			const uint8_t *c = sweet_stripe_colours[x / 135];
+
+			assert(out[0] == c[2] && out[1] == c[1] && out[2] == c[0]);
+		}
+	}
+	/* below the stripe, and past the panel's end, nothing was written */
+	assert(field_memory[1][(size_t)SWEET_STRIPE_ROWS * SWEET_PANEL_STRIDE] == 0x33);
+	assert(field_memory[1][SWEET_PANEL_BYTES] == 0x33);
+
+	/* every frame to the panel, once the checks have passed, and the kernel is told */
+	fake_presented = 0;
+	assert(sweet_direct_frame(&e, &image));
+	assert(fake_presented == 2 && panel_differences(field_memory[1]) == 0);
+	assert(field_memory[1][SWEET_PANEL_BYTES] == 0x33);
+	assert_state_back();
+
+	/* a surface AppleCLCD has not shown is left to the b3a8 path */
+	fake_display = 3;
+	fake_presented = 0;
+	assert(!sweet_direct_frame(&e, &image) && fake_presented == 0);
+	fake_display = 2;
+
+	/* this GPU may sample the rows one lower: the check finds out */
+	field_image(&e, &image);
+	e.frames = 24;
+	fake_centre_shift = 1;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_PANEL_READ && e.probe.field_bias == -1);
+	fake_centre_shift = 0;
+
+	/* an odd field a pixel out cannot pass whatever the bias */
+	field_image(&e, &image);
+	e.frames = 24;
+	fake_odd_shift = 1;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_FAILED);
+	fake_odd_shift = 0;
+	assert(!sweet_direct_frame(&e, &image));
+
+	/* a kernel guard page touched fails the shadow even if the pixels agree */
+	field_image(&e, &image);
+	e.frames = 24;
+	fake_kernel_guards = 1;
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_FAILED);
+	fake_kernel_guards = 0;
+
+	/* a flat frame proves nothing: it waits for one that does */
+	field_image(&e, &image);
+	e.frames = 24;
+	memset(planes.rgb, 0, planes.rgb_stride * SWEET_LOGICAL_HEIGHT);
+	sweet_fields_step(&e, &image, &planes);
+	assert(e.probe.stage == SWEET_STAGE_SHADOW && strstr(log_text, "shadow bias") == NULL);
+	frame_setup(false);
+	free(field_memory[0]);
+	free(field_memory[1]);
+}
+
+static void
+run_icons(void)
+{
+	static uint8_t pixels[64 * 64 * 4];
+	struct eagl e;
+	struct image image;
+	unsigned long long v[4];
+
+	memset(&e, 0, sizeof(e));
+	memset(&image, 0, sizeof(image));
+	image.surface = fake_surface;
+	image.width = image.height = 64;
+	for (size_t i = 0; i < sizeof(pixels); i += 4) {
+		pixels[i] = 0xff;
+		pixels[i + 1] = 0x10;
+		pixels[i + 2] = 0x20;
+		pixels[i + 3] = 0x30;
+	}
+	log_text[0] = 0;
+	fake_surface_format = 0;
+	sweet_probe_icon_bytes(&e, &image, pixels, 64 * 4);
+	fake_surface_format = SWEET_B3A8_FORMAT;
+	assert(sscanf(strstr(log_text, "not_opacity="), "not_opacity=%llu,%llu,%llu,%llu", &v[0], &v[1], &v[2], &v[3]) == 4);
+	assert(v[0] == 0 && v[1] != 0 && v[2] != 0 && v[3] != 0);
+	image.target = true;
+}
+
 /* The target is taken before the first frame's read and the check follows two frames on. */
 static void
 run_order(void)
@@ -379,6 +648,8 @@ main(void)
 	}
 
 	run_order();
+	run_fields();
+	run_icons();
 
 	/* each fault the check exists for must show */
 	fake_blit_dx = 1;

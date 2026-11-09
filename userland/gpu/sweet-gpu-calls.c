@@ -24,12 +24,16 @@ typedef kern_return_t (*map_call_fn)(io_connect_t, uint32_t, task_port_t, mach_v
 static struct_call_fn original_struct_call;
 static map_call_fn original_map_call;
 static struct sweet_gpu_calls ticks;
+static mach_port_t driver_connection;
 
 static kern_return_t
 timed_struct_call(mach_port_t connection, uint32_t selector, const void *input, size_t input_size, void *output, size_t *output_size)
 {
 	uint64_t started = mach_absolute_time();
-	kern_return_t result = original_struct_call(connection, selector, input, input_size, output, output_size);
+	kern_return_t result;
+
+	driver_connection = connection;
+	result = original_struct_call(connection, selector, input, input_size, output, output_size);
 	uint64_t spent = mach_absolute_time() - started;
 
 	switch (selector) {
@@ -80,6 +84,17 @@ sweet_gpu_calls_sample(struct sweet_gpu_calls *out)
 	out->cpu_prep_us = out->cpu_prep_us * base.numer / base.denom / 1000;
 	out->wait_us = out->wait_us * base.numer / base.denom / 1000;
 	out->map_us = out->map_us * base.numer / base.denom / 1000;
+}
+
+int
+sweet_gpu_call(uint32_t selector, void *data, size_t size)
+{
+	size_t returned = size;
+
+	if (original_struct_call == NULL || driver_connection == MACH_PORT_NULL) {
+		return -1;
+	}
+	return original_struct_call(driver_connection, selector, data, size, data, &returned);
 }
 
 /* The page may be read-only once the image is bound; the change stays in this process. */

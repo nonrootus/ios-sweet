@@ -96,6 +96,7 @@ int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page t[3]
         sweet_a618_render_pool_check(t,extra,physical)) return -1;
     for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++){
         if(level==1 && i>=64 && i<64+SWEET_A618_RENDER_TABLES)continue;
+        if(level==1 && i>=SWEET_A618_PANEL_L2 && i<SWEET_A618_PANEL_L2+SWEET_A618_PANEL_TABLES)continue;
         if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
     }
     return 0;

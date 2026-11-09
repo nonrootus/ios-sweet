@@ -18,7 +18,7 @@ enum : uint32_t {
     kGemClose=0x09,kGetParam=0x40,kSetParam=0x41,kGemNew=0x42,
     kGemInfo=0x43,kCpuPrep=0x44,kCpuFini=0x45,kSubmit=0x46,
     kWaitFence=0x47,kMadvise=0x48,kQueueNew=0x4a,kQueueClose=0x4b,
-    kQueueQuery=0x4c,
+    kQueueQuery=0x4c,kSurface=0x7e,kDirect=0x7f,
 };
 struct msm_timespec { int64_t seconds,nanoseconds; };
 struct msm_param { uint32_t pipe,param;uint64_t value;uint32_t len,pad; };
@@ -37,10 +37,36 @@ struct msm_gem_madvise { uint32_t handle,madv,retained; };
 struct msm_submitqueue { uint32_t flags,prio,id; };
 struct msm_submitqueue_query { uint64_t data;uint32_t id,param,len,pad; };
 struct drm_gem_close { uint32_t handle,pad; };
+/* Mesa's request for a buffer it did not make. Here only the reserved IDs. */
+struct redwood_surface {
+    uint32_t surface,handle;uint64_t size;
+    uint32_t offset,row_bytes,width,height,pixel_format,planes;
+};
+struct sweet_direct_request { uint32_t op,surface;uint64_t user,bytes,result; };
 
 static_assert(sizeof(msm_param)==24 && sizeof(msm_gem_new)==16);
 static_assert(sizeof(msm_gem_submit_bo)==16 && sizeof(msm_gem_submit_cmd)==32);
 static_assert(sizeof(msm_gem_submit)==72);
+static_assert(sizeof(redwood_surface)==40 && sizeof(sweet_direct_request)==32);
+
+/*
+ * The panel's stride, 4320, is not a multiple of the 64 bytes the GPU's pitch
+ * is counted in; twice it is. So a frame goes out as two fields of 1200 rows at
+ * pitch 8640. The odd field's buffer starts 4288 bytes in and is drawn from
+ * column 8, which puts its first pixel at row 1, column 0 of the panel.
+ */
+enum : uint32_t {
+    kDirectShadowEven=0xf5ee0000u,kDirectShadowOdd,kDirectPanelEven,kDirectPanelOdd,
+    kDirectDescribe=0xffffffffu,
+    kDirectCopyShadow=1,kDirectPresented=2,kDirectCopyPanel=3,kDirectIsDisplay=4,
+    kBONoCPUMap=0x80000000u,
+};
+static constexpr unsigned kFieldPitch=8640,kFieldWidth=1088,kFieldHeight=1200,kOddOffset=4288;
+static constexpr unsigned kPanelBytes=4320u*2400u;
+static constexpr unsigned kShadowUnits=634,kShadowGuardBytes=16384;
+static_assert(kOddOffset+kFieldPitch*kFieldHeight<=kShadowUnits*16384u);
+static_assert(kOddOffset+kFieldPitch*kFieldHeight<=SWEET_A618_PANEL_PAGES*4096u);
+static_assert(kFieldPitch%64==0 && kOddOffset%64==0);
 
 static constexpr unsigned kSlots=SWEET_A618_RENDER_BYTES/16384u;
 static constexpr unsigned kHandles=8192;
@@ -63,18 +89,49 @@ static void pool_return(unsigned first,unsigned units)
         first,units,in_use,kSlots);
 }
 
+static bool pool_range_free(unsigned first,unsigned units,unsigned *blocked)
+{
+    for(unsigned i=0;i<units;i++){
+        if(allocated[(first+i)/64]&(UINT64_C(1)<<((first+i)%64))){
+            *blocked=i;
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Full-screen targets need 12 MB in one run. Small buffers scattered among them
+ * soon leave none, so the two kinds are taken from opposite ends of the pool. */
+static constexpr unsigned kLargeUnits=256;
+
 static int pool_reserve(unsigned units)
 {
     if(!units || units>kSlots || !pool_lock)return -1;
     IOLockLock(pool_lock);
-    for(unsigned first=0;first+units<=kSlots;first++){
-        unsigned i=0;
-        for(;i<units;i++)if(allocated[(first+i)/64]&(UINT64_C(1)<<((first+i)%64)))break;
-        if(i<units){first+=i;continue;}
-        for(i=0;i<units;i++)allocated[(first+i)/64]|=UINT64_C(1)<<((first+i)%64);
+    int found=-1;
+    unsigned blocked=0;
+    if(units>=kLargeUnits){
+        for(unsigned first=kSlots-units;;first=first+blocked-units){
+            if(pool_range_free(first,units,&blocked)){
+                found=static_cast<int>(first);
+                break;
+            }
+            if(first+blocked<units)break;
+        }
+    }else{
+        for(unsigned first=0;first+units<=kSlots;first+=blocked+1){
+            if(pool_range_free(first,units,&blocked)){
+                found=static_cast<int>(first);
+                break;
+            }
+        }
+    }
+    if(found>=0){
+        for(unsigned i=0;i<units;i++)
+            allocated[(found+i)/64]|=UINT64_C(1)<<((found+i)%64);
         pool_in_use+=units;
         IOLockUnlock(pool_lock);
-        return static_cast<int>(first);
+        return found;
     }
     const unsigned in_use=pool_in_use;
     const bool log=pool_full_logs<8;
@@ -102,6 +159,12 @@ public:
         return true;
     }
 
+    /* A range the user client owns: released with the client, not with the BO. */
+    bool initBorrowedRange(void *address,unsigned units)
+    {
+        return initPoolRange(address,0,units) && (pool_units=0,true);
+    }
+
     IOMemoryMap *makeMapping(IOMemoryDescriptor *owner,task_t task,
         IOVirtualAddress address,IOOptionBits options,IOByteCount offset,
         IOByteCount length) APPLE_KEXT_OVERRIDE
@@ -122,7 +185,23 @@ public:
 };
 OSDefineMetaClassAndStructors(SweetAdrenoBO,IOGeneralMemoryDescriptor);
 
-struct sweet_bo { SweetAdrenoBO *memory;uint64_t size,iova;uint32_t flags; };
+struct sweet_bo { IOMemoryDescriptor *memory;uint64_t size,iova;uint32_t flags; };
+
+/* A surface number nobody has: nothing is on the panel by the GPU's hand yet. */
+static uint32_t direct_pending,display_surfaces[2];
+
+extern "C" void sweet_a618_note_display(uint32_t surface)
+{
+    if(display_surfaces[0]!=surface){
+        display_surfaces[1]=display_surfaces[0];
+        display_surfaces[0]=surface;
+    }
+}
+
+extern "C" bool sweet_a618_direct_take(uint32_t surface)
+{
+    return surface && __sync_bool_compare_and_swap(&direct_pending,surface,0u);
+}
 
 class SweetAdrenoUserClient : public IOUserClient {
     OSDeclareDefaultStructors(SweetAdrenoUserClient);
@@ -130,11 +209,16 @@ class SweetAdrenoUserClient : public IOUserClient {
     IOLock *lock;
     sweet_bo *bos;
     uint32_t next_handle,queue_count;
+    unsigned shadow_first,shadow_units;
     bool client_ok() const {return current_task()==owner && sweet_a618_render_ready();}
     sweet_bo *lookup(uint32_t handle) {
         return handle && handle<=kHandles && bos && bos[handle-1].memory ? &bos[handle-1] : nullptr;
     }
     IOReturn submit(msm_gem_submit *request);
+    bool reserveShadow();
+    unsigned installBO(IOMemoryDescriptor *memory,uint64_t bytes,uint64_t iova,uint32_t flags);
+    IOReturn surfaceBuffer(redwood_surface *request);
+    IOReturn direct(sweet_direct_request *request);
     void releaseBOs();
 public:
     virtual bool initWithTask(task_t task,void *sid,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE;
@@ -192,6 +276,7 @@ IOReturn SweetAdrenoUserClient::clientClose()
 void SweetAdrenoUserClient::free()
 {
     releaseBOs();
+    if(shadow_units){pool_return(shadow_first,shadow_units);shadow_units=0;}
     if(bos){IOFree(bos,kHandles*sizeof(sweet_bo));bos=nullptr;}
     if(lock){IOLockFree(lock);lock=nullptr;}
     IOUserClient::free();
@@ -203,6 +288,7 @@ IOReturn SweetAdrenoUserClient::clientMemoryForType(UInt32 type,
     if(!client_ok() || !options || !memory || !lock)return kIOReturnNotPrivileged;
     IOLockLock(lock);
     sweet_bo *bo=lookup(type);
+    if(bo && (bo->flags&kBONoCPUMap))bo=nullptr;
     if(bo){bo->memory->retain();*memory=bo->memory;*options=0;}
     IOLockUnlock(lock);
     return bo ? kIOReturnSuccess:kIOReturnBadArgument;
@@ -264,6 +350,121 @@ out:
     return result;
 }
 
+/* A test buffer of the panel's shape in the pool, with a page of guard each side. */
+bool SweetAdrenoUserClient::reserveShadow()
+{
+    if(shadow_units)return true;
+    const unsigned units=kShadowUnits+2;
+    const int first=pool_reserve(units);
+    auto *pool=static_cast<unsigned char *>(sweet_a618_render_cpu());
+    if(first<0 || !pool){
+        if(first>=0)pool_return(static_cast<unsigned>(first),units);
+        return false;
+    }
+    unsigned char *start=pool+static_cast<uint64_t>(first)*16384u;
+    memset(start,0xa5,kShadowGuardBytes);
+    bzero(start+kShadowGuardBytes,kShadowUnits*16384u);
+    memset(start+kShadowGuardBytes+kShadowUnits*16384u,0xa5,kShadowGuardBytes);
+    __asm__ volatile("dsb sy" ::: "memory");
+    shadow_first=static_cast<unsigned>(first);
+    shadow_units=units;
+    return true;
+}
+
+unsigned SweetAdrenoUserClient::installBO(IOMemoryDescriptor *memory,uint64_t bytes,uint64_t iova,uint32_t flags)
+{
+    unsigned handle=0;
+    IOLockLock(lock);
+    for(unsigned i=0;i<kHandles;i++){
+        unsigned candidate=(next_handle+i)%kHandles;
+        if(!bos[candidate].memory){handle=candidate+1;break;}
+    }
+    if(handle){
+        bos[handle-1]={memory,bytes,iova,flags};
+        next_handle=handle%kHandles;
+    }
+    IOLockUnlock(lock);
+    return handle;
+}
+
+IOReturn SweetAdrenoUserClient::surfaceBuffer(redwood_surface *request)
+{
+    const uint32_t id=request->surface;
+    if(id<kDirectShadowEven || id>kDirectPanelOdd)return kIOReturnUnsupported;
+    const bool panel=id>=kDirectPanelEven;
+    if(panel ? !sweet_a618_panel_ready():!reserveShadow())return kIOReturnUnsupported;
+    const uint64_t bytes=panel ? static_cast<uint64_t>(SWEET_A618_PANEL_PAGES)*4096u:
+        static_cast<uint64_t>(kShadowUnits)*16384u;
+    request->size=bytes;
+    request->offset=(id&1u) ? kOddOffset:0;
+    request->row_bytes=kFieldPitch;
+    request->width=kFieldWidth;
+    request->height=kFieldHeight;
+    request->pixel_format=0x42475241u; /* 'BGRA' */
+    request->planes=0;
+    if(request->handle==kDirectDescribe){
+        request->handle=0;
+        return kIOReturnSuccess;
+    }
+    IOMemoryDescriptor *memory=nullptr;
+    uint64_t iova=0;
+    if(panel){
+        memory=IOMemoryDescriptor::withPhysicalAddress(SWEET_A618_PANEL_PA,bytes,kIODirectionInOut);
+        iova=SWEET_A618_PANEL_IOVA;
+    }else{
+        const uint64_t offset=static_cast<uint64_t>(shadow_first+1)*16384u;
+        auto *bo=OSTypeAlloc(SweetAdrenoBO);
+        auto *pool=static_cast<unsigned char *>(sweet_a618_render_cpu());
+        if(bo && pool && bo->initBorrowedRange(pool+offset,kShadowUnits))memory=bo;
+        else if(bo)bo->release();
+        iova=SWEET_A618_RENDER_IOVA+offset;
+    }
+    if(!memory)return kIOReturnNoMemory;
+    const unsigned handle=installBO(memory,bytes,iova,panel ? kBONoCPUMap:0);
+    if(!handle){
+        memory->release();
+        return kIOReturnNoMemory;
+    }
+    request->handle=handle;
+    return kIOReturnSuccess;
+}
+
+IOReturn SweetAdrenoUserClient::direct(sweet_direct_request *request)
+{
+    request->result=0;
+    switch(request->op){
+    case kDirectCopyShadow:{
+        auto *pool=static_cast<const unsigned char *>(sweet_a618_render_cpu());
+        if(!shadow_units || !pool || !request->user || request->bytes>kPanelBytes)return kIOReturnBadArgument;
+        const unsigned char *start=pool+static_cast<uint64_t>(shadow_first)*16384u;
+        const unsigned char *after=start+kShadowGuardBytes+kShadowUnits*16384u;
+        for(unsigned i=0;i<kShadowGuardBytes;i++)
+            request->result+=(start[i]!=0xa5)+(after[i]!=0xa5);
+        return copyout(start+kShadowGuardBytes,static_cast<user_addr_t>(request->user),request->bytes) ?
+            kIOReturnVMError:kIOReturnSuccess;
+    }
+    case kDirectCopyPanel:{
+        if(!sweet_a618_panel_ready() || !request->user || request->bytes>kPanelBytes)return kIOReturnBadArgument;
+        IOMemoryDescriptor *memory=IOMemoryDescriptor::withPhysicalAddress(SWEET_A618_PANEL_PA,kPanelBytes,kIODirectionInOut);
+        IOMemoryMap *map=memory ? memory->map(kIOMapWriteCombineCache):nullptr;
+        const int failed=map ? copyout(reinterpret_cast<const void *>(map->getVirtualAddress()),
+            static_cast<user_addr_t>(request->user),request->bytes):1;
+        if(map)map->release();
+        if(memory)memory->release();
+        return failed ? kIOReturnVMError:kIOReturnSuccess;
+    }
+    case kDirectPresented:
+        __atomic_store_n(&direct_pending,request->surface,__ATOMIC_RELEASE);
+        return kIOReturnSuccess;
+    case kDirectIsDisplay:
+        request->result=request->surface &&
+            (request->surface==display_surfaces[0] || request->surface==display_surfaces[1]);
+        return kIOReturnSuccess;
+    default:
+        return kIOReturnUnsupported;
+    }
+}
+
 IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
     IOExternalMethodArguments *args,IOExternalMethodDispatch *,OSObject *,void *)
 {
@@ -274,6 +475,7 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
         msm_gem_cpu_prep prep;msm_gem_submit submit;msm_wait_fence wait;
         msm_gem_madvise madvise;msm_submitqueue queue;
         msm_submitqueue_query query;drm_gem_close close;
+        redwood_surface surface;sweet_direct_request direct;
     } r={};
     const size_t size=args->structureInputSize;
     if(size>sizeof(r))return kIOReturnBadArgument;
@@ -356,6 +558,14 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
     case kMadvise:
         if(size<sizeof(r.madvise))return kIOReturnBadArgument;
         r.madvise.retained=1;break;
+    case kSurface:
+        if(size<sizeof(r.surface))return kIOReturnBadArgument;
+        result=surfaceBuffer(&r.surface);
+        break;
+    case kDirect:
+        if(size<sizeof(r.direct))return kIOReturnBadArgument;
+        result=direct(&r.direct);
+        break;
     case kQueueNew:
         if(size<sizeof(r.queue) || queue_count>=16)return kIOReturnBadArgument;
         r.queue.id=++queue_count;break;

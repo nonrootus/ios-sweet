@@ -1,0 +1,32 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -53,6 +53,8 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #include <sys/proc.h>
+ 
+ extern "C" bool sweet_gpu_present_span(const void *, void *, size_t);
++extern "C" void sweet_a618_note_display(uint32_t surface);
++extern "C" bool sweet_a618_direct_take(uint32_t surface);
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -401,6 +403,20 @@ AppleCLCD::present(const uint8_t *rec)
+ 			const auto &rgb = s->planes[0];
+ 			const auto &alpha = s->planes[1];
+ 			const size_t length = s->memory ? s->memory->getLength() : 0;
++			/* Only the one full-screen layer: the GPU may already have put it on the panel. */
++			const bool whole = mask == 1 && layer == 0 && dx == 0 && dy == 0 && sx == 22 && sy == 18 &&
++			    w == 1080 && h == 2400 && fWidth == 1080 && fHeight == 2400 && fRowBytes == 4320;
++			if (whole) {
++				sweet_a618_note_display(id);
++			}
++			if (whole && sweet_a618_direct_take(id)) {
++				static unsigned skipped;
++				if (skipped++ < 8) {
++					IOLog("SWEET FB: frame already on the panel swap=%u surface=%u\n", get32(rec, 0x50), id);
++				}
++				s->release();
++				continue;
++			}
+ 			if (src != 0 && w > 0 && h > 0 && s->planeCount == 2 &&
+ 			    sweet_b3a8_display_plane(rgb, 4, sx + w, sy + h, length) &&
+ 			    sweet_b3a8_display_plane(alpha, 1, sx + w, sy + h, length) &&

@@ -134,6 +134,11 @@ PATCHES += (('xnu/patches/0174-sweet-a618-mesa-client.patch', RENDER_CLIENT_TARG
     OOB_TARGET, 'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp', 'iokit/conf/files.arm64'}),)
 PATCHES += (('xnu/patches/0179-sweet-gpu-bo-lifetime.patch', {
     'iokit/Kernel/arm/SweetAdreno.cpp', 'iokit/Kernel/arm/sweet_a618_renderer.inc'}),)
+PATCHES += (('xnu/patches/0182-sweet-a618-direct-panel.patch', {
+    'bsd/dev/sweet_a618_render_pool.h', 'bsd/dev/sweet_a618_render_pool.c',
+    'bsd/dev/sweet_a618_address_space.c', 'iokit/Kernel/arm/sweet_a618_mapping.inc',
+    'iokit/Kernel/arm/sweet_a618_render_bridge.h', 'iokit/Kernel/arm/sweet_a618_renderer.inc',
+    'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 
 
 def main():

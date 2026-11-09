@@ -13,5 +13,10 @@ extern "C" void *sweet_a618_render_cpu(void);
 extern "C" int sweet_a618_render_submit(const uint64_t *iova,
     const uint32_t *dwords, unsigned count, uint32_t *fence);
 extern "C" uint32_t sweet_a618_render_completed(void);
+extern "C" bool sweet_a618_panel_ready(void);
+/* AppleCLCD and the renderer: which surfaces are on the panel, and whether the
+ * GPU has already put this one there. */
+extern "C" void sweet_a618_note_display(uint32_t surface);
+extern "C" bool sweet_a618_direct_take(uint32_t surface);
 
 #endif

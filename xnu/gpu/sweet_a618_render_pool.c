@@ -6,6 +6,11 @@
 _Static_assert((SWEET_A618_RENDER_IOVA >> 30)==1u, "renderer must share SID0 L1");
 _Static_assert(((SWEET_A618_RENDER_IOVA >> 21)&511u)==64u, "renderer L2 start");
 
+_Static_assert((SWEET_A618_PANEL_IOVA >> 30)==1u, "panel must share SID0 L1");
+_Static_assert(((SWEET_A618_PANEL_IOVA >> 21)&511u)==SWEET_A618_PANEL_L2, "panel L2 start");
+_Static_assert(SWEET_A618_PANEL_L2 >= 64u+SWEET_A618_RENDER_TABLES, "panel after the pool");
+_Static_assert(SWEET_A618_PANEL_PAGES <= SWEET_A618_PANEL_TABLES*TABLE_ENTRIES, "panel tables");
+
 static int overlap(uintptr_t a, size_t as, uintptr_t b, size_t bs)
 {
     if (!a || !b || !as || !bs || a > UINTPTR_MAX-as || b > UINTPTR_MAX-bs)
@@ -73,6 +78,30 @@ int sweet_a618_render_pool_attach(const struct sweet_gpu_table_page base[3],
     }
     for (unsigned t = 0; t < SWEET_A618_RENDER_TABLES; ++t)
         base[1].cpu[64+t] = extra[t].pa | 3u;
+    return 0;
+}
+
+int sweet_a618_panel_attach(const struct sweet_gpu_table_page base[3],
+    const struct sweet_gpu_table_page tables[SWEET_A618_PANEL_TABLES])
+{
+    if (!base || !tables || !base[1].cpu) return -1;
+    for (unsigned t = 0; t < SWEET_A618_PANEL_TABLES; ++t) {
+        uint64_t descriptor;
+        if (!tables[t].cpu || ((uintptr_t)tables[t].cpu & (PAGE_BYTES-1)) ||
+            sweet_gpu_pte_table(tables[t].pa,&descriptor) ||
+            base[1].cpu[SWEET_A618_PANEL_L2+t]) return -1;
+        for (unsigned leaf = 0; leaf < TABLE_ENTRIES; ++leaf)
+            if (tables[t].cpu[leaf]) return -1;
+    }
+    for (unsigned page = 0; page < SWEET_A618_PANEL_PAGES; ++page) {
+        uint64_t pte;
+        if (sweet_gpu_pte_page_access(SWEET_A618_PANEL_PA+(uint64_t)page*PAGE_BYTES,0,0,&pte))
+            return -1;
+        tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] = pte | (UINT64_C(3)<<53);
+    }
+    /* Complete children before the L2 descriptors; the caller cleans them all. */
+    for (unsigned t = 0; t < SWEET_A618_PANEL_TABLES; ++t)
+        base[1].cpu[SWEET_A618_PANEL_L2+t] = tables[t].pa | 3u;
     return 0;
 }
 

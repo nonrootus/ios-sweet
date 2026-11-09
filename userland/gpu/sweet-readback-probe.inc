@@ -32,8 +32,25 @@ enum {
 	SWEET_PROBE_STEPS,
 };
 
+/*
+ * The area measurements have done their work (0181d): a full read is 278 ms of CPU copy from
+ * write-combining memory. They take 12 MB of a short pool, so they stay out of a normal run.
+ * The test builds them in.
+ */
+#ifndef SWEET_PROBE_ROUNDS
+#define SWEET_PROBE_ROUNDS 0
+#endif
+#ifndef SWEET_PROBE_VERIFY_DAMAGE
+#define SWEET_PROBE_VERIFY_DAMAGE 0
+#endif
+#ifndef SWEET_DIRECT_STAGE_ZERO
+#define SWEET_DIRECT_STAGE_ZERO 0
+#endif
+/* Everything after the checks: every frame straight to the panel. A build of its own. */
+#ifndef SWEET_DIRECT_PANEL_FRAMES
+#define SWEET_DIRECT_PANEL_FRAMES 0
+#endif
 static const unsigned sweet_probe_round_frames[] = { 96 };
-#define SWEET_PROBE_ROUNDS (sizeof(sweet_probe_round_frames) / sizeof(sweet_probe_round_frames[0]))
 
 /*
  * The GPU pool hands out contiguous ranges and soon has no 12 MB run left, so
@@ -54,7 +71,7 @@ sweet_probe_display(const struct image *image)
 static bool
 sweet_probe_eligible(const struct eagl *e, const struct image *image)
 {
-	return e->probe.round < SWEET_PROBE_ROUNDS && sweet_probe_display(image);
+	return e->probe.round < (unsigned)SWEET_PROBE_ROUNDS && sweet_probe_display(image);
 }
 
 static void
@@ -278,11 +295,11 @@ sweet_probe_area_step(struct eagl *e, const struct image *image)
 {
 	GLsizei quarter = image->height / 4;
 
-	if (sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_NOT_STARTED) {
+	if (SWEET_DIRECT_STAGE_ZERO && sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_NOT_STARTED) {
 		e->probe.direct_state = sweet_probe_target(e) ? SWEET_DIRECT_TARGET_MADE : SWEET_DIRECT_DONE;
 		return;
 	}
-	if (sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_TARGET_MADE && e->frames >= 1) {
+	if (SWEET_DIRECT_STAGE_ZERO && sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_TARGET_MADE && e->frames >= 1) {
 		sweet_probe_blit(e, image);
 		e->probe.direct_state = SWEET_DIRECT_BLIT_DONE;
 		return;
@@ -430,6 +447,358 @@ sweet_probe_direct_step(struct eagl *e, const struct image *image, const struct 
 	sweet_probe_release(e);
 }
 
+/*
+ * ---- the interlaced fields ---------------------------------------------------------------------
+ * The panel's stride, 4320, is not a multiple of the 64 bytes the GPU counts pitch in; 8640 is. A
+ * frame goes out as two fields of 1200 rows: the even panel rows from the buffer's start, the odd
+ * from 4288 bytes in and drawn from column 8, which lands on row 1, column 0. Each check has to
+ * pass before the next is tried: a buffer of the panel's shape in the GPU pool, reading the panel
+ * through the GPU, then a stripe of colours on the panel. Nothing here replaces the b3a8 path.
+ */
+#define SWEET_FIELD_ID 0xf5ee0000u
+#define SWEET_FIELD_SELECTOR 0x7fu
+#define SWEET_FIELD_ROWS 1200
+#define SWEET_FIELD_ODD_X 8
+#define SWEET_STRIPE_ROWS 64
+
+struct sweet_field_request {
+	uint32_t op, surface;
+	uint64_t user, bytes, result;
+};
+enum { SWEET_FIELD_COPY_SHADOW = 1, SWEET_FIELD_PRESENTED = 2, SWEET_FIELD_COPY_PANEL = 3, SWEET_FIELD_IS_DISPLAY = 4 };
+enum { SWEET_STAGE_SHADOW, SWEET_STAGE_PANEL_READ, SWEET_STAGE_STRIPE, SWEET_STAGE_DONE, SWEET_STAGE_FAILED };
+static const unsigned sweet_stage_frames[] = { 24, 32, 44 };
+
+static bool
+sweet_field_call(uint32_t op, uint32_t surface, void *user, size_t bytes, uint64_t *result)
+{
+	struct sweet_field_request request = { op, surface, (uint64_t)(uintptr_t)user, bytes, 0 };
+
+	if (sweet_gpu_call(SWEET_FIELD_SELECTOR, &request, sizeof(request)) != 0) {
+		return false;
+	}
+	if (result != NULL) {
+		*result = request.result;
+	}
+	return true;
+}
+
+static void
+sweet_fields_release(struct eagl *e, unsigned panel)
+{
+	for (unsigned i = panel * 2; i < panel * 2 + 2; i++) {
+		if (e->probe.field_framebuffer[i] != 0) {
+			glDeleteFramebuffers(1, &e->probe.field_framebuffer[i]);
+			e->probe.field_framebuffer[i] = 0;
+		}
+		if (e->probe.field_texture[i] != 0) {
+			glDeleteTextures(1, &e->probe.field_texture[i]);
+			e->probe.field_texture[i] = 0;
+		}
+	}
+}
+
+static bool
+sweet_fields_ready(struct eagl *e, unsigned panel)
+{
+	GLint texture = 0, draw = 0;
+	bool ok = true;
+
+	if (e->probe.field_framebuffer[panel * 2] != 0 && e->probe.field_framebuffer[panel * 2 + 1] != 0) {
+		return true;
+	}
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	for (unsigned f = 0; f < 2 && ok; f++) {
+		unsigned index = panel * 2 + f;
+
+		glGenTextures(1, &e->probe.field_texture[index]);
+		glBindTexture(GL_TEXTURE_2D, e->probe.field_texture[index]);
+		ok = redwood_gl_surface_texture(e->gl, SWEET_FIELD_ID + index) != 0;
+		if (ok) {
+			glGenFramebuffers(1, &e->probe.field_framebuffer[index]);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->probe.field_framebuffer[index]);
+			glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->probe.field_texture[index], 0);
+			ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		}
+	}
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)texture);
+	if (!ok) {
+		say("SWEET DIRECT: fields of %s not usable\n", panel ? "the panel" : "the shadow");
+		sweet_fields_release(e, panel);
+	}
+	return ok;
+}
+
+/*
+ * A 2:1 NEAREST blit samples each destination row at its centre, source row s0 + 2d + 1, so even
+ * rows start one above the first wanted row. `bias` is what the check found to hold on this GPU.
+ */
+static void
+sweet_fields_blit(struct eagl *e, unsigned panel, int bias)
+{
+	GLint draw = 0, box[4] = { 0, 0, 0, 0 };
+	GLboolean scissored = glIsEnabled(GL_SCISSOR_TEST);
+
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	glGetIntegerv(GL_SCISSOR_BOX, box);
+	glEnable(GL_SCISSOR_TEST);
+	for (int f = 0; f < 2; f++) {
+		int x0 = f ? SWEET_FIELD_ODD_X : 0;
+		int s0 = SWEET_PANEL_CROP_Y - 1 + f + bias;
+
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->probe.field_framebuffer[panel * 2 + (unsigned)f]);
+		glScissor(x0, 0, SWEET_PANEL_WIDTH, SWEET_FIELD_ROWS);
+		glBlitFramebuffer(SWEET_PANEL_CROP_X, s0, SWEET_PANEL_CROP_X + SWEET_PANEL_WIDTH, s0 + SWEET_PANEL_HEIGHT, x0, 0,
+		    x0 + SWEET_PANEL_WIDTH, SWEET_FIELD_ROWS, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	}
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	glScissor(box[0], box[1], box[2], box[3]);
+	(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
+	glFlush();
+	(void)sweet_probe_sync();
+}
+
+/* A black or one-colour frame would pass any comparison: it proves nothing. */
+static bool
+sweet_fields_frame_varied(const struct xr10_planes *planes)
+{
+	uint32_t first, word;
+	unsigned different = 0;
+
+	memcpy(&first, planes->rgb + (size_t)SWEET_PANEL_CROP_Y * planes->rgb_stride, sizeof(first));
+	for (int y = SWEET_PANEL_CROP_Y; y < SWEET_PANEL_CROP_Y + SWEET_PANEL_HEIGHT; y += 16) {
+		for (int x = SWEET_PANEL_CROP_X; x < SWEET_PANEL_CROP_X + SWEET_PANEL_WIDTH; x += 16) {
+			memcpy(&word, planes->rgb + (size_t)y * planes->rgb_stride + (size_t)x * 4, sizeof(word));
+			different += word != first;
+		}
+	}
+	return different > 500;
+}
+
+static void
+sweet_stage_shadow(struct eagl *e, const struct xr10_planes *planes)
+{
+	static const int bias[] = { 0, 1, -1 };
+	uint8_t *block = malloc(SWEET_DIRECT_BLOCK);
+	struct sweet_direct_result result;
+	unsigned next = SWEET_STAGE_FAILED;
+
+	if (block != NULL && sweet_fields_ready(e, 0)) {
+		for (size_t i = 0; i < sizeof(bias) / sizeof(bias[0]); i++) {
+			uint64_t guards = ~0ull, started = now_us();
+
+			sweet_fields_blit(e, 0, bias[i]);
+			uint64_t drawn = now_us() - started;
+
+			sweet_direct_prepare(block);
+			if (!sweet_field_call(SWEET_FIELD_COPY_SHADOW, 0, block + SWEET_DIRECT_GUARD, SWEET_PANEL_BYTES, &guards)) {
+				say("SWEET DIRECT: shadow cannot be read back\n");
+				break;
+			}
+			sweet_direct_compare_b3a8(block, planes->rgb, planes->rgb_stride, planes->alpha, planes->alpha_stride, &result);
+			say("SWEET DIRECT: shadow bias=%d frame=%u fields_us=%llu mismatches=%llu alpha=%llu kernel_guards=%llu user_guards=%u,%u "
+			    "first=%d,%d got=%02x%02x%02x want=%02x%02x%02x\n", bias[i], e->frames, ULL(drawn), ULL(result.mismatches),
+			    ULL(result.alpha_mismatches), ULL(guards), result.front_guard, result.back_guard, result.first_x, result.first_y,
+			    result.got[0], result.got[1], result.got[2], result.want[0], result.want[1], result.want[2]);
+			if (result.mismatches == 0 && guards == 0 && result.front_guard == 0 && result.back_guard == 0) {
+				e->probe.field_bias = bias[i];
+				next = SWEET_STAGE_PANEL_READ;
+				break;
+			}
+		}
+	}
+	free(block);
+	sweet_fields_release(e, 0);
+	e->probe.stage = next;
+}
+
+/* The same rows through the GPU and through the CPU: is it the panel the GPU sees, laid out so? */
+static void
+sweet_stage_panel_read(struct eagl *e)
+{
+	enum { ROWS = 16 };
+	size_t panel_bytes = (size_t)ROWS * 2 * SWEET_PANEL_STRIDE;
+	uint8_t *panel = malloc(panel_bytes), *field = malloc((size_t)ROWS * SWEET_PANEL_WIDTH * 4);
+	uint64_t wrong = 0, total = 0;
+	GLint read = 0, saved[5];
+	bool ok = panel != NULL && field != NULL && sweet_fields_ready(e, 1);
+
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	b3a8_transfer_state(true, saved, false);
+	glGetError();
+	if (ok) {
+		ok = sweet_field_call(SWEET_FIELD_COPY_PANEL, 0, panel, panel_bytes, NULL);
+	}
+	for (int f = 0; f < 2 && ok; f++) {
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->probe.field_framebuffer[2 + (unsigned)f]);
+		glReadPixels(f ? SWEET_FIELD_ODD_X : 0, 0, SWEET_PANEL_WIDTH, ROWS, GL_BGRA, GL_UNSIGNED_BYTE, field);
+		for (int r = 0; r < ROWS; r++) {
+			const uint8_t *from_gpu = field + (size_t)r * SWEET_PANEL_WIDTH * 4;
+			const uint8_t *from_cpu = panel + (size_t)(2 * r + f) * SWEET_PANEL_STRIDE;
+
+			for (int x = 0; x < SWEET_PANEL_WIDTH; x++, from_gpu += 4, from_cpu += 4) {
+				wrong += memcmp(from_gpu, from_cpu, 3) != 0;
+				total++;
+			}
+		}
+	}
+	GLenum error = glGetError();
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	b3a8_transfer_state(true, saved, true);
+	say("SWEET DIRECT: panel read frame=%u compared=%llu different=%llu err=%#x ok=%d\n", e->frames, ULL(total), ULL(wrong), error, ok);
+	free(panel);
+	free(field);
+	e->probe.stage = ok && total != 0 && wrong == 0 && error == GL_NO_ERROR ? SWEET_STAGE_STRIPE : SWEET_STAGE_FAILED;
+}
+
+static const uint8_t sweet_stripe_colours[8][3] = {
+	{ 0xff, 0x00, 0x00 }, { 0x00, 0xff, 0x00 }, { 0x00, 0x00, 0xff }, { 0xff, 0xff, 0x00 },
+	{ 0xff, 0x00, 0xff }, { 0x00, 0xff, 0xff }, { 0xff, 0xff, 0xff }, { 0x20, 0x60, 0xa0 },
+};
+
+/* The first write: eight bars across the top 64 rows, left there until the next frame replaces them. */
+static void
+sweet_stage_stripe(struct eagl *e)
+{
+	size_t bytes = (size_t)SWEET_STRIPE_ROWS * SWEET_PANEL_STRIDE;
+	uint8_t *panel = malloc(bytes);
+	GLint draw = 0, box[4] = { 0, 0, 0, 0 };
+	GLfloat colour[4] = { 0, 0, 0, 0 };
+	GLboolean mask[4] = { 1, 1, 1, 1 }, scissored = glIsEnabled(GL_SCISSOR_TEST);
+	uint64_t wrong = 0;
+	bool ok = panel != NULL && sweet_fields_ready(e, 1);
+
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	glGetIntegerv(GL_SCISSOR_BOX, box);
+	glGetFloatv(GL_COLOR_CLEAR_VALUE, colour);
+	glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+	if (ok) {
+		glColorMask(1, 1, 1, 1);
+		glEnable(GL_SCISSOR_TEST);
+		for (int f = 0; f < 2; f++) {
+			int x0 = f ? SWEET_FIELD_ODD_X : 0;
+
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->probe.field_framebuffer[2 + (unsigned)f]);
+			for (int bar = 0; bar < 8; bar++) {
+				const uint8_t *c = sweet_stripe_colours[bar];
+
+				glScissor(x0 + bar * 135, 0, 135, SWEET_STRIPE_ROWS / 2);
+				glClearColor(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1.0f);
+				glClear(GL_COLOR_BUFFER_BIT);
+			}
+		}
+		glFlush();
+		(void)sweet_probe_sync();
+		ok = sweet_field_call(SWEET_FIELD_COPY_PANEL, 0, panel, bytes, NULL);
+	}
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	glScissor(box[0], box[1], box[2], box[3]);
+	(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
+	glClearColor(colour[0], colour[1], colour[2], colour[3]);
+	glColorMask(mask[0], mask[1], mask[2], mask[3]);
+	for (int y = 0; y < SWEET_STRIPE_ROWS && ok; y++) {
+		const uint8_t *row = panel + (size_t)y * SWEET_PANEL_STRIDE;
+
+		for (int x = 0; x < SWEET_PANEL_WIDTH; x++, row += 4) {
+			const uint8_t *c = sweet_stripe_colours[x / 135];
+
+			wrong += row[0] != c[2] || row[1] != c[1] || row[2] != c[0];
+		}
+	}
+	say("SWEET DIRECT: stripe frame=%u pixels=%d different=%llu ok=%d\n", e->frames, SWEET_STRIPE_ROWS * SWEET_PANEL_WIDTH, ULL(wrong), ok);
+	free(panel);
+	e->probe.stage = ok && wrong == 0 ? SWEET_STAGE_DONE : SWEET_STAGE_FAILED;
+}
+
+/* With the surface locked and packed: one check at a time, each on its own frame. */
+static void
+sweet_fields_step(struct eagl *e, const struct image *image, const struct xr10_planes *planes)
+{
+	unsigned stage = e->probe.stage;
+
+	if (stage >= SWEET_STAGE_DONE || !sweet_probe_display(image) || image->invert || planes->alpha == NULL ||
+	    e->frames < sweet_stage_frames[stage]) {
+		return;
+	}
+	switch (stage) {
+	case SWEET_STAGE_SHADOW:
+		if (sweet_fields_frame_varied(planes)) {
+			sweet_stage_shadow(e, planes);
+		}
+		break;
+	case SWEET_STAGE_PANEL_READ:
+		sweet_stage_panel_read(e);
+		break;
+	default:
+		sweet_stage_stripe(e);
+		break;
+	}
+}
+
+/*
+ * The whole frame to the panel, instead of reading it back. Only for a surface AppleCLCD has shown
+ * as the one full-screen layer; the kernel is told, and skips its copy for that surface only.
+ */
+static bool
+sweet_direct_frame(struct eagl *e, const struct image *image)
+{
+#if SWEET_DIRECT_PANEL_FRAMES
+	uint64_t on_display = 0;
+	uint32_t id = IOSurfaceGetID(image->surface);
+
+	if (e->probe.stage != SWEET_STAGE_DONE || !sweet_probe_display(image) || image->invert ||
+	    !sweet_field_call(SWEET_FIELD_IS_DISPLAY, id, NULL, 0, &on_display) || on_display == 0 || !sweet_fields_ready(e, 1)) {
+		return false;
+	}
+	sweet_fields_blit(e, 1, e->probe.field_bias);
+	(void)sweet_field_call(SWEET_FIELD_PRESENTED, id, NULL, 0, NULL);
+	if (e->probe.frames_on_panel++ < 4) {
+		say("SWEET DIRECT: frame %u of surface %u on the panel\n", e->frames, id);
+	}
+	return true;
+#else
+	(void)e;
+	(void)image;
+	return false;
+#endif
+}
+
+/*
+ * What a picture made of no named format holds, before it is uploaded. In premultiplied pixels
+ * no colour exceeds the opacity, so the byte holding opacity has no violations.
+ */
+static void
+sweet_probe_icon_bytes(struct eagl *e, const struct image *image, const uint8_t *base, size_t row)
+{
+	uint64_t sums[4] = { 0, 0, 0, 0 }, violations[4] = { 0, 0, 0, 0 };
+	uint32_t corner[3] = { 0, 0, 0 };
+
+	if (image->target || IOSurfaceGetPixelFormat(image->surface) != 0 || IOSurfaceGetBytesPerElement(image->surface) != 4 ||
+	    image->width < 32 || image->height < 32 || e->probe.icon_lines >= 40) {
+		return;
+	}
+	for (GLsizei y = 0; y < image->height; y++) {
+		const uint8_t *pixel = base + (size_t)y * row;
+
+		for (GLsizei x = 0; x < image->width; x++, pixel += 4) {
+			for (unsigned k = 0; k < 4; k++) {
+				sums[k] += pixel[k];
+				violations[k] += pixel[(k + 1) & 3] > pixel[k] || pixel[(k + 2) & 3] > pixel[k] || pixel[(k + 3) & 3] > pixel[k];
+			}
+		}
+	}
+	memcpy(&corner[0], base, 4);
+	memcpy(&corner[1], base + (size_t)(image->height / 2) * row + (size_t)(image->width / 2) * 4, 4);
+	memcpy(&corner[2], base + (size_t)(image->height - 1) * row + (size_t)(image->width - 1) * 4, 4);
+	e->probe.icon_lines++;
+	say("SWEET ICON: surface=%u %dx%d row=%zu asked=%#x/%#x sums=%llu,%llu,%llu,%llu not_opacity=%llu,%llu,%llu,%llu corner=%08x mid=%08x end=%08x\n",
+	    IOSurfaceGetID(image->surface), image->width, image->height, row, image->internal, image->format, ULL(sums[0]), ULL(sums[1]), ULL(sums[2]),
+	    ULL(sums[3]), ULL(violations[0]), ULL(violations[1]), ULL(violations[2]), ULL(violations[3]), corner[0], corner[1], corner[2]);
+}
+
 /* ---- damage ------------------------------------------------------------------------------- */
 
 static void
@@ -526,7 +895,7 @@ sweet_probe_verify_damage(struct eagl *e, const struct image *image, const struc
 {
 	struct sweet_changed changed;
 
-	if (planes->alpha == NULL || (e->frames & 7) != 0 || e->probe.verify_lines >= 256 || image->width != SWEET_LOGICAL_WIDTH ||
+	if (!SWEET_PROBE_VERIFY_DAMAGE || planes->alpha == NULL || (e->frames & 7) != 0 || e->probe.verify_lines >= 256 || image->width != SWEET_LOGICAL_WIDTH ||
 	    image->height != SWEET_LOGICAL_HEIGHT) {
 		return;
 	}

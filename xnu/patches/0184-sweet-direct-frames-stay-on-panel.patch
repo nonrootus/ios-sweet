@@ -1,0 +1,45 @@
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -187,8 +187,14 @@ OSDefineMetaClassAndStructors(SweetAdrenoBO,IOGeneralMemoryDescriptor);
+ 
+ struct sweet_bo { IOMemoryDescriptor *memory;uint64_t size,iova;uint32_t flags; };
+ 
+-/* A surface number nobody has: nothing is on the panel by the GPU's hand yet. */
+-static uint32_t direct_pending,display_surfaces[2];
++/*
++ * Once the GPU writes frames to the panel, the b3a8 surfaces stop being updated and hold
++ * whatever they held when that began: backboardd's boot logo. A swap can also arrive
++ * after the next frame has been written, so frames are not matched one by one. Until
++ * the client goes away, a full-screen layer is on the panel already.
++ */
++static bool direct_active;
++static uint32_t display_surfaces[2];
+ 
+ extern "C" void sweet_a618_note_display(uint32_t surface)
+ {
+@@ -200,7 +206,7 @@ extern "C" void sweet_a618_note_display(uint32_t surface)
+ 
+ extern "C" bool sweet_a618_direct_take(uint32_t surface)
+ {
+-    return surface && __sync_bool_compare_and_swap(&direct_pending,surface,0u);
++    return surface && __atomic_load_n(&direct_active,__ATOMIC_ACQUIRE);
+ }
+ 
+ class SweetAdrenoUserClient : public IOUserClient {
+@@ -268,6 +274,7 @@ void SweetAdrenoUserClient::releaseBOs()
+ 
+ IOReturn SweetAdrenoUserClient::clientClose()
+ {
++    __atomic_store_n(&direct_active,false,__ATOMIC_RELEASE);
+     releaseBOs();
+     if(!isInactive())terminate();
+     return kIOReturnSuccess;
+@@ -454,7 +461,7 @@ IOReturn SweetAdrenoUserClient::direct(sweet_direct_request *request)
+         return failed ? kIOReturnVMError:kIOReturnSuccess;
+     }
+     case kDirectPresented:
+-        __atomic_store_n(&direct_pending,request->surface,__ATOMIC_RELEASE);
++        __atomic_store_n(&direct_active,true,__ATOMIC_RELEASE);
+         return kIOReturnSuccess;
+     case kDirectIsDisplay:
+         request->result=request->surface &&

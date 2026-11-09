@@ -139,6 +139,8 @@ PATCHES += (('xnu/patches/0182-sweet-a618-direct-panel.patch', {
     'bsd/dev/sweet_a618_address_space.c', 'iokit/Kernel/arm/sweet_a618_mapping.inc',
     'iokit/Kernel/arm/sweet_a618_render_bridge.h', 'iokit/Kernel/arm/sweet_a618_renderer.inc',
     'iokit/Kernel/arm/SweetAdreno.cpp'}),)
+PATCHES += (('xnu/patches/0184-sweet-direct-frames-stay-on-panel.patch', {
+    'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 
 
 def main():

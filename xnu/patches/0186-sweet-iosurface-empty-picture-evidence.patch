@@ -1,0 +1,60 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -38,6 +38,9 @@
+ #include <libkern/c++/OSDictionary.h>
+ #include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSUnserialize.h>
++#include <libkern/c++/OSCollectionIterator.h>
++#include <libkern/c++/OSSymbol.h>
++#include <libkern/libkern.h>
+ #include <sys/proc.h>
+ 
+ enum {
+@@ -436,6 +439,9 @@ OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
+ 
+ static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
+ 
++/* Evidence for pictures that stay empty: what they are made of and who maps them. */
++static uint32_t sweet_surface_keys_logged, sweet_surface_maps_logged;
++
+ static void
+ sweet_surf_log_once(const char *what, uint32_t n)
+ {
+@@ -533,6 +539,13 @@ IOSurfaceRootUserClient::addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool
+ 	s->retain();
+ 	ref->surface = s;
+ 	ref->count = 1;
++	if (s->pixelFormat == 0 && s->width >= 32 && s->height >= 32 && sweet_surface_maps_logged < 48) {
++		char mapper[32];
++
++		proc_selfname(mapper, sizeof(mapper));
++		sweet_surface_maps_logged++;
++		IOLog("SWEET SURF: %s maps id %u %ux%u\n", mapper, s->id, s->width, s->height);
++	}
+ 	ref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);
+ 	ref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);
+ 	if (ref->data == NULL || ref->state == NULL) {
+@@ -821,6 +834,23 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 			}
+ 		}
+ 	}
++	if (ret == kIOReturnSuccess && s->pixelFormat == 0 && s->width >= 32 && s->height >= 32 && sweet_surface_keys_logged < 12) {
++		char line[480];
++		size_t used = 0;
++		const OSSymbol *key;
++		OSCollectionIterator *keys = OSCollectionIterator::withCollection(props);
++
++		sweet_surface_keys_logged++;
++		line[0] = 0;
++		while (keys != NULL && used < sizeof(line) - 1 && (key = OSDynamicCast(OSSymbol, keys->getNextObject())) != NULL) {
++			OSNumber *number = OSDynamicCast(OSNumber, props->getObject(key));
++
++			used += (size_t)snprintf(line + used, sizeof(line) - used, " %s=%llu", key->getCStringNoCopy(),
++			    number != NULL ? number->unsigned64BitValue() : 0xdeadULL);
++		}
++		OSSafeReleaseNULL(keys);
++		IOLog("SWEET SURF: id %u made of:%s\n", s->id, line);
++	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+ 		s->release();

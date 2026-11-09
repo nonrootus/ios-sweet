@@ -19,6 +19,9 @@ struct sweet_probe {
 	unsigned stage, icon_lines;
 	int field_bias;
 	uint64_t frames_on_panel;
+	/* the two surfaces last sent to the panel, and the textures that hold their frames */
+	uint32_t panel_surface[2];
+	unsigned panel_texture[2], panel_next;
 	unsigned pbo, texture, framebuffer;
 	struct sweet_probe_surface surfaces[SWEET_PROBE_SURFACES];
 	/* the last frame of the two-buffer swap chain: what the other buffer has that this one lacks */

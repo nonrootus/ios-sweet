@@ -762,10 +762,103 @@ sweet_direct_frame(struct eagl *e, const struct image *image)
 	}
 	sweet_fields_blit(e, 1, e->probe.field_bias);
 	(void)sweet_field_call(SWEET_FIELD_PRESENTED, id, NULL, 0, NULL);
+	{
+		unsigned slot = e->probe.panel_surface[0] == id ? 0 : e->probe.panel_surface[1] == id ? 1 : e->probe.panel_next++ & 1;
+
+		e->probe.panel_surface[slot] = id;
+		e->probe.panel_texture[slot] = image->texture;
+	}
 	if (e->probe.frames_on_panel++ < 4) {
 		say("SWEET DIRECT: frame %u of surface %u on the panel\n", e->frames, id);
 	}
 	return true;
+#else
+	(void)e;
+	(void)image;
+	return false;
+#endif
+}
+
+/*
+ * A display surface is attached to a new texture now and then. Normally the new texture starts
+ * with what the surface holds; with frames going straight to the panel the surface still holds
+ * what it held when that began, the boot logo, and it would be on the screen until everything
+ * has been drawn again. So the new texture starts with the last frame: from the texture that
+ * has it, or from the panel if that texture is gone. The bound texture is the new one.
+ */
+static bool
+sweet_direct_keep_contents(struct eagl *e, struct image *image)
+{
+#if SWEET_DIRECT_PANEL_FRAMES
+	uint32_t id = IOSurfaceGetID(image->surface);
+	GLuint from = 0;
+
+	if (image->invert || !sweet_probe_display(image)) {
+		return false;
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		if (e->probe.panel_surface[i] == id) {
+			from = e->probe.panel_texture[i];
+		}
+	}
+	if (from == 0) {
+		return false;
+	}
+	image->seed = IOSurfaceGetSeed(image->surface);
+	if (from == image->texture) {
+		return true;
+	}
+	const struct image *old = image_of(e, from);
+
+	glGetError();
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, image->width, image->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	if (glGetError() != GL_NO_ERROR) {
+		say("SWEET DIRECT: no memory to keep the frame of surface %u\n", id);
+		return false;
+	}
+	if (old != NULL && old != image && old->surface == image->surface) {
+		GLint read = 0, draw = 0;
+		GLboolean scissored = glIsEnabled(GL_SCISSOR_TEST);
+
+		if (e->reader == 0) {
+			glGenFramebuffers(1, &e->reader);
+		}
+		if (e->writer == 0) {
+			glGenFramebuffers(1, &e->writer);
+		}
+		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+		glDisable(GL_SCISSOR_TEST);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, from, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+		glBlitFramebuffer(0, 0, image->width, image->height, 0, 0, image->width, image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+		(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
+		return true;
+	}
+
+	/* the old texture is gone: the panel still shows the last frame */
+	uint8_t *panel = malloc(SWEET_PANEL_BYTES);
+	GLint saved[5];
+	bool ok = panel != NULL && sweet_field_call(SWEET_FIELD_COPY_PANEL, 0, panel, SWEET_PANEL_BYTES, NULL);
+
+	if (ok) {
+		for (size_t at = 0; at < SWEET_PANEL_BYTES; at += 4) {
+			uint8_t blue = panel[at];
+
+			panel[at] = panel[at + 2];
+			panel[at + 2] = blue;
+		}
+		b3a8_transfer_state(false, saved, false);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, SWEET_PANEL_CROP_X, SWEET_PANEL_CROP_Y, SWEET_PANEL_WIDTH, SWEET_PANEL_HEIGHT, GL_RGBA,
+		    GL_UNSIGNED_BYTE, panel);
+		b3a8_transfer_state(false, saved, true);
+	}
+	free(panel);
+	return ok;
 #else
 	(void)e;
 	(void)image;

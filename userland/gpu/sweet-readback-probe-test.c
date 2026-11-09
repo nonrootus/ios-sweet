@@ -56,6 +56,8 @@ typedef void *IOSurfaceRef;
 struct image {
 	IOSurfaceRef surface;
 	bool invert, target;
+	GLuint texture;
+	uint32_t seed;
 	GLenum internal, format;
 	GLsizei width, height;
 	int damage[4], damage_effective[4];
@@ -66,6 +68,7 @@ struct eagl {
 	unsigned frames;
 	uint8_t *b3a8_pixels;
 	struct redwood_gl *gl;
+	GLuint reader, writer;
 	struct sweet_probe probe;
 };
 struct xr10_planes {
@@ -92,6 +95,7 @@ static uint32_t fake_surface_format = SWEET_B3A8_FORMAT;
 static uint32_t IOSurfaceGetPixelFormat(IOSurfaceRef s) { (void)s; return fake_surface_format; }
 static uint32_t IOSurfaceGetID(IOSurfaceRef s) { (void)s; return 2; }
 static size_t IOSurfaceGetBytesPerElement(IOSurfaceRef s) { (void)s; return 4; }
+static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { (void)s; return 7; }
 static uint64_t now_us(void) { static uint64_t t; return t += 7; }
 static void say(const char *format, ...)
 {
@@ -151,7 +155,9 @@ sweet_gpu_call(uint32_t selector, void *data, size_t size)
 
 static void b3a8_transfer_state(bool pack, GLint saved[5], bool restore)
 {
-	assert(pack);
+	if (!pack) {
+		return;
+	}
 	if (restore) {
 		pack_row = saved[0];
 		pack_align = saved[1];
@@ -180,6 +186,19 @@ static void glGenTextures(GLsizei n, GLuint *t) { (void)n; *t = 88; }
 static void glDeleteTextures(GLsizei n, const GLuint *t) { (void)n; (void)t; }
 static void glBindTexture(GLenum t, GLuint b) { (void)t; (void)b; }
 static void glTexParameteri(GLenum t, GLenum p, GLint v) { (void)t; (void)p; (void)v; }
+static int fake_sub_images, fake_sub_x, fake_sub_y, fake_blits_between;
+static const uint8_t *fake_sub_pixels;
+static uint8_t fake_sub_first[4];
+static void glTexSubImage2D(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum u, const void *d)
+{
+	(void)t; (void)l; (void)w; (void)h; (void)u;
+	assert(f == GL_RGBA);
+	fake_sub_images++;
+	fake_sub_x = x;
+	fake_sub_y = y;
+	fake_sub_pixels = d;
+	memcpy(fake_sub_first, d, 4);
+}
 static void glTexImage2D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum y, const void *d)
 { (void)t; (void)l; (void)i; (void)w; (void)h; (void)b; (void)f; (void)y; (void)d; }
 static void glFramebufferTexture2D(GLenum t, GLenum a, GLenum x, GLuint n, GLint l) { (void)t; (void)a; (void)x; (void)n; (void)l; }
@@ -270,6 +289,11 @@ static void glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint 
 		}
 		return;
 	}
+	if (draw_fb == 41) {
+		assert(!scissor_on && read_fb == 40 && sx0 == 0 && sy0 == 0 && dx1 == SWEET_LOGICAL_WIDTH && dy1 == SWEET_LOGICAL_HEIGHT);
+		fake_blits_between++;
+		return;
+	}
 	assert(!scissor_on && read_fb == READER && draw_fb == PROBE_FB);
 	assert(sx1 - sx0 == SWEET_PANEL_WIDTH && sy1 - sy0 == SWEET_PANEL_HEIGHT && dx0 == 0 && dx1 == SWEET_PANEL_WIDTH);
 	bool flip = dy0 > dy1;
@@ -328,6 +352,9 @@ static void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenu
 #define SWEET_DIRECT_STAGE_ZERO 1
 #define SWEET_DIRECT_PANEL_FRAMES 1
 #define SWEET_DIRECT_CHECKS 1
+struct image;
+static struct image *fake_image_of;
+static struct image *image_of(struct eagl *e, GLuint texture) { (void)e; (void)texture; return fake_image_of; }
 #include "sweet-readback-probe.inc"
 
 /* ---- the frame ---- */
@@ -547,6 +574,57 @@ run_fields(void)
 	free(field_memory[1]);
 }
 
+/* A new texture of a display surface starts with the last frame, not the stale surface. */
+static void
+run_keep(void)
+{
+	struct eagl e;
+	struct image image, old;
+
+	field_memory[0] = malloc(FIELD_BYTES);
+	field_memory[1] = malloc(FIELD_BYTES);
+	assert(field_memory[0] != NULL && field_memory[1] != NULL);
+	field_image(&e, &image);
+	e.reader = 40;
+	e.writer = 41;
+	image.texture = 7;
+	image.seed = 0;
+
+	/* a surface that has not gone to the panel is uploaded as ever */
+	assert(!sweet_direct_keep_contents(&e, &image));
+
+	e.probe.panel_surface[1] = 2;
+	e.probe.panel_texture[1] = 5;
+	old = image;
+	old.texture = 5;
+	fake_image_of = &old;
+	fake_blits_between = 0;
+	read_fb = READER;
+	draw_fb = 9;
+	assert(sweet_direct_keep_contents(&e, &image));
+	assert(fake_blits_between == 1 && image.seed == 7);
+	assert(read_fb == READER && draw_fb == 9 && scissor_on);
+
+	/* the old texture is gone: from the panel, red and blue put right, at the crop */
+	fake_image_of = NULL;
+	fake_sub_images = 0;
+	field_memory[1][0] = 0x11;
+	field_memory[1][1] = 0x22;
+	field_memory[1][2] = 0x33;
+	field_memory[1][3] = 0xff;
+	assert(sweet_direct_keep_contents(&e, &image));
+	assert(fake_sub_images == 1 && fake_sub_x == 22 && fake_sub_y == 18);
+	assert(fake_sub_first[0] == 0x33 && fake_sub_first[1] == 0x22 && fake_sub_first[2] == 0x11);
+
+	/* the same texture again: its contents are already right */
+	fake_sub_images = 0;
+	fake_blits_between = 0;
+	e.probe.panel_texture[1] = image.texture;
+	assert(sweet_direct_keep_contents(&e, &image) && fake_sub_images == 0 && fake_blits_between == 0);
+	free(field_memory[0]);
+	free(field_memory[1]);
+}
+
 static void
 run_icons(void)
 {
@@ -662,6 +740,7 @@ main(void)
 
 	run_order();
 	run_fields();
+	run_keep();
 	run_icons();
 
 	/* each fault the check exists for must show */

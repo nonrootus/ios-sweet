@@ -103,6 +103,15 @@
  		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
  			/* the display's picture (a surface of its size): where this frame first draws into it */
  			e->line.into_display++;
+@@ -3875,7 +3902,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
+ 	 */
+ 	began = now_us();
+ 	if (xr10) {
+-		if (!xr10_upload(e, image)) {
++		if (!sweet_direct_keep_contents(e, image) && !xr10_upload(e, image)) {
+ 			say("redwood-gl: XR10 IOSurface %u attachment failed\n", IOSurfaceGetID(surface));
+ 			image_forget(e, (GLuint)texture);
+ 			eagl_leave(e, 0x970);
 @@ -3965,6 +3992,7 @@ install(void)
  	const char *argument;
  

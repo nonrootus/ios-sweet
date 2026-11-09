@@ -46,9 +46,16 @@ enum {
 #ifndef SWEET_DIRECT_STAGE_ZERO
 #define SWEET_DIRECT_STAGE_ZERO 0
 #endif
-/* Everything after the checks: every frame straight to the panel. A build of its own. */
+/*
+ * Every frame straight to the panel. The checks below passed on this panel (0182: shadow and
+ * stripe with no difference, panel read with none), so a normal build does not repeat them and
+ * spend 10 MB of the pool on the test buffer. The test builds them in.
+ */
 #ifndef SWEET_DIRECT_PANEL_FRAMES
-#define SWEET_DIRECT_PANEL_FRAMES 0
+#define SWEET_DIRECT_PANEL_FRAMES 1
+#endif
+#ifndef SWEET_DIRECT_CHECKS
+#define SWEET_DIRECT_CHECKS 0
 #endif
 static const unsigned sweet_probe_round_frames[] = { 96 };
 
@@ -719,7 +726,7 @@ sweet_fields_step(struct eagl *e, const struct image *image, const struct xr10_p
 {
 	unsigned stage = e->probe.stage;
 
-	if (stage >= SWEET_STAGE_DONE || !sweet_probe_display(image) || image->invert || planes->alpha == NULL ||
+	if (!SWEET_DIRECT_CHECKS || stage >= SWEET_STAGE_DONE || !sweet_probe_display(image) || image->invert || planes->alpha == NULL ||
 	    e->frames < sweet_stage_frames[stage]) {
 		return;
 	}
@@ -749,7 +756,7 @@ sweet_direct_frame(struct eagl *e, const struct image *image)
 	uint64_t on_display = 0;
 	uint32_t id = IOSurfaceGetID(image->surface);
 
-	if (e->probe.stage != SWEET_STAGE_DONE || !sweet_probe_display(image) || image->invert ||
+	if ((SWEET_DIRECT_CHECKS && e->probe.stage != SWEET_STAGE_DONE) || !sweet_probe_display(image) || image->invert ||
 	    !sweet_field_call(SWEET_FIELD_IS_DISPLAY, id, NULL, 0, &on_display) || on_display == 0 || !sweet_fields_ready(e, 1)) {
 		return false;
 	}
@@ -789,6 +796,10 @@ sweet_probe_icon_bytes(struct eagl *e, const struct image *image, const uint8_t 
 				violations[k] += pixel[(k + 1) & 3] > pixel[k] || pixel[(k + 2) & 3] > pixel[k] || pixel[(k + 3) & 3] > pixel[k];
 			}
 		}
+	}
+	/* A surface is empty when it is first made and filled later: the filled upload is the one to see. */
+	if (sums[0] == 0 && sums[1] == 0 && sums[2] == 0 && sums[3] == 0) {
+		return;
 	}
 	memcpy(&corner[0], base, 4);
 	memcpy(&corner[1], base + (size_t)(image->height / 2) * row + (size_t)(image->width / 2) * 4, 4);

@@ -327,6 +327,7 @@ static void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenu
 #define SWEET_PROBE_VERIFY_DAMAGE 1
 #define SWEET_DIRECT_STAGE_ZERO 1
 #define SWEET_DIRECT_PANEL_FRAMES 1
+#define SWEET_DIRECT_CHECKS 1
 #include "sweet-readback-probe.inc"
 
 /* ---- the frame ---- */
@@ -568,6 +569,18 @@ run_icons(void)
 	fake_surface_format = 0;
 	sweet_probe_icon_bytes(&e, &image, pixels, 64 * 4);
 	fake_surface_format = SWEET_B3A8_FORMAT;
+	{
+		/* an empty surface is not reported: it is filled later */
+		static uint8_t empty[64 * 64 * 4];
+		char kept[sizeof(log_text)];
+		unsigned lines = e.probe.icon_lines;
+
+		memcpy(kept, log_text, sizeof(kept));
+		fake_surface_format = 0;
+		sweet_probe_icon_bytes(&e, &image, empty, 64 * 4);
+		fake_surface_format = SWEET_B3A8_FORMAT;
+		assert(e.probe.icon_lines == lines && strcmp(kept, log_text) == 0);
+	}
 	assert(sscanf(strstr(log_text, "not_opacity="), "not_opacity=%llu,%llu,%llu,%llu", &v[0], &v[1], &v[2], &v[3]) == 4);
 	assert(v[0] == 0 && v[1] != 0 && v[2] != 0 && v[3] != 0);
 	image.target = true;

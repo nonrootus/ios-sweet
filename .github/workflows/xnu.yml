@@ -165,7 +165,9 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0178-sweet-iosurface-plane-row-stride.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0179-sweet-gpu-bo-lifetime.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0180-sweet-usb-console-and-b3a8-evidence.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0181-sweet-renderer-ramdisk.patch"
           python3 tools/verify-gmu-service-patch.py --patched-tree dxb/xnu
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: renderer RAM disk mount rc=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: backboardd dyld policy input=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: boot bandwidth commands=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: PAS AUTH status=' > /dev/null

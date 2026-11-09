@@ -1,0 +1,136 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -195,6 +195,11 @@
+ #endif /* SKYWALK */
+ 
+ #include <pexpert/pexpert.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET) && DEVFS && CONFIG_UNION_MOUNTS
++#include <machine/machine_routines.h>
++#include <pexpert/arm64/boot.h>
++#include <pexpert/device_tree.h>
++#endif
+ #include <machine/pal_routines.h>
+ #include <console/video_console.h>
+ 
+@@ -473,6 +478,53 @@
+  * of the tro_ucred field so that the uthread structure can be
+  * used like any other.
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && DEVFS && CONFIG_UNION_MOUNTS
++static void
++sweet_mount_renderer_disk(void)
++{
++	DTEntry memory_map;
++	unsigned int size;
++	const void *property;
++	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &memory_map) != kSuccess ||
++	    SecureDTGetProperty(memory_map, "SweetRendererDisk", &property, &size) != kSuccess) {
++		return;
++	}
++
++	uint64_t disk[2];
++	uint64_t firmware[2];
++	if (size != sizeof(disk)) {
++		return;
++	}
++	memcpy(disk, property, sizeof(disk));
++	if (SecureDTGetProperty(memory_map, "RAMDisk", &property, &size) != kSuccess ||
++	    size != sizeof(firmware)) {
++		return;
++	}
++	memcpy(firmware, property, sizeof(firmware));
++	const boot_args *args = PE_state.bootArgs;
++	if (args == NULL || disk[0] < args->physBase || disk[0] >= args->topOfKernelData ||
++	    disk[1] < (1u << 20) || disk[1] > (4u << 20) ||
++	    ((disk[0] | disk[1]) & PAGE_MASK) != 0 || disk[1] > args->topOfKernelData - disk[0] ||
++	    firmware[0] >= disk[0] || firmware[1] != disk[0] - firmware[0]) {
++		printf("SWEET CA: invalid renderer RAM disk range\n");
++		return;
++	}
++
++	extern dev_t mdevlookup(int devid);
++	extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
++	if (mdevlookup(0) == (dev_t)-1 || mdevlookup(1) != (dev_t)-1 ||
++	    mdevadd(1, ml_static_ptovirt(disk[0]) >> 12, (unsigned int)(disk[1] >> 12), 0) == (dev_t)-1) {
++		printf("SWEET CA: could not register renderer RAM disk\n");
++		return;
++	}
++
++	/* Only the replacement library is present. Other files resolve below it. */
++	int error = kernel_mount("hfs", NULLVP, NULLVP, "/sweet/lib", "/dev/md1", 0,
++	    MNT_RDONLY | MNT_UNION | MNT_NOSUID, KERNEL_MOUNT_SWEET_DISK, vfs_context_kernel());
++	printf("SWEET CA: renderer RAM disk mount rc=%d\n", error);
++}
++#endif
++
+ void
+ bsd_init(void)
+ {
+@@ -1002,6 +1054,10 @@
+ 	}
+ #endif /* DEVFS */
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET) && DEVFS && CONFIG_UNION_MOUNTS
++	sweet_mount_renderer_disk();
++#endif
++
+ #if CONFIG_BASESYSTEMROOT
+ #if CONFIG_IMAGEBOOT
+ 	if (bsdmgroot_bootable()) {
+--- a/bsd/sys/mount_internal.h
++++ b/bsd/sys/mount_internal.h
+@@ -484,6 +484,9 @@
+ #define KERNEL_MOUNT_DEVFS             0x100 /* kernel startup mount of devfs */
+ #define KERNEL_MOUNT_FMOUNT            0x200 /* is fmount() system call */
+ #define KERNEL_MOUNT_KMOUNT            0x400 /* is kernel_mount() call */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#define KERNEL_MOUNT_SWEET_DISK        0x800 /* mount a read-only Sweet RAM disk */
++#endif
+ 
+ /* mask for checking if any of the "mount volume by role" flags are set */
+ #define KERNEL_MOUNT_VOLBYROLE_MASK (KERNEL_MOUNT_DATAVOL | KERNEL_MOUNT_VMVOL | KERNEL_MOUNT_PREBOOTVOL | KERNEL_MOUNT_RECOVERYVOL)
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -1029,6 +1029,12 @@
+ 	boolean_t did_set_lmount = FALSE;
+ 	boolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
+ 
++	bool sweet_disk = false;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_disk = kernelmount && (internal_flags & KERNEL_MOUNT_SWEET_DISK) != 0 &&
++	    (flags & MNT_RDONLY) != 0 && strcmp(fstypename, "hfs") == 0;
++#endif
++
+ #if CONFIG_ROSV_STARTUP || CONFIG_MOUNT_VM || CONFIG_BASESYSTEMROOT
+ 	/* Check for mutually-exclusive flag bits */
+ 	uint32_t checkflags = (internal_flags & (KERNEL_MOUNT_VOLBYROLE_MASK | KERNEL_MOUNT_BASESYSTEMROOT));
+@@ -1171,7 +1177,7 @@
+ 	 * VFC_VFSLOCALARGS is not currently supported for kernel mounts,
+ 	 * except in ROSV configs and for the initial BaseSystem root.
+ 	 */
+-	if (kernelmount && (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS) &&
++	if (kernelmount && !sweet_disk && (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS) &&
+ 	    ((internal_flags & KERNEL_MOUNT_VOLBYROLE_MASK) == 0) &&
+ 	    ((internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) == 0)) {
+ 		error = EINVAL;  /* unsupported request */
+@@ -1307,6 +1313,11 @@
+ 	if (vfsp->vfc_vfsflags & VFC_VFSLOCALARGS &&
+ 	    !(internal_flags & (KERNEL_MOUNT_SNAPSHOT | KERNEL_MOUNT_VOLBYROLE_MASK))) {
+ 		boolean_t do_copyin_devpath = true;
++		if (sweet_disk) {
++			devpath = fsmountargs;
++			fsmountargs = USER_ADDR_NULL;
++			do_copyin_devpath = false;
++		}
+ #if CONFIG_BASESYSTEMROOT
+ 		if (internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) {
+ 			// KERNEL_MOUNT_BASESYSTEMROOT implies subtle behavior worh nothing:
+@@ -1350,7 +1361,7 @@
+ 		if ((devpath)) {
+ 			struct nameidata nd;
+ 
+-			enum uio_seg seg = UIO_USERSPACE;
++			enum uio_seg seg = sweet_disk ? UIO_SYSSPACE : UIO_USERSPACE;
+ #if CONFIG_BASESYSTEMROOT
+ 			if (internal_flags & KERNEL_MOUNT_BASESYSTEMROOT) {
+ 				seg = UIO_SYSSPACE;

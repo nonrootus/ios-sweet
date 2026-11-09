@@ -1,18 +1,17 @@
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -195,6 +195,11 @@
+@@ -195,6 +195,10 @@
  #endif /* SKYWALK */
  
  #include <pexpert/pexpert.h>
 +#if defined(ARM64_BOARD_CONFIG_SWEET) && DEVFS && CONFIG_UNION_MOUNTS
 +#include <machine/machine_routines.h>
-+#include <pexpert/arm64/boot.h>
-+#include <pexpert/device_tree.h>
++#include <pexpert/boot.h>
 +#endif
  #include <machine/pal_routines.h>
  #include <console/video_console.h>
  
-@@ -473,6 +478,53 @@
+@@ -473,6 +477,61 @@
   * of the tro_ucred field so that the uthread structure can be
   * used like any other.
   */
@@ -20,25 +19,32 @@
 +static void
 +sweet_mount_renderer_disk(void)
 +{
-+	DTEntry memory_map;
-+	unsigned int size;
-+	const void *property;
-+	if (SecureDTLookupEntry(NULL, "/chosen/memory-map", &memory_map) != kSuccess ||
-+	    SecureDTGetProperty(memory_map, "SweetRendererDisk", &property, &size) != kSuccess) {
++	/* IOKit has already imported the boot device tree at this stage. */
++	extern void *IOBSDRegistryEntryForDeviceTree(const char *path);
++	extern const void *IOBSDRegistryEntryGetData(void *entry, const char *name, int *size);
++	extern void IOBSDRegistryEntryRelease(void *entry);
++	void *memory_map = IOBSDRegistryEntryForDeviceTree("/chosen/memory-map");
++	if (memory_map == NULL) {
 +		return;
 +	}
 +
 +	uint64_t disk[2];
 +	uint64_t firmware[2];
-+	if (size != sizeof(disk)) {
++	int size;
++	const void *property = IOBSDRegistryEntryGetData(memory_map, "SweetRendererDisk", &size);
++	bool valid = property != NULL && size == sizeof(disk);
++	if (valid) {
++		memcpy(disk, property, sizeof(disk));
++		property = IOBSDRegistryEntryGetData(memory_map, "RAMDisk", &size);
++		valid = property != NULL && size == sizeof(firmware);
++		if (valid) {
++			memcpy(firmware, property, sizeof(firmware));
++		}
++	}
++	IOBSDRegistryEntryRelease(memory_map);
++	if (!valid) {
 +		return;
 +	}
-+	memcpy(disk, property, sizeof(disk));
-+	if (SecureDTGetProperty(memory_map, "RAMDisk", &property, &size) != kSuccess ||
-+	    size != sizeof(firmware)) {
-+		return;
-+	}
-+	memcpy(firmware, property, sizeof(firmware));
 +	const boot_args *args = PE_state.bootArgs;
 +	if (args == NULL || disk[0] < args->physBase || disk[0] >= args->topOfKernelData ||
 +	    disk[1] < (1u << 20) || disk[1] > (4u << 20) ||
@@ -58,7 +64,8 @@
 +
 +	/* Only the replacement library is present. Other files resolve below it. */
 +	int error = kernel_mount("hfs", NULLVP, NULLVP, "/sweet/lib", "/dev/md1", 0,
-+	    MNT_RDONLY | MNT_UNION | MNT_NOSUID, KERNEL_MOUNT_SWEET_DISK, vfs_context_kernel());
++	    MNT_RDONLY | MNT_UNION | MNT_NOSUID | MNT_NODEV,
++	    KERNEL_MOUNT_SWEET_DISK, vfs_context_kernel());
 +	printf("SWEET CA: renderer RAM disk mount rc=%d\n", error);
 +}
 +#endif
@@ -66,7 +73,7 @@
  void
  bsd_init(void)
  {
-@@ -1002,6 +1054,10 @@
+@@ -1002,6 +1061,10 @@
  	}
  #endif /* DEVFS */
  

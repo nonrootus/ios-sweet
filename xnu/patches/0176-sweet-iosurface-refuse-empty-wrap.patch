@@ -1,0 +1,27 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -43,6 +43,8 @@
+ enum {
+ 	kSweetSurfaceCreate             = 0,
+ 	kSweetSurfaceLookup             = 4,
++	kSweetSurfaceWrapClientImage    = 6,
++	kSweetSurfaceWrapClientMemory   = 7,
+ 	kSweetSurfaceLimits             = 13,
+ 	kSweetSurfaceLookupFromPort     = 34,
+ 	kSweetSurfaceCreatePort         = 35,
+@@ -738,7 +740,15 @@
+ 		return sweet_struct_out(args, limits, sizeof(limits));
+ 	}
+ 	case kSweetSurfaceCreate:
+ 		return create(args);
++	case kSweetSurfaceWrapClientImage:
++	case kSweetSurfaceWrapClientMemory:
++		/* These methods return an IOSurface lock result. A zero-filled
++		 * success result constructs a client with no shared state page,
++		 * which crashes CoreAnimation on its first attachment read.
++		 * Until client-memory wrapping exists, let callers handle failure. */
++		sweet_surf_log_once("unsupported client wrap selector", selector);
++		return kIOReturnUnsupported;
+ 	case kSweetSurfaceLookup: {
+ 		SweetSurface *s = sweet_surface_copy((uint32_t)arg0);
+ 		IOReturn ret = kIOReturnNotFound;

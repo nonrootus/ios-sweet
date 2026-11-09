@@ -1,0 +1,115 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -39,6 +39,7 @@
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
+ #if defined(SWEET)
++#include "sweet_b3a8.h"
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -310,6 +311,16 @@
+ 	}
+ }
+ 
++static bool
++sweet_b3a8_display_plane(const sweet_surface_plane &plane, size_t bytes,
++    size_t right, size_t bottom, size_t length)
++{
++	return plane.bytesPerElement == bytes && plane.elementWidth == 1 &&
++	    plane.elementHeight == 1 && right <= plane.width && bottom <= plane.height &&
++	    plane.offset <= length && plane.size <= length - plane.offset &&
++	    sweet_b3a8_plane_fits(0, plane.bytesPerRow, right * bytes, bottom, plane.size);
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -385,6 +396,31 @@
+ 		}
+ 		if (h > (int32_t)fHeight - dy) {
+ 			h = (int32_t)fHeight - dy;
++		}
++		if (s->pixelFormat == SWEET_B3A8_FORMAT) {
++			const auto &rgb = s->planes[0];
++			const auto &alpha = s->planes[1];
++			const size_t length = s->memory ? s->memory->getLength() : 0;
++			if (src != 0 && w > 0 && h > 0 && s->planeCount == 2 &&
++			    sweet_b3a8_display_plane(rgb, 4, sx + w, sy + h, length) &&
++			    sweet_b3a8_display_plane(alpha, 1, sx + w, sy + h, length) &&
++			    ((uint64_t)rgb.offset + rgb.size <= alpha.offset ||
++			    (uint64_t)alpha.offset + alpha.size <= rgb.offset)) {
++				for (int32_t y = 0; y < h; y++) {
++					auto *dst = (uint8_t *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
++					const auto *colors = (const uint8_t *)(src + rgb.offset +
++					    (uint64_t)(sy + y) * rgb.bytesPerRow + (uint64_t)sx * 4);
++					const auto *opacities = (const uint8_t *)(src + alpha.offset +
++					    (uint64_t)(sy + y) * alpha.bytesPerRow + sx);
++					for (int32_t x = 0; x < w; x++) {
++						uint32_t word;
++						memcpy(&word, colors + x * 4, sizeof(word));
++						sweet_b3a8_unpack(word, opacities[x], dst + x * 4, 1);
++					}
++				}
++			}
++			s->release();
++			continue;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+diff --git a/iokit/Kernel/arm/sweet_b3a8.h b/iokit/Kernel/arm/sweet_b3a8.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/sweet_b3a8.h
+@@ -0,0 +1,51 @@
++#ifndef SWEET_B3A8_H
++#define SWEET_B3A8_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define SWEET_B3A8_FORMAT 0x62336138u
++
++/* BGR10_XR in a little-endian word, followed by a separate alpha plane.
++ * Apple BGR10_XR maps 8-bit SDR v to the exact XR code 384 + 2*v. */
++static inline uint8_t
++sweet_xr10_to_u8(uint32_t value)
++{
++    if (value <= 384) {
++        return 0;
++    }
++    if (value >= 894) {
++        return 255;
++    }
++    return (uint8_t)((value - 383) >> 1);
++}
++
++static inline uint32_t
++sweet_b3a8_pack(const uint8_t *rgba)
++{
++    uint32_t r = 384u + 2u * rgba[0];
++    uint32_t g = 384u + 2u * rgba[1];
++    uint32_t b = 384u + 2u * rgba[2];
++    return b | (g << 10) | (r << 20);
++}
++
++static inline void
++sweet_b3a8_unpack(uint32_t rgb, uint8_t alpha, uint8_t *pixel, int bgra)
++{
++    pixel[bgra ? 2 : 0] = sweet_xr10_to_u8((rgb >> 20) & 1023u);
++    pixel[1] = sweet_xr10_to_u8((rgb >> 10) & 1023u);
++    pixel[bgra ? 0 : 2] = sweet_xr10_to_u8(rgb & 1023u);
++    pixel[3] = alpha;
++}
++
++/* Validate the last touched byte without overflowing (height - 1) * stride. */
++static inline int
++sweet_b3a8_plane_fits(size_t offset, size_t stride, size_t row_bytes,
++    size_t height, size_t length)
++{
++    return height != 0 && row_bytes != 0 && offset <= length &&
++        stride >= row_bytes && row_bytes <= length - offset &&
++        height - 1 <= (length - offset - row_bytes) / stride;
++}
++
++#endif

@@ -32,6 +32,11 @@ for path in userland/mkeagl.py userland/src/eagl_slots.txt; do
     fetch "https://raw.githubusercontent.com/oosexgang/hakios-xnu-kernel/$hakios/$path" "$stage/$path"
 done
 
+git -C "$stage" apply "$repo/userland/gpu/eagl-b3a8.patch"
+git -C "$stage" apply --include=iokit/Kernel/arm/sweet_b3a8.h \
+    "$repo/xnu/patches/0177-sweet-b3a8-framebuffer.patch"
+cp "$stage/iokit/Kernel/arm/sweet_b3a8.h" "$stage/userland/gpu/"
+
 mesa="$work/mesa-$mesa_version"
 tarball="$work/mesa-$mesa_version.tar.xz"
 fetch "https://archive.mesa3d.org/mesa-$mesa_version.tar.xz" "$tarball"

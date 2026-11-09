@@ -1,0 +1,28 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -592,8 +592,9 @@
+ 		const struct sweet_surface_plane *pl = &s->planes[i];
+ 		put32(p, 0x00, pl->width);
+ 		put32(p, 0x04, pl->height);
+-		put32(p, 0x08, pl->bytesPerRow);
+ 		put32(p, 0x0c, pl->offset);
++		/* 20H392 IOSurfaceClient reads row stride at client + 0xe0. */
++		put32(p, 0x10, pl->bytesPerRow);
+ 		put32(p, 0x14, pl->size);
+ 		memcpy(p + 0x18, &pl->bytesPerElement, 2);
+ 		p[0x1a] = pl->elementWidth;
+@@ -712,6 +713,14 @@
+ 		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x\n",
+ 		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
+ 		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);
++		if (ret == kIOReturnSuccess && s->pixelFormat == 0x62336138 && s->planeCount == 2) {
++			for (uint32_t i = 0; i < 2; i++) {
++				const auto &plane = s->planes[i];
++				IOLog("SWEET SURF: b3a8 id %u plane %u %ux%u row %u bpe %u offset %u size %u\n",
++				    s->id, i, plane.width, plane.height, plane.bytesPerRow,
++				    plane.bytesPerElement, plane.offset, plane.size);
++			}
++		}
+ 	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {

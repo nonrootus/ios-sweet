@@ -162,6 +162,7 @@ jobs:
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0175-sweet-backboardd-dyld-policy.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0176-sweet-iosurface-refuse-empty-wrap.patch"
           git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0177-sweet-b3a8-framebuffer.patch"
+          git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0178-sweet-iosurface-plane-row-stride.patch"
           python3 tools/verify-gmu-service-patch.py --patched-tree dxb/xnu
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: backboardd dyld policy input=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: boot bandwidth commands=' > /dev/null

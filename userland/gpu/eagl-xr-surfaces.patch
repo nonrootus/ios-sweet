@@ -1,0 +1,268 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -235,7 +235,7 @@
+ 	IOSurfaceRef surface;
+ 	bool target;                    /* drawn into (attachImage) rather than shown (texImageIOSurface) */
+ 	bool invert, drawn;
+-	bool b3a8;
++	bool xr10;
+ 	bool shared;                    /* the texture is the surface's memory: nothing to copy */
+ 	GLuint mirror;                  /* a texture that is the surface's memory, which the GPU copies the frame into (blit_targets) */
+ 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
+@@ -717,23 +717,40 @@
+ 	return true;
+ }
+ 
+-struct b3a8_planes {
++#define SWEET_W30R_FORMAT 0x77333072u
++
++struct xr10_planes {
+ 	uint8_t *rgb, *alpha;
+ 	size_t rgb_stride, alpha_stride;
+ };
+ 
+ static bool
+-b3a8_layout(IOSurfaceRef surface, struct b3a8_planes *planes)
++xr10_layout(IOSurfaceRef surface, struct xr10_planes *planes)
+ {
+ 	size_t width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface);
+ 	size_t length = IOSurfaceGetAllocSize(surface);
+ 	/* Bound scratch storage independently of the reported surface allocation. */
+ 	if (width == 0 || height == 0 || width > 8192 || height > 8192 ||
+-	    width * height > (64u << 20) / 4u || IOSurfaceGetPlaneCount(surface) != 2) {
++	    width * height > (64u << 20) / 4u) {
+ 		return false;
+ 	}
+ 
+ 	uintptr_t base = (uintptr_t)IOSurfaceGetBaseAddress(surface);
++	size_t count = IOSurfaceGetPlaneCount(surface);
++	if (IOSurfaceGetPixelFormat(surface) == SWEET_W30R_FORMAT) {
++		size_t stride = IOSurfaceGetBytesPerRow(surface);
++		if (!base || count != 0 || IOSurfaceGetBytesPerElement(surface) != 4 ||
++		    IOSurfaceGetElementWidth(surface) != 1 || IOSurfaceGetElementHeight(surface) != 1 ||
++		    !sweet_b3a8_plane_fits(0, stride, width * 4, height, length)) {
++			return false;
++		}
++		*planes = (struct xr10_planes){ (uint8_t *)base, NULL, stride, 0 };
++		return true;
++	}
++	if (count != 2) {
++		return false;
++	}
++
+ 	uint8_t *addresses[2];
+ 	size_t strides[2], ends[2], offsets[2];
+ 	for (size_t i = 0; i < 2; i++) {
+@@ -757,7 +774,7 @@
+ 	if (offsets[0] < ends[1] && offsets[1] < ends[0]) {
+ 		return false;
+ 	}
+-	*planes = (struct b3a8_planes){ addresses[0], addresses[1], strides[0], strides[1] };
++	*planes = (struct xr10_planes){ addresses[0], addresses[1], strides[0], strides[1] };
+ 	return true;
+ }
+ 
+@@ -800,24 +817,27 @@
+ }
+ 
+ static bool
+-b3a8_upload(struct eagl *e, struct image *image)
++xr10_upload(struct eagl *e, struct image *image)
+ {
+ 	IOSurfaceRef surface = image->surface;
+-	struct b3a8_planes planes;
++	struct xr10_planes planes;
+ 	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
+ 		return false;
+ 	}
+-	uint8_t *pixels = b3a8_layout(surface, &planes) ? b3a8_scratch(e, image) : NULL;
++	bool valid_size = image->width > 0 && image->height > 0 &&
++	    (size_t)image->width <= IOSurfaceGetWidth(surface) &&
++	    (size_t)image->height <= IOSurfaceGetHeight(surface);
++	uint8_t *pixels = valid_size && xr10_layout(surface, &planes) ? b3a8_scratch(e, image) : NULL;
+ 	if (pixels != NULL) {
+ 		for (GLsizei y = 0; y < image->height; y++) {
+ 			size_t row = (size_t)(image->invert ? image->height - 1 - y : y);
+ 			const uint8_t *rgb = planes.rgb + row * planes.rgb_stride;
+-			const uint8_t *alpha = planes.alpha + row * planes.alpha_stride;
++			const uint8_t *alpha = planes.alpha ? planes.alpha + row * planes.alpha_stride : NULL;
+ 			uint8_t *rgba = pixels + (size_t)y * image->width * 4;
+ 			for (GLsizei x = 0; x < image->width; x++) {
+ 				uint32_t word;
+ 				memcpy(&word, rgb + 4 * x, sizeof(word));
+-				sweet_b3a8_unpack(word, alpha[x], rgba + 4 * x, 0);
++				sweet_b3a8_unpack(word, alpha ? alpha[x] : 255, rgba + 4 * x, 0);
+ 			}
+ 		}
+ 	}
+@@ -834,7 +854,7 @@
+ 	GLenum error = glGetError();
+ 	b3a8_transfer_state(false, saved, true);
+ 	if (error != GL_NO_ERROR) {
+-		say("redwood-gl: b3a8 texture allocation failed: %#x\n", error);
++		say("redwood-gl: XR10 texture allocation failed: %#x\n", error);
+ 		return false;
+ 	}
+ 	image->seed = IOSurfaceGetSeed(surface);
+@@ -844,44 +864,50 @@
+ }
+ 
+ static void
+-b3a8_readback(struct eagl *e, struct image *image)
++xr10_readback(struct eagl *e, struct image *image)
+ {
+ 	IOSurfaceRef surface = image->surface;
+-	struct b3a8_planes planes;
++	struct xr10_planes planes;
+ 	uint8_t *pixels = b3a8_scratch(e, image);
+ 	if (pixels == NULL || glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+-		say("redwood-gl: b3a8 readback target incomplete\n");
++		say("redwood-gl: XR10 readback target incomplete\n");
+ 		return;
+ 	}
+ 
+ 	GLint saved[5];
+ 	b3a8_transfer_state(true, saved, false);
+ 	glGetError();
++	uint64_t read_started = now_us();
+ 	glReadPixels(0, 0, image->width, image->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
++	uint64_t read_us = now_us() - read_started;
+ 	GLenum error = glGetError();
+ 	b3a8_transfer_state(true, saved, true);
+ 	if (error != GL_NO_ERROR) {
+-		say("redwood-gl: b3a8 readback failed: %#x\n", error);
++		say("redwood-gl: XR10 readback failed: %#x\n", error);
+ 		return;
+ 	}
+ 	if (IOSurfaceLock(surface, 0, NULL) != 0) {
+ 		return;
+ 	}
+-	if (b3a8_layout(surface, &planes)) {
++	if (xr10_layout(surface, &planes)) {
++		uint64_t pack_started = now_us();
+ 		for (GLsizei y = 0; y < image->height; y++) {
+ 			size_t row = (size_t)(image->invert ? image->height - 1 - y : y);
+ 			uint8_t *rgb = planes.rgb + row * planes.rgb_stride;
+-			uint8_t *alpha = planes.alpha + row * planes.alpha_stride;
++			uint8_t *alpha = planes.alpha ? planes.alpha + row * planes.alpha_stride : NULL;
+ 			const uint8_t *rgba = pixels + (size_t)y * image->width * 4;
+ 			for (GLsizei x = 0; x < image->width; x++, rgba += 4) {
+ 				uint32_t word = sweet_b3a8_pack(rgba);
+ 				memcpy(rgb + 4 * x, &word, sizeof(word));
+-				alpha[x] = rgba[3];
++				if (alpha != NULL) {
++					alpha[x] = rgba[3];
++				}
+ 			}
+ 		}
+-		if (e->frames < 4) {
+-			say("redwood-gl: b3a8 readback surface %u, %dx%d\n",
+-			    IOSurfaceGetID(surface), image->width, image->height);
++		if (e->frames < 8 || e->frames % 120 == 0) {
++			say("redwood-gl: %s readback surface %u, %dx%d, GL %llu us, packing %llu us\n",
++			    planes.alpha ? "b3a8" : "w30r", IOSurfaceGetID(surface), image->width, image->height,
++			    (unsigned long long)read_us, (unsigned long long)(now_us() - pack_started));
+ 		}
+ 	}
+ 	IOSurfaceUnlock(surface, 0, NULL);
+@@ -891,6 +917,10 @@
+ static void
+ surface_to_texture(struct eagl *e, struct image *image)
+ {
++	if (image->xr10) {
++		xr10_upload(e, image);
++		return;
++	}
+ 	IOSurfaceRef surface = image->surface;
+ 	bool planar = IOSurfaceGetPlaneCount(surface) > 0;
+ 	size_t row = planar ? IOSurfaceGetBytesPerRowOfPlane(surface, image->plane) : IOSurfaceGetBytesPerRow(surface);
+@@ -1042,12 +1072,12 @@
+ 	if (e->reader == 0) {
+ 		glGenFramebuffers(1, &e->reader);
+ 	}
+-	if (image->b3a8) {
++	if (image->xr10) {
+ 		GLint previous = 0;
+ 		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+ 		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+ 		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+-		b3a8_readback(e, image);
++		xr10_readback(e, image);
+ 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous);
+ 		return;
+ 	}
+@@ -3708,6 +3738,12 @@
+ 	image->invert = invert;
+ 	image->width = width;
+ 	image->height = height;
++	uint32_t pixel_format = IOSurfaceGetPixelFormat(surface);
++	/* CoreAnimation requests a complete 8-bit color texture through plane
++	 * zero. The packed 10-bit RGB bytes and separate alpha need decoding. */
++	image->xr10 = (pixel_format == SWEET_B3A8_FORMAT || pixel_format == SWEET_W30R_FORMAT) &&
++	    plane == 0 && internal == GL_RGBA && (format == GL_BGRA || format == GL_RGBA) &&
++	    type == GL_UNSIGNED_BYTE;
+ 	note_format(invert ? "IOSurface shown, inverted" : "IOSurface shown", image->internal, image->format, image->type, width,
+ 	    height);
+ 	if (shown++ < 24) {
+@@ -3716,9 +3752,16 @@
+ 		    IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface), IOSurfaceGetPlaneCount(surface), texture, width,
+ 		    height, plane, invert ? ", inverted" : "");
+ 	}
+-	image->wrapped = IOSurfaceGetPixelFormat(surface) == 0;
++	image->wrapped = pixel_format == 0;
+ 	began = now_us();
+-	if (!surface_shared(e, image)) {
++	if (image->xr10) {
++		if (!xr10_upload(e, image)) {
++			say("redwood-gl: XR10 source surface %u upload failed\n", IOSurfaceGetID(surface));
++			image_forget(e, (GLuint)texture);
++			eagl_leave(e, 0x970);
++			return NO;
++		}
++	} else if (!surface_shared(e, image)) {
+ 		surface_changed(e, image);              /* (what it adds up to now) */
+ 		surface_to_texture(e, image);
+ 	}
+@@ -3746,24 +3789,24 @@
+ 	clear_now(e);
+ 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+ 	pixels = IOSurfaceGetPixelFormat(surface);
+-	bool b3a8 = pixels == SWEET_B3A8_FORMAT;
++	bool xr10 = pixels == SWEET_B3A8_FORMAT || pixels == SWEET_W30R_FORMAT;
+ 	bool single_plane = (pixels == 'BGRA' || pixels == 0) &&
+ 	    IOSurfaceGetBytesPerElement(surface) == 4 && IOSurfaceGetPlaneCount(surface) == 0;
+ 	size_t width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface);
+-	if (target != GL_TEXTURE_2D || texture == 0 || (!b3a8 && !single_plane) ||
+-	    (b3a8 && (width > 8192 || height > 8192)) ||
++	if (target != GL_TEXTURE_2D || texture == 0 || (!xr10 && !single_plane) ||
++	    (xr10 && (width > 8192 || height > 8192)) ||
+ 	    (image = image_new(e, (GLuint)texture, surface)) == NULL) {
+ 		say("redwood-gl: -attachImage: target %#lx, texture %d, an IOSurface of '%.4s': not done\n", target, texture,
+ 		    (const char *)&(uint32_t){ __builtin_bswap32(pixels) });
+ 		return NO;
+ 	}
+ 	image->target = true;
+-	image->b3a8 = b3a8;
++	image->xr10 = xr10;
+ 	image->to = GL_TEXTURE_2D;
+ 	image->invert = inverted;
+ 	image->width = (GLsizei)width;
+ 	image->height = (GLsizei)height;
+-	image->internal = image->format = b3a8 ? GL_RGBA : GL_BGRA;
++	image->internal = image->format = xr10 ? GL_RGBA : GL_BGRA;
+ 	image->type = GL_UNSIGNED_BYTE;
+ 	/*
+ 	 * A surface with no pixel format is memory CoreAnimation has made a surface around: a
+@@ -3783,9 +3826,9 @@
+ 	 * around, to be shown): a texture that is not the surface's memory starts with what the surface holds.
+ 	 */
+ 	began = now_us();
+-	if (b3a8) {
+-		if (!b3a8_upload(e, image)) {
+-			say("redwood-gl: b3a8 IOSurface %u attachment failed\n", IOSurfaceGetID(surface));
++	if (xr10) {
++		if (!xr10_upload(e, image)) {
++			say("redwood-gl: XR10 IOSurface %u attachment failed\n", IOSurfaceGetID(surface));
+ 			image_forget(e, (GLuint)texture);
+ 			eagl_leave(e, 0x970);
+ 			return NO;

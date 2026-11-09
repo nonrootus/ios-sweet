@@ -67,8 +67,9 @@ extern "C" int sweet_a618_render_submit(const uint64_t *iova,
         !sweet_a618_render_ready())return -1;
     uint32_t packet[64*4+16];
     unsigned used=0;
-    packet[used++]=a618_pkt7(0x46,1); // CCU invalidate before IB reads.
+    packet[used++]=a618_pkt7(0x46,1); // A6xx CACHE_INVALIDATE.
     packet[used++]=0x31;
+    packet[used++]=a618_pkt7(0x26,0); // Wait for invalidation before reused BOs are read.
     for(unsigned i=0;i<count;i++){
         const uint64_t base=SWEET_A618_RENDER_IOVA;
         const uint64_t end=base+SWEET_A618_RENDER_BYTES;

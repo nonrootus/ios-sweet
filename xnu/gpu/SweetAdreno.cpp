@@ -10,7 +10,6 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
-#include <IOKit/IOSubMemoryDescriptor.h>
 #include <kern/task.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
@@ -48,6 +47,21 @@ static constexpr unsigned kHandles=8192;
 static constexpr unsigned kMaxBOs=1024,kMaxCMDs=64;
 static uint64_t allocated[kSlots/64];
 static IOLock *pool_lock;
+static unsigned pool_in_use, pool_released_logs, pool_full_logs;
+
+static void pool_return(unsigned first,unsigned units)
+{
+    IOLockLock(pool_lock);
+    for(unsigned i=0;i<units;i++)
+        allocated[(first+i)/64]&=~(UINT64_C(1)<<((first+i)%64));
+    pool_in_use-=units;
+    const unsigned in_use=pool_in_use;
+    const bool log=pool_released_logs<8;
+    if(log)pool_released_logs++;
+    IOLockUnlock(pool_lock);
+    if(log)IOLog("SWEET CA: BO recycle first=%u pages=%u in_use=%u/%u\n",
+        first,units,in_use,kSlots);
+}
 
 static int pool_reserve(unsigned units)
 {
@@ -58,23 +72,55 @@ static int pool_reserve(unsigned units)
         for(;i<units;i++)if(allocated[(first+i)/64]&(UINT64_C(1)<<((first+i)%64)))break;
         if(i<units){first+=i;continue;}
         for(i=0;i<units;i++)allocated[(first+i)/64]|=UINT64_C(1)<<((first+i)%64);
+        pool_in_use+=units;
         IOLockUnlock(pool_lock);
         return static_cast<int>(first);
     }
+    const unsigned in_use=pool_in_use;
+    const bool log=pool_full_logs<8;
+    if(log)pool_full_logs++;
     IOLockUnlock(pool_lock);
+    if(log)IOLog("SWEET CA: BO pool has no contiguous range pages=%u in_use=%u/%u\n",
+        units,in_use,kSlots);
     return -1;
 }
 
-class SweetAdrenoBO : public IOSubMemoryDescriptor {
+class SweetAdrenoBO : public IOGeneralMemoryDescriptor {
     OSDeclareDefaultStructors(SweetAdrenoBO);
+    unsigned pool_first, pool_units;
 public:
-    virtual void free() APPLE_KEXT_OVERRIDE {
-        /* IOSubMemoryDescriptor forwards maps to its parent. A user mapping
-         * may outlive GEM_CLOSE, so never recycle this IOVA during this boot. */
-        IOSubMemoryDescriptor::free();
+    bool initPoolRange(void *address,unsigned first,unsigned units)
+    {
+        IOAddressRange range={reinterpret_cast<mach_vm_address_t>(address),
+            static_cast<mach_vm_size_t>(units)*16384u};
+        constexpr IOOptionBits cache=kIOWriteCombineCache<<kIOMemoryBufferCacheShift;
+        if(!initWithOptions(&range,1,0,kernel_task,kIOMemoryTypeVirtual64 |
+            kIODirectionInOut | kIOMemoryMapperNone | kIOMemoryThreadSafe | cache))
+            return false;
+        pool_first=first;
+        pool_units=units;
+        return true;
+    }
+
+    IOMemoryMap *makeMapping(IOMemoryDescriptor *owner,task_t task,
+        IOVirtualAddress address,IOOptionBits options,IOByteCount offset,
+        IOByteCount length) APPLE_KEXT_OVERRIDE
+    {
+        // Match the existing Normal-NC CPU mapping of the pre-pinned pool.
+        options=(options & ~kIOMapCacheMask) | kIOMapWriteCombineCache;
+        return IOGeneralMemoryDescriptor::makeMapping(owner,task,address,options,offset,length);
+    }
+
+    void free() APPLE_KEXT_OVERRIDE
+    {
+        /* IOMemoryMap retains this descriptor until after unmap. GEM_CLOSE
+         * drops the handle under the same lock held through the GPU fence. */
+        const unsigned first=pool_first, units=pool_units;
+        IOGeneralMemoryDescriptor::free();
+        if(units)pool_return(first,units);
     }
 };
-OSDefineMetaClassAndStructors(SweetAdrenoBO,IOSubMemoryDescriptor);
+OSDefineMetaClassAndStructors(SweetAdrenoBO,IOGeneralMemoryDescriptor);
 
 struct sweet_bo { SweetAdrenoBO *memory;uint64_t size,iova;uint32_t flags; };
 
@@ -89,6 +135,7 @@ class SweetAdrenoUserClient : public IOUserClient {
         return handle && handle<=kHandles && bos && bos[handle-1].memory ? &bos[handle-1] : nullptr;
     }
     IOReturn submit(msm_gem_submit *request);
+    void releaseBOs();
 public:
     virtual bool initWithTask(task_t task,void *sid,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE;
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -123,23 +170,28 @@ bool SweetAdrenoUserClient::start(IOService *provider)
     return lock && bos;
 }
 
+void SweetAdrenoUserClient::releaseBOs()
+{
+    if(!lock || !bos)return;
+    IOLockLock(lock);
+    for(unsigned i=0;i<kHandles;i++){
+        auto *memory=bos[i].memory;
+        bos[i].memory=nullptr;
+        if(memory)memory->release();
+    }
+    IOLockUnlock(lock);
+}
+
 IOReturn SweetAdrenoUserClient::clientClose()
 {
-    if(lock && bos){
-        IOLockLock(lock);
-        for(unsigned i=0;i<kHandles;i++){
-            auto *memory=bos[i].memory;
-            bos[i].memory=nullptr;
-            if(memory)memory->release();
-        }
-        IOLockUnlock(lock);
-    }
+    releaseBOs();
     if(!isInactive())terminate();
     return kIOReturnSuccess;
 }
 
 void SweetAdrenoUserClient::free()
 {
+    releaseBOs();
     if(bos){IOFree(bos,kHandles*sizeof(sweet_bo));bos=nullptr;}
     if(lock){IOLockFree(lock);lock=nullptr;}
     IOUserClient::free();
@@ -253,22 +305,15 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
         int first=pool_reserve(units);
         if(first<0)return kIOReturnNoMemory;
         auto *bo=OSTypeAlloc(SweetAdrenoBO);
-        if(!bo){
-            IOLockLock(pool_lock);
-            for(unsigned i=0;i<units;i++)allocated[(first+i)/64]&=~(UINT64_C(1)<<((first+i)%64));
-            IOLockUnlock(pool_lock);
-            return kIOReturnNoMemory;
-        }
-        auto *parent=sweet_a618_render_descriptor();
         const uint64_t offset=static_cast<uint64_t>(first)*16384u;
-        if(!parent || !bo->initSubRange(parent,offset,bytes,kIODirectionInOut)){
-            bo->release();
-            IOLockLock(pool_lock);
-            for(unsigned i=0;i<units;i++)allocated[(first+i)/64]&=~(UINT64_C(1)<<((first+i)%64));
-            IOLockUnlock(pool_lock);
+        auto *pool=static_cast<unsigned char *>(sweet_a618_render_cpu());
+        if(!bo || !pool || !bo->initPoolRange(pool+offset,static_cast<unsigned>(first),units)){
+            if(bo)bo->release();
+            pool_return(static_cast<unsigned>(first),units);
             return kIOReturnNoMemory;
         }
-        bzero(static_cast<unsigned char *>(sweet_a618_render_cpu())+offset,bytes);
+        bzero(pool+offset,bytes);
+        __asm__ volatile("dsb sy" ::: "memory"); // Finish clearing before publishing the BO.
         IOLockLock(lock);
         unsigned handle=0;
         for(unsigned i=0;i<kHandles;i++){

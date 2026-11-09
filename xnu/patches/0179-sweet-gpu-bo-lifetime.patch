@@ -138,7 +138,7 @@
      if(bos){IOFree(bos,kHandles*sizeof(sweet_bo));bos=nullptr;}
      if(lock){IOLockFree(lock);lock=nullptr;}
      IOUserClient::free();
-@@ -253,22 +305,14 @@
+@@ -253,22 +305,15 @@
          int first=pool_reserve(units);
          if(first<0)return kIOReturnNoMemory;
          auto *bo=OSTypeAlloc(SweetAdrenoBO);
@@ -164,6 +164,20 @@
 -        }
 -        bzero(static_cast<unsigned char *>(sweet_a618_render_cpu())+offset,bytes);
 +        bzero(pool+offset,bytes);
++        __asm__ volatile("dsb sy" ::: "memory"); // Finish clearing before publishing the BO.
          IOLockLock(lock);
          unsigned handle=0;
          for(unsigned i=0;i<kHandles;i++){
+--- a/iokit/Kernel/arm/sweet_a618_renderer.inc
++++ b/iokit/Kernel/arm/sweet_a618_renderer.inc
+@@ -67,8 +67,9 @@
+         !sweet_a618_render_ready())return -1;
+     uint32_t packet[64*4+16];
+     unsigned used=0;
+-    packet[used++]=a618_pkt7(0x46,1); // CCU invalidate before IB reads.
++    packet[used++]=a618_pkt7(0x46,1); // A6xx CACHE_INVALIDATE.
+     packet[used++]=0x31;
++    packet[used++]=a618_pkt7(0x26,0); // Wait for invalidation before reused BOs are read.
+     for(unsigned i=0;i<count;i++){
+         const uint64_t base=SWEET_A618_RENDER_IOVA;
+         const uint64_t end=base+SWEET_A618_RENDER_BYTES;

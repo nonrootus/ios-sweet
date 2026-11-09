@@ -132,6 +132,8 @@ TARGETS.update({name: 'xnu/gpu/' + name.rsplit('/', 1)[1] for name in RENDER_CLI
 WIRING.add('iokit/conf/files.arm64')
 PATCHES += (('xnu/patches/0174-sweet-a618-mesa-client.patch', RENDER_CLIENT_TARGETS | {
     OOB_TARGET, 'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp', 'iokit/conf/files.arm64'}),)
+PATCHES += (('xnu/patches/0179-sweet-gpu-bo-lifetime.patch', {
+    'iokit/Kernel/arm/SweetAdreno.cpp', 'iokit/Kernel/arm/sweet_a618_renderer.inc'}),)
 
 
 def main():
@@ -206,7 +208,7 @@ def main():
                 continue
             if (work / target).read_bytes() != blob(BASELINE, canonical):
                 raise ValueError('reversal did not restore exact baseline: ' + canonical)
-    print('PASS0150-0174 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
+    print('PASS0150-0179 exact published baseline, all',len(TARGETS),'canonical blobs, forward/reverse application', revision)
 
 
 if __name__ == '__main__':

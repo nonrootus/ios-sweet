@@ -1,0 +1,291 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -39,7 +39,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_usb_probe(void);
+-static void sweet_usb_gadget_start(vm_offset_t dwc);
++static void sweet_usb_gadget_start(vm_offset_t dwc, bool serial);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+ #define GCC_PA                  0x00100000
+@@ -80,7 +80,7 @@
+ 	uint32_t gdscr, cbcr[sizeof(usb_cbcr) / sizeof(usb_cbcr[0])];
+ 	bool clocks_on = true;
+ 
+-	/* sweetusb=0 off, 1 (default) report state only, 2 also start the USB device */
++	/* sweetusb=0 off, 1 probe, 2 ECM, 3 ACM console output. */
+ 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		return;
+@@ -116,8 +116,8 @@
+ 	printf("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+-	if (enabled >= 2) {
+-		sweet_usb_gadget_start(dwc);
++	if (enabled == 2 || enabled == 3) {
++		sweet_usb_gadget_start(dwc, enabled == 3);
+ 	}
+ 	if (cbcr[5] & CBCR_CLK_OFF) {
+ 		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
+@@ -229,6 +229,9 @@
+ 	uint32_t    events;
+ 	bool        configured;
+ 	uint8_t     data_alt;       /* data interface alternate setting */
++	bool        serial, serial_dtr, serial_line_out;
++	uint8_t     serial_line[7];
++	uint64_t    serial_position;
+ 	/* network */
+ 	ifnet_t     ifp;
+ 	lck_mtx_t  *lock;           /* TX ring and TX endpoint */
+@@ -290,7 +293,7 @@
+ }
+ 
+ /* One TRB (at DMA offset trb) on physical endpoint ep. */
+-static void
++static int
+ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
+ {
+ 	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
+@@ -305,7 +308,7 @@
+ 		ud_sync(buf, len);
+ 	}
+ 	uint64_t tpa = ud.dma_pa + trb;
+-	ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
+ }
+ 
+ static void
+@@ -349,6 +352,27 @@
+ 	7, 5, 0x81, 0x02, 0x00, 0x02, 0,                /* ep 0x81 bulk IN, 512 */
+ 	7, 5, 0x01, 0x02, 0x00, 0x02, 0,                /* ep 0x01 bulk OUT, 512 */
+ };
++/* pid.codes 1209:0002 is non-unique and reserved for private tests only. */
++static const uint8_t ud_serial_dev_desc[] = {
++	18, 1, 0x00, 0x02, 0x02, 0x02, 0x00, 64,
++	0x09, 0x12, 0x02, 0x00, 0x00, 0x01, 1, 2, 3, 1,
++};
++static const uint8_t ud_serial_cfg_desc[] = {
++	9, 2, 67, 0, 2, 1, 0, 0x80, 250,
++	9, 4, 0, 0, 1, 0x02, 0x02, 0x00, 0, /* ACM control */
++	5, 0x24, 0x00, 0x10, 0x01,
++	5, 0x24, 0x01, 0, 1,                 /* call management */
++	4, 0x24, 0x02, 2,                    /* line coding and control-line state */
++	5, 0x24, 0x06, 0, 1,
++	7, 5, 0x82, 0x03, 16, 0, 9,
++	9, 4, 1, 0, 2, 0x0a, 0, 0, 0,      /* ACM data */
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
++};
++_Static_assert(sizeof(ud_serial_cfg_desc) == 67, "ACM configuration length");
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++extern uint64_t sweet_log_position(void);
++
+ /* The host side's MAC (ECM iMACAddress); the phone's own is ..:02 */
+ static const char *const ud_strings[] = {
+ 	NULL, "ios-sweet", "Sweet iOS (USB Ethernet)", "0001", "02005E77EE01",
+@@ -365,7 +389,7 @@
+ 	if (idx >= sizeof(ud_strings) / sizeof(ud_strings[0])) {
+ 		return 0;
+ 	}
+-	const char *str = ud_strings[idx];
++	const char *str = ud.serial && idx == 2 ? "Sweet iOS (USB console)" : ud_strings[idx];
+ 	uint32_t n = 2;
+ 	for (; *str && n < 126; str++) {
+ 		out[n++] = (uint8_t)*str;
+@@ -413,7 +437,7 @@
+ 	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | (1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT));
+ 	ud.configured = true;
+ 	ud_rx_arm();
+-	printf("SWEET USB: ECM endpoints configured\n");
++	printf("SWEET USB: %s endpoints configured\n", ud.serial ? "ACM" : "ECM");
+ }
+ 
+ static void
+@@ -430,14 +454,37 @@
+ 
+ 	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
+ 	ud.data_in = (type & 0x80) != 0;
+-	if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
++	ud.serial_line_out = false;
++	if (ud.serial && (type & 0x60) == 0x20) {
++		if (type == 0x21 && req == 0x20 && index == 0 && length == sizeof(ud.serial_line)) {
++			ud.serial_line_out = true; /* SET_LINE_CODING */
++		} else if (type == 0xa1 && req == 0x21 && index == 0) {
++			memcpy(data, ud.serial_line, sizeof(ud.serial_line));
++			n = sizeof(ud.serial_line);
++		} else if (type == 0x21 && req == 0x22 && index == 0 && length == 0) {
++			bool dtr = (value & 1) != 0;
++			if (dtr && !ud.serial_dtr) {
++				uint64_t tail = sweet_log_position();
++				ud.serial_position = tail > 512 * 1024 ? tail - 512 * 1024 : 0;
++			}
++			ud.serial_dtr = dtr;
++		} else {
++			ok = false;
++		}
++	} else if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
+ 		ok = (length == 0);
+ 	} else if ((type & 0x60) != 0) {
+ 		ok = false;
+ 	} else if (req == 6) {          /* GET_DESCRIPTOR */
+ 		switch (value >> 8) {
+-		case 1: memcpy(data, ud_dev_desc, sizeof(ud_dev_desc)); n = sizeof(ud_dev_desc); break;
+-		case 2: memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc)); n = sizeof(ud_cfg_desc); break;
++		case 1:
++			n = sizeof(ud_dev_desc);
++			memcpy(data, ud.serial ? ud_serial_dev_desc : ud_dev_desc, n);
++			break;
++		case 2:
++			n = ud.serial ? sizeof(ud_serial_cfg_desc) : sizeof(ud_cfg_desc);
++			memcpy(data, ud.serial ? ud_serial_cfg_desc : ud_cfg_desc, n);
++			break;
+ 		case 3: n = ud_string(value & 0xff, data); ok = n != 0; break;
+ 		default: ok = false; break;
+ 		}
+@@ -455,7 +502,7 @@
+ 	} else if (req == 0) {          /* GET_STATUS */
+ 		data[0] = 0; data[1] = 0; n = 2;
+ 	} else if (req == 11) {         /* SET_INTERFACE */
+-		if (index == 1) {
++		if (!ud.serial && index == 1) {
+ 			ud.data_alt = (uint8_t)value;
+ 			if (value == 1 && ud.configured) {
+ 				ud_notify_connected();
+@@ -483,7 +530,7 @@
+ 		}
+ 		ud_start(1, UD_DATA, n, TRBCTL_DATA);
+ 	} else {
+-		ud_start(0, UD_DATA, 64, TRBCTL_DATA);  /* OUT data is not used here */
++		ud_start(0, UD_DATA, ud.serial_line_out ? sizeof(ud.serial_line) : 64, TRBCTL_DATA);
+ 	}
+ }
+ 
+@@ -704,6 +751,21 @@
+ 	printf("SWEET USB: ue0 192.168.7.2/24 %s (err %d)\n", err ? "NOT configured" : "up", err);
+ }
+ 
++/* Poll-thread only. Short packets let usbser deliver the stream promptly. */
++static void
++ud_serial_tx(void)
++{
++	if (!ud.configured || !ud.serial_dtr || ud.tx_busy) {
++		return;
++	}
++	uint64_t next = ud.serial_position;
++	uint32_t len = sweet_log_copy(&next, (char *)(ud.dma + UD_TX), 511);
++	if (len && !ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, len, TRBCTL_NORMAL)) {
++		ud.serial_position = next;
++		ud.tx_busy = true;
++	}
++}
++
+ static void
+ ud_event(uint32_t ev)
+ {
+@@ -730,10 +792,18 @@
+ 	unsigned status = (ev >> 12) & 0xf;
+ 
+ 	if (ep == EP_RX && type == 1) {
++		if (ud.serial) {
++			ud_rx_arm(); /* console output only */
++			return;
++		}
+ 		ud_rx_done();
+ 		return;
+ 	}
+ 	if (ep == EP_TX && type == 1) {
++		if (ud.serial) {
++			ud.tx_busy = false;
++			return;
++		}
+ 		lck_mtx_lock(ud.lock);
+ 		ud.tx_busy = false;
+ 		ud_tx_kick_locked();
+@@ -756,6 +826,11 @@
+ 			ud_setup();
+ 			break;
+ 		case EP0_DATA:
++			if (ud.serial_line_out) {
++				ud_sync(UD_DATA, sizeof(ud.serial_line));
++				memcpy(ud.serial_line, (const void *)(ud.dma + UD_DATA), sizeof(ud.serial_line));
++				ud.serial_line_out = false;
++			}
+ 			ud.state = EP0_WAIT_STATUS3;
+ 			break;
+ 		case EP0_STATUS:
+@@ -793,7 +868,9 @@
+ 			}
+ 			dwc_wr(GEVNTCOUNT, count);
+ 		}
+-		if ((++ticks % 30000) == 0) {
++		if (ud.serial) {
++			ud_serial_tx();
++		} else if ((++ticks % 30000) == 0) {
+ 			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
+ 		}
+ 		ud_sleep_ms(1);
+@@ -807,8 +884,6 @@
+  * so the boot is included. Nothing here may print (it would feed itself).
+  * Boot-arg sweetusblog=0 disables it.
+  */
+-extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+-extern uint64_t sweet_log_position(void);
+ 
+ static void
+ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -849,7 +924,7 @@
+ }
+ 
+ static void
+-sweet_usb_gadget_start(vm_offset_t dwc)
++sweet_usb_gadget_start(vm_offset_t dwc, bool serial)
+ {
+ 	thread_t thread;
+ 
+@@ -864,7 +939,13 @@
+ 		return;
+ 	}
+ 	ud.dma_pa = ptoa_64(pn);
+-	ud_if_create();
++	ud.serial = serial;
++	if (serial) {
++		const uint8_t line[] = {0x00, 0xc2, 0x01, 0x00, 0, 0, 8}; /* 115200 8N1 */
++		memcpy(ud.serial_line, line, sizeof(line));
++	} else {
++		ud_if_create();
++	}
+ 
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -406,6 +406,9 @@
+ 			    sweet_b3a8_display_plane(alpha, 1, sx + w, sy + h, length) &&
+ 			    ((uint64_t)rgb.offset + rgb.size <= alpha.offset ||
+ 			    (uint64_t)alpha.offset + alpha.size <= rgb.offset)) {
++				static unsigned evidence;
++				uint32_t rgb_sum = 0;
++				const bool sample = evidence < 8;
+ 				for (int32_t y = 0; y < h; y++) {
+ 					auto *dst = (uint8_t *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
+ 					const auto *colors = (const uint8_t *)(src + rgb.offset +
+@@ -417,6 +420,17 @@
+ 						memcpy(&word, colors + x * 4, sizeof(word));
+ 						sweet_b3a8_unpack(word, opacities[x], dst + x * 4, 1);
+ 					}
++					if (sample && (y & 31) == 0) {
++						for (int32_t x = 0; x < w; x += 32) {
++							const uint8_t *pixel = dst + x * 4;
++							rgb_sum += pixel[0] + pixel[1] + pixel[2];
++						}
++					}
++				}
++				if (sample && rgb_sum != 0) {
++					evidence++;
++					IOLog("SWEET FB: b3a8 visible pixels swap=%u surface=%u rgb_sum=%u\n",
++					    get32(rec, 0x50), id, rgb_sum);
+ 				}
+ 			}
+ 			s->release();

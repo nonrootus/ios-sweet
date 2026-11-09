@@ -34,6 +34,7 @@ done
 
 git -C "$stage" apply "$repo/userland/gpu/eagl-b3a8.patch"
 git -C "$stage" apply "$repo/userland/gpu/eagl-xr-surfaces.patch"
+git -C "$stage" apply "$repo/userland/gpu/eagl-ca-uniforms.patch"
 git -C "$stage" apply --include=iokit/Kernel/arm/sweet_b3a8.h \
     "$repo/xnu/patches/0177-sweet-b3a8-framebuffer.patch"
 cp "$stage/iokit/Kernel/arm/sweet_b3a8.h" "$stage/userland/gpu/"
@@ -107,7 +108,7 @@ python3 "$stage/userland/mkeagl.py" "$stage/userland/src/eagl_slots.txt" \
 
 target=(-target arm64-apple-ios16.0 -isysroot "$sdk" -O2 -dynamiclib)
 "$cc" "${target[@]}" -Wno-deprecated-declarations -I "$work" \
-    "$gpu/eagl.c" "$gpu/gl_osmesa.c" "$lib/libOSMesa.8.dylib" -lobjc \
+    "$gpu/eagl.c" "$gpu/gl_osmesa.c" "$repo/userland/gpu/sweet-ca-uniforms.c" "$lib/libOSMesa.8.dylib" -lobjc \
     -framework IOSurface -framework CoreFoundation -framework OpenGLES -framework IOKit \
     -install_name /sweet/lib/libSweetEAGL.dylib -o "$lib/libSweetEAGL.dylib"
 "$cc" "${target[@]}" -framework IOKit -framework CoreFoundation \

@@ -1,0 +1,126 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -877,6 +877,12 @@
+ 	GLint saved[5];
+ 	b3a8_transfer_state(true, saved, false);
+ 	glGetError();
++	uint64_t wait_us = 0;
++	if (e->frames < 4 && IOSurfaceGetPixelFormat(surface) == SWEET_B3A8_FORMAT) {
++		uint64_t wait_started = now_us();
++		glFinish();
++		wait_us = now_us() - wait_started;
++	}
+ 	uint64_t read_started = now_us();
+ 	glReadPixels(0, 0, image->width, image->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+ 	uint64_t read_us = now_us() - read_started;
+@@ -905,15 +911,53 @@
+ 			}
+ 		}
+ 		if (e->frames < 8 || e->frames % 120 == 0) {
+-			say("redwood-gl: %s readback surface %u, %dx%d, GL %llu us, packing %llu us\n",
++			say("redwood-gl: %s readback surface %u, %dx%d, GL %llu us, packing %llu us, explicit wait %llu us\n",
+ 			    planes.alpha ? "b3a8" : "w30r", IOSurfaceGetID(surface), image->width, image->height,
+-			    (unsigned long long)read_us, (unsigned long long)(now_us() - pack_started));
++			    (unsigned long long)read_us, (unsigned long long)(now_us() - pack_started), (unsigned long long)wait_us);
+ 		}
+ 	}
+ 	IOSurfaceUnlock(surface, 0, NULL);
+ }
+ 
+ /* Fill a texture, which is bound, from its IOSurface, unless it is the surface. */
++/* Keep the wrapped surface's A,B,G,R order when copying a draw back. */
++static void
++abgr_readback(struct eagl *e, struct image *image)
++{
++	IOSurfaceRef surface = image->surface;
++	uint8_t *pixels = b3a8_scratch(e, image);
++	if (pixels == NULL || glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++		return;
++	}
++
++	GLint saved[5];
++	b3a8_transfer_state(true, saved, false);
++	glGetError();
++	glReadPixels(0, 0, image->width, image->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
++	GLenum error = glGetError();
++	b3a8_transfer_state(true, saved, true);
++	if (error != GL_NO_ERROR || IOSurfaceLock(surface, 0, NULL) != 0) {
++		return;
++	}
++
++	uint8_t *base = IOSurfaceGetBaseAddress(surface);
++	size_t stride = IOSurfaceGetBytesPerRow(surface);
++	size_t width = (size_t)image->width, height = (size_t)image->height;
++	if (base != NULL && sweet_b3a8_plane_fits(0, stride, width * 4, height, IOSurfaceGetAllocSize(surface))) {
++		for (size_t y = 0; y < height; y++) {
++			const uint8_t *rgba = pixels + y * width * 4;
++			uint8_t *abgr = base + (image->invert ? height - 1 - y : y) * stride;
++			for (size_t x = 0; x < width; x++, rgba += 4, abgr += 4) {
++				abgr[0] = rgba[3];
++				abgr[1] = rgba[2];
++				abgr[2] = rgba[1];
++				abgr[3] = rgba[0];
++			}
++		}
++	}
++	IOSurfaceUnlock(surface, 0, NULL);
++}
++
+ static void
+ surface_to_texture(struct eagl *e, struct image *image)
+ {
+@@ -1072,12 +1116,16 @@
+ 	if (e->reader == 0) {
+ 		glGenFramebuffers(1, &e->reader);
+ 	}
+-	if (image->xr10) {
++	if (image->xr10 || image->alpha_first) {
+ 		GLint previous = 0;
+ 		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+ 		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+ 		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+-		xr10_readback(e, image);
++		if (image->xr10) {
++			xr10_readback(e, image);
++		} else {
++			abgr_readback(e, image);
++		}
+ 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous);
+ 		return;
+ 	}
+@@ -1814,15 +1862,15 @@
+ 	static uint8_t said[90];
+ 
+ 	ca_context = context;
+-	if (function >= 90 || index != 0 || components * count > 20) {
++	if (function >= 90 || index != 0 || values == NULL || components == 0 || count == 0 ||
++	    components > 20 || count > 20 / components) {
+ 		return;
+ 	}
+ 	memcpy(function_values[function], values, components * count * sizeof(values[0]));
+ 	function_given[function] = (uint8_t)(components * count);
+ 	if (!said[function]) {
+ 		said[function] = 1;
+-		say("redwood-gl: CoreAnimation gives its function %u numbers: %zu of %zu, the first %g %g %g %g\n", function, count,
+-		    components, (double)values[0], (double)values[1], (double)values[2], (double)values[3]);
++		say("redwood-gl: CoreAnimation gives its function %u numbers: %zu of %zu\n", function, count, components);
+ 	}
+ }
+ 
+@@ -3893,6 +3941,8 @@
+ 	return waits;
+ }
+ 
++extern void sweet_install_ca_uniforms(void);
++
+ __attribute__((constructor)) static void
+ install(void)
+ {
+@@ -3914,6 +3964,7 @@
+ 	size_t size = sizeof(arguments) - 1;
+ 	const char *argument;
+ 
++	sweet_install_ca_uniforms();
+ 	/* the kernel's boot-args are where a run is told things */
+ 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+ 		if ((argument = strstr(arguments, "gltrace=")) != NULL) {

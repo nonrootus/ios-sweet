@@ -1,0 +1,95 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -72,6 +72,8 @@
+ 
+ #include "redwood_gl.h"
+ #include "sweet_b3a8.h"
++#include "sweet-direct-output.h"
++#include "sweet-gpu-calls.h"
+ 
+ /* ---- OpenGL ES: the types, the few names used here, the library's functions --------------------- */
+ 
+@@ -248,8 +250,12 @@ struct image {
+ 	GLenum to, internal, format, type;
+ 	uint32_t plane, seed;
+ 	GLsizei width, height;
++	int damage[4], damage_effective[4];     /* (sweet-readback-probe.inc) */
++	bool damage_any, damage_full, damage_seen, damage_effective_full;
+ };
+ 
++#include "sweet-readback-probe-state.h"
++
+ struct eagl {
+ 	void *table[SLOTS];             /* [0] is the context itself: what every entry gets as its first argument */
+ 	id object;                      /* the EAGLContext */
+@@ -259,6 +265,7 @@ struct eagl {
+ 	unsigned image_count;
+ 	uint8_t *b3a8_pixels;
+ 	size_t b3a8_capacity;
++	struct sweet_probe probe;
+ 	GLuint framebuffer;             /* the one bound */
+ 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */
+ 	GLuint reader;                  /* a framebuffer of ours, to read a texture back */
+@@ -863,6 +870,13 @@ xr10_upload(struct eagl *e, struct image *image)
+ 	return true;
+ }
+ 
++/*
++ * userland/mkeagl.py declares what this file names: the included measurements use glGenBuffers(),
++ * glDeleteBuffers(), glBufferData(), glMapBufferRange(), glUnmapBuffer(), glColorMask(), glGetBooleanv(),
++ * glClearColor(), glTexParameteri(), glDeleteFramebuffers(), glDeleteTextures(), glGenTextures().
++ */
++#include "sweet-readback-probe.inc"
++
+ static void
+ xr10_readback(struct eagl *e, struct image *image)
+ {
+@@ -877,6 +891,8 @@ xr10_readback(struct eagl *e, struct image *image)
+ 	GLint saved[5];
+ 	b3a8_transfer_state(true, saved, false);
+ 	glGetError();
++	sweet_probe_area_step(e, image);
++	glGetError();
+ 	uint64_t wait_us = 0;
+ 	if (e->frames < 4 && IOSurfaceGetPixelFormat(surface) == SWEET_B3A8_FORMAT) {
+ 		uint64_t wait_started = now_us();
+@@ -896,6 +912,7 @@ xr10_readback(struct eagl *e, struct image *image)
+ 		return;
+ 	}
+ 	if (xr10_layout(surface, &planes)) {
++		sweet_probe_verify_damage(e, image, &planes, pixels);
+ 		uint64_t pack_started = now_us();
+ 		for (GLsizei y = 0; y < image->height; y++) {
+ 			size_t row = (size_t)(image->invert ? image->height - 1 - y : y);
+@@ -915,6 +932,7 @@ xr10_readback(struct eagl *e, struct image *image)
+ 			    planes.alpha ? "b3a8" : "w30r", IOSurfaceGetID(surface), image->width, image->height,
+ 			    (unsigned long long)read_us, (unsigned long long)(now_us() - pack_started), (unsigned long long)wait_us);
+ 		}
++		sweet_probe_direct_step(e, image, &planes);
+ 	}
+ 	IOSurfaceUnlock(surface, 0, NULL);
+ }
+@@ -1080,6 +1098,7 @@ target_to_surface(struct eagl *e, struct image *image)
+ 	size_t row = IOSurfaceGetBytesPerRow(surface);
+ 	uint8_t *base;
+ 
++	sweet_probe_damage_close(e, image);
+ 	image->drawn = false;
+ 	if (image->mirror != 0) {
+ 		GLint read = 0, draw = 0;
+@@ -1402,6 +1421,7 @@ drawing(struct eagl *e)
+ 	frame_begin(e);
+ 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
+ 		image->drawn = image->painted = true;
++		sweet_probe_damage_note(image);
+ 		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
+ 			/* the display's picture (a surface of its size): where this frame first draws into it */
+ 			e->line.into_display++;
+@@ -3965,6 +3985,7 @@ install(void)
+ 	const char *argument;
+ 
+ 	sweet_install_ca_uniforms();
++	(void)sweet_gpu_calls_install();
+ 	/* the kernel's boot-args are where a run is told things */
+ 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+ 		if ((argument = strstr(arguments, "gltrace=")) != NULL) {

@@ -276,8 +276,8 @@ run_direct(bool invert, unsigned *pattern_bad, unsigned *frame_bad, unsigned *pa
 	memset(&image, 0, sizeof(image));
 	frame_setup(invert);
 	log_text[0] = 0;
-	e.probe.step = SWEET_PROBE_DIRECT;
-	e.frames = 40;
+	e.probe.direct_state = SWEET_DIRECT_BLIT_DONE;
+	e.frames = 2;
 	image.surface = fake_surface;
 	image.invert = invert;
 	image.width = SWEET_LOGICAL_WIDTH;
@@ -301,7 +301,57 @@ run_direct(bool invert, unsigned *pattern_bad, unsigned *frame_bad, unsigned *pa
 	assert(read_fb == READER && draw_fb == 9 && scissor_on);
 	assert(scissor_box[0] == 3 && scissor_box[1] == 4 && scissor_box[2] == 5 && scissor_box[3] == 6);
 	assert(clear_colour[0] == .25f && write_mask[1] == 0 && pack_row == 0 && pack_align == 1);
-	assert(e.probe.step == 0 && e.probe.round == 1 && e.probe.framebuffer == 0);
+	assert(e.probe.direct_state == SWEET_DIRECT_DONE && e.probe.framebuffer == 0 && e.probe.texture == 0);
+}
+
+/* The target is taken before the first frame's read and the check follows two frames on. */
+static void
+run_order(void)
+{
+	struct eagl e;
+	struct image image;
+
+	memset(&e, 0, sizeof(e));
+	memset(&image, 0, sizeof(image));
+	frame_setup(false);
+	image.surface = fake_surface;
+	image.width = SWEET_LOGICAL_WIDTH;
+	image.height = SWEET_LOGICAL_HEIGHT;
+	read_fb = READER;
+	draw_fb = 9;
+	scissor_on = true;
+	log_text[0] = 0;
+
+	sweet_probe_area_step(&e, &image);
+	assert(e.probe.direct_state == SWEET_DIRECT_TARGET_MADE && e.probe.framebuffer == PROBE_FB && e.probe.step == 0);
+	sweet_probe_direct_step(&e, &image, &planes);
+	assert(e.probe.direct_state == SWEET_DIRECT_TARGET_MADE);
+	e.frames = 1;
+	sweet_probe_area_step(&e, &image);
+	assert(e.probe.direct_state == SWEET_DIRECT_BLIT_DONE && strstr(log_text, "crop-blit") != NULL);
+	sweet_probe_direct_step(&e, &image, &planes);
+	assert(e.probe.direct_state == SWEET_DIRECT_BLIT_DONE);
+	e.frames = 2;
+	sweet_probe_direct_step(&e, &image, &planes);
+	assert(e.probe.direct_state == SWEET_DIRECT_DONE && e.probe.framebuffer == 0 && strstr(log_text, "SWEET DIRECT: frame") != NULL);
+
+	/* then the measured round, and the buffer it used is given back */
+	e.b3a8_pixels = source;
+	e.frames = 96;
+	sweet_probe_area_step(&e, &image);
+	assert(e.probe.step == 1 && e.probe.round == 0);
+	e.probe.step = SWEET_PROBE_STEPS - 1;
+	e.probe.pbo = 3;
+	sweet_probe_area_step(&e, &image);
+	assert(e.probe.step == 0 && e.probe.round == 1 && e.probe.pbo == 0);
+	assert(read_fb == READER && draw_fb == 9 && scissor_on);
+
+	/* no memory for the target: the check is given up once, not retried every frame */
+	memset(&e, 0, sizeof(e));
+	status = 0x8cdd;
+	sweet_probe_area_step(&e, &image);
+	assert(e.probe.direct_state == SWEET_DIRECT_DONE && e.probe.framebuffer == 0);
+	status = GL_FRAMEBUFFER_COMPLETE;
 }
 
 int
@@ -327,6 +377,8 @@ main(void)
 		run_direct(invert != 0, &pattern, &frame, &guards);
 		assert(pattern == 0 && frame == 0 && guards == 0);
 	}
+
+	run_order();
 
 	/* each fault the check exists for must show */
 	fake_blit_dx = 1;

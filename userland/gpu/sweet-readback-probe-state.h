@@ -13,7 +13,7 @@ struct sweet_probe_surface {
 };
 
 struct sweet_probe {
-	unsigned round, step, verify_lines;
+	unsigned round, step, verify_lines, direct_state;
 	unsigned pbo, texture, framebuffer;
 	struct sweet_probe_surface surfaces[SWEET_PROBE_SURFACES];
 	/* the last frame of the two-buffer swap chain: what the other buffer has that this one lacks */

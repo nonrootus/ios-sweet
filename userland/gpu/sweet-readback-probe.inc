@@ -28,20 +28,33 @@
 
 enum {
 	SWEET_PROBE_CONTROL, SWEET_PROBE_CLIENT_ROW, SWEET_PROBE_CLIENT_QUARTER, SWEET_PROBE_CLIENT_FULL,
-	SWEET_PROBE_PBO_ROW, SWEET_PROBE_PBO_QUARTER, SWEET_PROBE_PBO_FULL, SWEET_PROBE_BLIT, SWEET_PROBE_DIRECT,
+	SWEET_PROBE_PBO_ROW, SWEET_PROBE_PBO_QUARTER, SWEET_PROBE_PBO_FULL,
 	SWEET_PROBE_STEPS,
 };
 
-static const unsigned sweet_probe_round_frames[] = { 40, 160, 480 };
+static const unsigned sweet_probe_round_frames[] = { 96 };
 #define SWEET_PROBE_ROUNDS (sizeof(sweet_probe_round_frames) / sizeof(sweet_probe_round_frames[0]))
+
+/*
+ * The GPU pool hands out contiguous ranges and soon has no 12 MB run left, so
+ * the panel-sized target is taken on the first display frame and given back as
+ * soon as the check is done.
+ */
+enum { SWEET_DIRECT_NOT_STARTED, SWEET_DIRECT_TARGET_MADE, SWEET_DIRECT_BLIT_DONE, SWEET_DIRECT_DONE };
 
 #define ULL(value) ((unsigned long long)(value))
 
 static bool
+sweet_probe_display(const struct image *image)
+{
+	return image->width == SWEET_LOGICAL_WIDTH && image->height == SWEET_LOGICAL_HEIGHT &&
+	    IOSurfaceGetPixelFormat(image->surface) == SWEET_B3A8_FORMAT;
+}
+
+static bool
 sweet_probe_eligible(const struct eagl *e, const struct image *image)
 {
-	return e->probe.round < SWEET_PROBE_ROUNDS && image->width == SWEET_LOGICAL_WIDTH &&
-	    image->height == SWEET_LOGICAL_HEIGHT && IOSurfaceGetPixelFormat(image->surface) == SWEET_B3A8_FORMAT;
+	return e->probe.round < SWEET_PROBE_ROUNDS && sweet_probe_display(image);
 }
 
 static void
@@ -64,8 +77,8 @@ sweet_probe_advance(struct eagl *e)
 		return;
 	}
 	e->probe.step = 0;
-	sweet_probe_release(e);
-	if (++e->probe.round == SWEET_PROBE_ROUNDS && e->probe.pbo != 0) {
+	e->probe.round++;
+	if (e->probe.pbo != 0) {
 		glDeleteBuffers(1, &e->probe.pbo);
 		e->probe.pbo = 0;
 	}
@@ -265,6 +278,15 @@ sweet_probe_area_step(struct eagl *e, const struct image *image)
 {
 	GLsizei quarter = image->height / 4;
 
+	if (sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_NOT_STARTED) {
+		e->probe.direct_state = sweet_probe_target(e) ? SWEET_DIRECT_TARGET_MADE : SWEET_DIRECT_DONE;
+		return;
+	}
+	if (sweet_probe_display(image) && e->probe.direct_state == SWEET_DIRECT_TARGET_MADE && e->frames >= 1) {
+		sweet_probe_blit(e, image);
+		e->probe.direct_state = SWEET_DIRECT_BLIT_DONE;
+		return;
+	}
 	if (!sweet_probe_eligible(e, image) || (e->probe.step == 0 && e->frames < sweet_probe_round_frames[e->probe.round])) {
 		return;
 	}
@@ -290,11 +312,8 @@ sweet_probe_area_step(struct eagl *e, const struct image *image)
 	case SWEET_PROBE_PBO_FULL:
 		sweet_probe_pbo(e, image, image->height);
 		break;
-	case SWEET_PROBE_BLIT:
-		sweet_probe_blit(e, image);
-		break;
 	default:
-		return;         /* (the last step comes after the frame has been packed) */
+		return;
 	}
 	sweet_probe_advance(e);
 }
@@ -345,15 +364,17 @@ sweet_probe_read_panel(uint8_t *block, int *fallback)
 static void
 sweet_probe_direct_step(struct eagl *e, const struct image *image, const struct xr10_planes *planes)
 {
-	if (!sweet_probe_eligible(e, image) || e->probe.step != SWEET_PROBE_DIRECT) {
+	if (!sweet_probe_display(image) || e->probe.direct_state != SWEET_DIRECT_BLIT_DONE || e->frames < 2) {
 		return;
 	}
+	e->probe.direct_state = SWEET_DIRECT_DONE;
+
 	uint8_t *block = malloc(SWEET_DIRECT_BLOCK);
 
 	if (block == NULL || planes->alpha == NULL || !sweet_probe_target(e)) {
 		say("SWEET DIRECT: step skipped\n");
 		free(block);
-		sweet_probe_advance(e);
+		sweet_probe_release(e);
 		return;
 	}
 	struct sweet_direct_result result;
@@ -406,7 +427,7 @@ sweet_probe_direct_step(struct eagl *e, const struct image *image, const struct 
 	glClearColor(colour[0], colour[1], colour[2], colour[3]);
 	glColorMask(mask[0], mask[1], mask[2], mask[3]);
 	free(block);
-	sweet_probe_advance(e);
+	sweet_probe_release(e);
 }
 
 /* ---- damage ------------------------------------------------------------------------------- */

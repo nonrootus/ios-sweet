@@ -2,6 +2,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <mach-o/loader.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -62,22 +63,31 @@ static id sweet_ci_init_with_options(id self, SEL cmd, CFDictionaryRef options)
 
 static void sweet_ci_on_cpu(void)
 {
+    if (sweet_ci_original_init)
+        return;
     Class cls = objc_getClass("CIContext");
     Method method = cls ? class_getInstanceMethod(cls, sel_registerName("initWithOptions:")) : NULL;
-    if (!method) {
-        fputs("SWEET CI: CIContext not loaded; CoreImage left alone\n", stderr);
+    if (!method)
         return;
-    }
     sweet_ci_original_init = method_setImplementation(method, (IMP)sweet_ci_init_with_options);
     fputs("SWEET CI: CoreImage contexts of SpringBoard use the CPU renderer\n", stderr);
+}
+
+/* CoreUI loads CoreImage when it first needs it: watch every image the runtime takes in. */
+static void sweet_ci_image_loaded(const struct mach_header *header)
+{
+    (void)header;
+    sweet_ci_on_cpu();
 }
 
 __attribute__((constructor)) static void load_sweet_renderer(void)
 {
     const char *name = getprogname();
     if (name && strcmp(name, "SpringBoard") == 0) {
-        if (renderer_requested())
+        if (renderer_requested()) {
             sweet_ci_on_cpu();
+            objc_addLoadImageFunc(sweet_ci_image_loaded);   /* (also called for images already loaded) */
+        }
         return;
     }
     if (!name || strcmp(name, "backboardd") != 0 || !renderer_requested())

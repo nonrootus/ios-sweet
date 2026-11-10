@@ -542,11 +542,24 @@ sweet_fields_ready(struct eagl *e, unsigned panel)
  * A 2:1 NEAREST blit samples each destination row at its centre, source row s0 + 2d + 1, so even
  * rows start one above the first wanted row. `bias` is what the check found to hold on this GPU.
  */
+#ifndef SWEET_FIELDS_WAIT
+/*
+ * 0: the flush is the end of it. The kernel's submit returns once the GPU has finished, so
+ * waiting on a fence afterwards only added a second trip through the kernel to every frame.
+ */
+#define SWEET_FIELDS_WAIT 0
+#endif
+
 static void
 sweet_fields_blit(struct eagl *e, unsigned panel, int bias)
 {
+	static unsigned logged;
+	struct sweet_gpu_calls before, after;
+	uint64_t started = now_us(), waited = 0;
 	GLint draw = 0, box[4] = { 0, 0, 0, 0 };
 	GLboolean scissored = glIsEnabled(GL_SCISSOR_TEST);
+
+	sweet_gpu_calls_sample(&before);
 
 	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
 	glGetIntegerv(GL_SCISSOR_BOX, box);
@@ -564,7 +577,18 @@ sweet_fields_blit(struct eagl *e, unsigned panel, int bias)
 	glScissor(box[0], box[1], box[2], box[3]);
 	(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
 	glFlush();
-	(void)sweet_probe_sync();
+#if SWEET_FIELDS_WAIT
+	waited = sweet_probe_sync();
+#endif
+	sweet_gpu_calls_sample(&after);
+	if (logged++ % 300 == 0) {
+		say("SWEET DIRECT: fields %llu us: submit %u in %llu us, wait %u in %llu us, prep %u in %llu us, "
+		    "map %u in %llu us, fence %llu us\n", (unsigned long long)(now_us() - started),
+		    after.submits - before.submits, (unsigned long long)(after.submit_us - before.submit_us),
+		    after.waits - before.waits, (unsigned long long)(after.wait_us - before.wait_us),
+		    after.cpu_preps - before.cpu_preps, (unsigned long long)(after.cpu_prep_us - before.cpu_prep_us),
+		    after.maps - before.maps, (unsigned long long)(after.map_us - before.map_us), (unsigned long long)waited);
+	}
 }
 
 /* A black or one-colour frame would pass any comparison: it proves nothing. */

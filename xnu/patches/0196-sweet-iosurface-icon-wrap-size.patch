@@ -1,0 +1,47 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -77,6 +77,7 @@ static SweetSurface *sweet_surface_table[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_users[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_next_id = 1;
+ static uint32_t      sweet_surface_creates_logged;
++static uint32_t      sweet_surface_wrap_failures;  /* failed creates; the log thins out after 32 */
+ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+ #define SWEET_SURFACE_WIRED_MAX         (1536ull << 20)
+ 
+@@ -833,7 +834,21 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 		if (given != NULL && given->unsigned64BitValue() >= size) {
+ 			size = given->unsigned64BitValue();
+ 		}
+-		ret = wrapTaskMemory(s, client->unsigned64BitValue(), size);
++		uint64_t address = client->unsigned64BitValue();
++		uint64_t needed = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * s->height;
++		ret = wrapTaskMemory(s, address, size);
++		/*
++		 * IconServices pictures start 32 bytes into a mapping that ends right after the
++		 * last row: the rounded allocation size runs into the next, unmapped page.
++		 */
++		if (ret == kIOReturnVMError && needed != 0 && needed < size) {
++			ret = wrapTaskMemory(s, address, needed);
++		}
++		if (ret != kIOReturnSuccess && sweet_surface_wrap_failures < 8) {
++			IOLog("SWEET SURF: wrap at address failed: page offset 0x%llx size %llu needed %llu -> 0x%x\n",
++			    (unsigned long long)(address & PAGE_MASK_64), (unsigned long long)size,
++			    (unsigned long long)needed, ret);
++		}
+ 	} else if (ret == kIOReturnSuccess) {
+ 		IOBufferMemoryDescriptor *mem = NULL;
+ 		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+@@ -853,7 +868,12 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 			}
+ 		}
+ 	}
+-	if (ret != kIOReturnSuccess || sweet_surface_creates_logged < 64) {
++	bool failure_logged = false;
++	if (ret != kIOReturnSuccess) {
++		uint32_t failures = sweet_surface_wrap_failures++;
++		failure_logged = failures < 32 || (failures & 1023u) == 0;
++	}
++	if (failure_logged || (ret == kIOReturnSuccess && sweet_surface_creates_logged < 64)) {
+ 		char name[32];
+ 		proc_selfname(name, sizeof(name));
+ 		sweet_surface_creates_logged++;

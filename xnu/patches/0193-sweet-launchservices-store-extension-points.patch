@@ -1,0 +1,18 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -605,6 +605,15 @@ sweet_promote_staged_apps(void)
+ 	int stores = sweet_kernel_rename_below("/private/var/mobile/Containers/Data/InternalDaemon",
+ 	    "Library/Caches/com.apple.LaunchServices-4035-v2.csstore", ".sweet-before-apps");
+ 	printf("SWEET APPS: LaunchServices stores set aside=%d\n", stores);
++
++	/*
++	 * Until 0192 ExtensionKit could not read its extension point cache, so the store
++	 * rebuilt above holds 1 of the 523 extensions on disk (no poster, no widget). Set it
++	 * aside once more so lsd registers them against the extension points it now knows.
++	 */
++	stores = sweet_kernel_rename_below("/private/var/mobile/Containers/Data/InternalDaemon",
++	    "Library/Caches/com.apple.LaunchServices-4035-v2.csstore", ".sweet-before-extpoints");
++	printf("SWEET APPS: LaunchServices stores set aside for extension points=%d\n", stores);
+ }
+ #endif
+ 

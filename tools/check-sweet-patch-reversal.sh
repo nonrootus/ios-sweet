@@ -67,7 +67,7 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.c
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0186-sweet-iosurface-empty-picture-evidence.patch"
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0187-sweet-iosurface-create-at-address.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c --exclude=bsd/vfs/vfs_syscalls.c "$GITHUB_WORKSPACE/xnu/patches/0188-sweet-promote-staged-apps.patch"
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0189-sweet-launchservices-store-once.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0189-sweet-launchservices-store-once.patch"
 # 0190: sweetgmudcvs=N picks GPU level N; levels 1..7 with stock bus levels.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0190-sweet-gpu-level-request.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GMU DCVS: requested index=' > /dev/null
@@ -77,3 +77,5 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 # 0192: the AMFI policy answers the boot-arg state query (0x60).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0192-sweet-amfi-bootarg-state.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: boot-arg state query from' > /dev/null
+# 0193: one more LaunchServices rebuild, for the extension points 0192 brings.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0193-sweet-launchservices-store-extension-points.patch"

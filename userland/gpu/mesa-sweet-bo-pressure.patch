@@ -1,0 +1,141 @@
+--- a/src/freedreno/drm/freedreno_priv.h
++++ b/src/freedreno/drm/freedreno_priv.h
+@@ -113,6 +113,7 @@
+    simple_mtx_t lock;
+    struct fd_bo_bucket cache_bucket[14 * 4];
+    int num_buckets;
++   uint32_t cached_bytes, cache_limit;
+    time_t time;
+ };
+ 
+--- a/src/freedreno/drm/freedreno_bo.c
++++ b/src/freedreno/drm/freedreno_bo.c
+@@ -142,8 +142,16 @@
+       return bo;
+ 
+    bo = dev->funcs->bo_new(dev, size, flags);
+-   if (!bo)
+-      return NULL;
++   if (!bo) {
++      /* Sweet's pinned pool cannot reclaim buffers while Mesa owns them. */
++      static int pressure_retries;
++      fd_device_purge(dev);
++      bo = dev->funcs->bo_new(dev, size, flags);
++      if (p_atomic_inc_return(&pressure_retries) <= 8)
++         mesa_logi("SWEET BO: pressure retry size=%u recovered=%d", size, bo != NULL);
++      if (!bo)
++         return NULL;
++   }
+ 
+    simple_mtx_lock(&table_lock);
+    /* add ourself into the handle table: */
+--- a/src/freedreno/drm/freedreno_bo_cache.c
++++ b/src/freedreno/drm/freedreno_bo_cache.c
+@@ -19,8 +19,10 @@
+    } while (0)
+ 
+ static void
+-bo_remove_from_bucket(struct fd_bo_bucket *bucket, struct fd_bo *bo)
+-{
++bo_remove_from_bucket(struct fd_bo_cache *cache, struct fd_bo_bucket *bucket,
++                      struct fd_bo *bo)
++{
++   cache->cached_bytes -= bo->size;
+    list_delinit(&bo->node);
+    bucket->count--;
+ }
+@@ -95,6 +97,8 @@
+    unsigned long size, cache_max_size = 64 * 1024 * 1024;
+ 
+    cache->name = name;
++   cache->cached_bytes = 0;
++   cache->cache_limit = (coarse ? 8u : 24u) * 1024 * 1024;
+    simple_mtx_init(&cache->lock, mtx_plain);
+ 
+    /* OK, so power of two buckets was too wasteful of memory.
+@@ -127,14 +131,16 @@
+ {
+    int i, cnt = 0;
+ 
+-   if (cache->time == time)
++   struct list_head freelist;
++
++   list_inithead(&freelist);
++
++   simple_mtx_lock(&cache->lock);
++   if (time && cache->time == time) {
++      simple_mtx_unlock(&cache->lock);
+       return;
+-
+-   struct list_head freelist;
+-
+-   list_inithead(&freelist);
+-
+-   simple_mtx_lock(&cache->lock);
++   }
++   cache->time = time;
+    for (i = 0; i < cache->num_buckets; i++) {
+       struct fd_bo_bucket *bucket = &cache->cache_bucket[i];
+       struct fd_bo *bo;
+@@ -152,7 +158,7 @@
+          }
+ 
+          VG_BO_OBTAIN(bo);
+-         bo_remove_from_bucket(bucket, bo);
++         bo_remove_from_bucket(cache, bucket, bo);
+          bucket->expired++;
+          list_addtail(&bo->node, &freelist);
+          fd_alloc_log(bo, FD_ALLOC_CACHE, FD_ALLOC_NONE);
+@@ -169,7 +175,6 @@
+       dump_cache_stats(cache);
+    }
+ 
+-   cache->time = time;
+ }
+ 
+ static struct fd_bo_bucket *
+@@ -191,7 +196,8 @@
+ }
+ 
+ static struct fd_bo *
+-find_in_bucket(struct fd_bo_bucket *bucket, uint32_t flags)
++find_in_bucket(struct fd_bo_cache *cache, struct fd_bo_bucket *bucket,
++               uint32_t flags)
+ {
+    struct fd_bo *bo = NULL;
+ 
+@@ -208,7 +214,7 @@
+       }
+       if (entry->alloc_flags == flags) {
+          bo = entry;
+-         bo_remove_from_bucket(bucket, bo);
++         bo_remove_from_bucket(cache, bucket, bo);
+          break;
+       }
+    }
+@@ -235,7 +241,7 @@
+    if (bucket) {
+       *size = bucket->size;
+       simple_mtx_lock(&cache->lock);
+-      bo = find_in_bucket(bucket, flags);
++      bo = find_in_bucket(cache, bucket, flags);
+       simple_mtx_unlock(&cache->lock);
+       if (bo) {
+          VG_BO_OBTAIN(bo);
+@@ -280,9 +286,14 @@
+       clock_gettime(CLOCK_MONOTONIC, &time);
+ 
+       bo->free_time = time.tv_sec;
++
++      simple_mtx_lock(&cache->lock);
++      if (bo->size > cache->cache_limit - cache->cached_bytes) {
++         simple_mtx_unlock(&cache->lock);
++         return -1;
++      }
+       VG_BO_RELEASE(bo);
+-
+-      simple_mtx_lock(&cache->lock);
++      cache->cached_bytes += bo->size;
+       list_addtail(&bo->node, &bucket->list);
+       bucket->count++;
+       simple_mtx_unlock(&cache->lock);

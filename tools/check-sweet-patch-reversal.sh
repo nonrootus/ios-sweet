@@ -96,3 +96,6 @@ cp "dxb/xnu/$memory_file" "$surface_check/$memory_file"
 git -C "$surface_check" apply --reverse --include="$surface_file" --include="$memory_file" "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
 git -C "$surface_check" apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0196-sweet-iosurface-icon-wrap-size.patch"
 git -C "$surface_check" apply --reverse --check --include="$memory_file" "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
+
+# 0198: the complete Mesa and EAGL replacement fits in the renderer RAM disk.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0198-sweet-mesa-renderer-overlay.patch"

@@ -48,6 +48,7 @@ tar -xf "$tarball" -C "$work"
 for patch in "$stage"/userland/mesa/*.patch; do
     patch -d "$mesa" -p1 --batch < "$patch"
 done
+patch -d "$mesa" -p1 --batch < "$repo/userland/gpu/mesa-sweet-bo-pressure.patch"
 cp -R "$stage/userland/mesa/redwood-drm" "$mesa/src/"
 python3 - "$mesa/src/redwood-drm/redwood_drm.c" "$stage/userland/gpu/eagl.c" <<'PY'
 from pathlib import Path

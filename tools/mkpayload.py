@@ -181,10 +181,10 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, renderer_disk_path=
         renderer_size = 0
         if renderer_disk_path:
             with open(renderer_disk_path, 'rb') as renderer:
-                renderer_image = renderer.read((4 << 20) + 1)
+                renderer_image = renderer.read((24 << 20) + 1)
             renderer_size = len(renderer_image)
-            if not (1 << 20) <= renderer_size <= (4 << 20) or renderer_size % PAGE:
-                raise ValueError('the renderer disk must be page-aligned and 1 to 4 MiB')
+            if not (1 << 20) <= renderer_size <= (24 << 20) or renderer_size % PAGE:
+                raise ValueError('the renderer disk must be page-aligned and 1 to 24 MiB')
             image = image.ljust(rd_size, b'\0') + renderer_image
         rd_va = kernel_end
         kernel_end = rd_va + rd_size + renderer_size

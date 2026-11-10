@@ -1,0 +1,20 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -509,7 +509,7 @@
+ 	}
+ 	const boot_args *args = PE_state.bootArgs;
+ 	if (args == NULL || disk[0] < args->physBase || disk[0] >= args->topOfKernelData ||
+-	    disk[1] < (1u << 20) || disk[1] > (4u << 20) ||
++	    disk[1] < (1u << 20) || disk[1] > (24u << 20) ||
+ 	    ((disk[0] | disk[1]) & PAGE_MASK) != 0 || disk[1] > args->topOfKernelData - disk[0] ||
+ 	    firmware[0] >= disk[0] || firmware[1] != disk[0] - firmware[0]) {
+ 		printf("SWEET CA: invalid renderer RAM disk range\n");
+@@ -524,7 +524,7 @@
+ 		return;
+ 	}
+ 
+-	/* Only the replacement library is present. Other files resolve below it. */
++	/* Replacement renderer libraries shadow the matching files on the root volume. */
+ 	int error = kernel_mount("hfs", NULLVP, NULLVP, "/sweet/lib", "/dev/md1", 0,
+ 	    MNT_RDONLY | MNT_UNION | MNT_NOSUID | MNT_NODEV,
+ 	    KERNEL_MOUNT_SWEET_DISK, vfs_context_kernel());

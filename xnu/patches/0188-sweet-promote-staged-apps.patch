@@ -1,0 +1,109 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -532,6 +532,73 @@ sweet_mount_renderer_disk(void)
+ }
+ #endif
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/errno.h>
++/*
++ * iOS installs these from /private/var/staged_system_apps on its first boot. On sweet that
++ * never happened, and the home screen has three apps. Before launchd, so LaunchServices finds
++ * them in /Applications like the other system apps: same-volume renames that never replace
++ * anything, so a second boot finds nothing to do.
++ */
++static void
++sweet_promote_staged_apps(void)
++{
++	static const char *const apps[] = {
++		"AppleTV.app",
++		"Books.app",
++		"Bridge.app",
++		"Calculator.app",
++		"Compass.app",
++		"Contacts.app",
++		"FaceTime.app",
++		"Files.app",
++		"FindMy.app",
++		"Fitness.app",
++		"Freeform.app",
++		"Health.app",
++		"Home.app",
++		"Magnifier.app",
++		"Maps.app",
++		"Measure.app",
++		"MobileCal.app",
++		"MobileMail.app",
++		"MobileNotes.app",
++		"MobileStore.app",
++		"MobileTimer.app",
++		"Music.app",
++		"News.app",
++		"Passbook.app",
++		"Podcasts.app",
++		"Reminders.app",
++		"SequoiaTranslator.app",
++		"Shortcuts.app",
++		"Stocks.app",
++		"Tips.app",
++		"VoiceMemos.app",
++		"Weather.app",
++	};
++	extern int sweet_kernel_rename(const char *from, const char *to);
++	char from[96], to[80];
++	unsigned moved = 0, absent = 0, kept = 0, failed = 0;
++
++	for (unsigned i = 0; i < sizeof(apps) / sizeof(apps[0]); i++) {
++		snprintf(from, sizeof(from), "/private/var/staged_system_apps/%s", apps[i]);
++		snprintf(to, sizeof(to), "/Applications/%s", apps[i]);
++		int error = sweet_kernel_rename(from, to);
++		if (error == 0) {
++			moved++;
++		} else if (error == ENOENT) {
++			absent++;
++		} else if (error == EEXIST) {
++			kept++;
++		} else if (failed++ < 4) {
++			printf("SWEET APPS: %s rc=%d\n", apps[i], error);
++		}
++	}
++	printf("SWEET APPS: staged system apps moved=%u absent=%u kept=%u failed=%u\n", moved, absent, kept, failed);
++}
++#endif
++
+ void
+ bsd_init(void)
+ {
+@@ -1064,6 +1131,9 @@ bsd_init(void)
+ #if defined(ARM64_BOARD_CONFIG_SWEET) && DEVFS && CONFIG_UNION_MOUNTS
+ 	sweet_mount_renderer_disk();
+ #endif
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	sweet_promote_staged_apps();
++#endif
+ 
+ #if CONFIG_BASESYSTEMROOT
+ #if CONFIG_IMAGEBOOT
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -8931,6 +8931,20 @@ rename_submounts_callback(mount_t mp, void *arg)
+ 	return error;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++static int renameat_internal(vfs_context_t ctx, int fromfd, user_addr_t from,
++    int tofd, user_addr_t to, int segflg, u_int uflags);
++int sweet_kernel_rename(const char *from, const char *to);
++
++/* bsd_init: a rename by kernel paths that never replaces the destination. */
++int
++sweet_kernel_rename(const char *from, const char *to)
++{
++	return renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
++	           AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL);
++}
++#endif
++
+ /*
+  * Rename files.  Source and destination must either both be directories,
+  * or both not be directories.  If target is a directory, it must be empty.

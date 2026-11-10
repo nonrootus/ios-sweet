@@ -1,0 +1,29 @@
+--- a/bsd/dev/sweet_a618_render_pool.h
++++ b/bsd/dev/sweet_a618_render_pool.h
+@@ -6,22 +6,22 @@ extern "C" {
+ #endif
+ #include "sweet_a618_address_space.h"
+ 
+-/* 128 MiB of already pinned, Normal-NC memory. The tree is built before the
++/* 256 MiB of already pinned, Normal-NC memory. The tree is built before the
+  * GPU context is installed; no live SMMU leaf replacement or TLB invalidation.
+  * The first page of each 2 MiB window belongs to the same pool as the rest. */
+ #define SWEET_A618_RENDER_IOVA UINT32_C(0x48000000)
+-#define SWEET_A618_RENDER_TABLES 64u
++#define SWEET_A618_RENDER_TABLES 128u
+ #define SWEET_A618_RENDER_PAGES (SWEET_A618_RENDER_TABLES * 512u)
+ #define SWEET_A618_RENDER_BYTES (SWEET_A618_RENDER_PAGES * 4096u)
+ 
+ /* The panel's memory, for writing a frame to it with the GPU. It is mapped once,
+  * while the tree is built, and never changed. One page past the panel's rows,
+  * because the odd field's buffer starts 4288 bytes in. */
+-#define SWEET_A618_PANEL_IOVA UINT32_C(0x50000000)
++#define SWEET_A618_PANEL_IOVA UINT32_C(0x58000000)
+ #define SWEET_A618_PANEL_PA UINT64_C(0x9c000000)
+ #define SWEET_A618_PANEL_PAGES 2533u
+ #define SWEET_A618_PANEL_TABLES 5u
+-#define SWEET_A618_PANEL_L2 128u
++#define SWEET_A618_PANEL_L2 192u
+ 
+ /* The base tree has already been built and verified. Every new table must be
+  * zero and privately owned. On preflight failure no table is modified. */

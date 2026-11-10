@@ -145,6 +145,7 @@ PATCHES += (('xnu/patches/0190-sweet-gpu-level-request.patch', {
     'bsd/dev/sweet_gmu_board_profile.h', 'bsd/dev/sweet_gmu_board_profile.c',
     'bsd/dev/sweet_gmu_dcvs.h', 'bsd/dev/sweet_gmu_dcvs.c', 'bsd/dev/sweet_gpu_probe.c',
     'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
+PATCHES += (('xnu/patches/0195-sweet-a618-render-pool-256m.patch', {'bsd/dev/sweet_a618_render_pool.h'}),)
 
 
 def main():

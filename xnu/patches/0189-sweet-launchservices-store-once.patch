@@ -1,0 +1,102 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -596,6 +596,15 @@ sweet_promote_staged_apps(void)
+ 		}
+ 	}
+ 	printf("SWEET APPS: staged system apps moved=%u absent=%u kept=%u failed=%u\n", moved, absent, kept, failed);
++
++	/*
++	 * lsd keeps the store it built before the apps were moved, and registers nothing new.
++	 * Set it aside once: a rebuilt store has the same name, and the rename never replaces.
++	 */
++	extern int sweet_kernel_rename_below(const char *dir, const char *rest, const char *suffix);
++	int stores = sweet_kernel_rename_below("/private/var/mobile/Containers/Data/InternalDaemon",
++	    "Library/Caches/com.apple.LaunchServices-4035-v2.csstore", ".sweet-before-apps");
++	printf("SWEET APPS: LaunchServices stores set aside=%d\n", stores);
+ }
+ #endif
+ 
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -8943,6 +8943,81 @@ sweet_kernel_rename(const char *from, const char *to)
+ 	return renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
+ 	           AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL);
+ }
++
++int sweet_kernel_rename_below(const char *dir, const char *rest, const char *suffix);
++
++/*
++ * bsd_init: for each directory D in dir, rename dir/D/rest to the same name plus suffix,
++ * never replacing anything. Returns how many were renamed, or minus an error.
++ */
++int
++sweet_kernel_rename_below(const char *dir, const char *rest, const char *suffix)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t dvp = NULLVP;
++	const size_t bufsize = 8192;
++	char *buf = NULL, *from = NULL, *to = NULL;
++	int renamed = 0, eof = 0, numdirent = 0;
++	off_t offset = 0;
++	int error = vnode_lookup(dir, 0, &dvp, ctx);
++
++	if (error != 0) {
++		return -error;
++	}
++	buf = kalloc_data(bufsize, Z_WAITOK);
++	from = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	to = kalloc_data(MAXPATHLEN, Z_WAITOK);
++	if (buf == NULL || from == NULL || to == NULL) {
++		error = ENOMEM;
++	}
++	for (unsigned rounds = 0; error == 0 && !eof && rounds < 64; rounds++) {
++		uio_t auio = uio_create(1, offset, UIO_SYSSPACE, UIO_READ);
++
++		if (auio == NULL) {
++			error = ENOMEM;
++			break;
++		}
++		uio_addiov(auio, (uintptr_t)buf, bufsize);
++		error = VNOP_READDIR(dvp, auio, 0, &eof, &numdirent, ctx);
++		size_t used = bufsize - (size_t)uio_resid(auio);
++		offset = uio_offset(auio);
++		uio_free(auio);
++		if (error != 0 || used == 0) {
++			break;
++		}
++		char *at = buf;
++		while (at + offsetof(struct dirent, d_name) <= buf + used) {
++			struct dirent *dep = (struct dirent *)at;
++
++			if (dep->d_reclen == 0 || at + dep->d_reclen > buf + used ||
++			    offsetof(struct dirent, d_name) + dep->d_namlen > dep->d_reclen) {
++				break;
++			}
++			bool dots = (dep->d_namlen == 1 && dep->d_name[0] == '.') ||
++			    (dep->d_namlen == 2 && dep->d_name[0] == '.' && dep->d_name[1] == '.');
++			if (dep->d_type == DT_DIR && !dots) {
++				snprintf(from, MAXPATHLEN, "%s/%.*s/%s", dir, (int)dep->d_namlen, dep->d_name, rest);
++				snprintf(to, MAXPATHLEN, "%s%s", from, suffix);
++				if (renameat_internal(ctx, AT_FDCWD, CAST_USER_ADDR_T(from), AT_FDCWD,
++				    CAST_USER_ADDR_T(to), UIO_SYSSPACE, VFS_RENAME_EXCL) == 0) {
++					renamed++;
++				}
++			}
++			at += dep->d_reclen;
++		}
++	}
++	if (buf != NULL) {
++		kfree_data(buf, bufsize);
++	}
++	if (from != NULL) {
++		kfree_data(from, MAXPATHLEN);
++	}
++	if (to != NULL) {
++		kfree_data(to, MAXPATHLEN);
++	}
++	vnode_put(dvp);
++	return error != 0 ? -error : renamed;
++}
+ #endif
+ 
+ /*

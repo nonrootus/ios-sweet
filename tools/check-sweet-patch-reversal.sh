@@ -66,4 +66,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0184-sweet
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0185-sweet-iosurface-wrap-client.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0186-sweet-iosurface-empty-picture-evidence.patch"
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0187-sweet-iosurface-create-at-address.patch"
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0188-sweet-promote-staged-apps.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c --exclude=bsd/vfs/vfs_syscalls.c "$GITHUB_WORKSPACE/xnu/patches/0188-sweet-promote-staged-apps.patch"
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0189-sweet-launchservices-store-once.patch"

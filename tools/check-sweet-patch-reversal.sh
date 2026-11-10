@@ -80,7 +80,7 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 # 0193: one more LaunchServices rebuild, for the extension points 0192 brings.
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0193-sweet-launchservices-store-extension-points.patch"
 # 0194: the AppleMobileFileIntegrity IOKit service vouches for cdhashes; one more store rebuild.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0194-sweet-amfi-iokit-service.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0194-sweet-amfi-iokit-service.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: AppleMobileFileIntegrity service registered' > /dev/null
 # 0195: 256 MiB render pool, panel GPU VA 0x58000000.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0195-sweet-a618-render-pool-256m.patch"
@@ -99,3 +99,5 @@ git -C "$surface_check" apply --reverse --check --include="$memory_file" "$GITHU
 
 # 0198: the complete Mesa and EAGL replacement fits in the renderer RAM disk.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0198-sweet-mesa-renderer-overlay.patch"
+# 0199: the dark-mode preference set aside once (SpringBoard crashed in CoreImage GL).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0199-sweet-dark-mode-preference-aside.patch"

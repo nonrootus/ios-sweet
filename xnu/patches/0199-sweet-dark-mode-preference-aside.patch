@@ -1,0 +1,20 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -623,6 +623,17 @@ sweet_promote_staged_apps(void)
+ 	stores = sweet_kernel_rename_below("/private/var/mobile/Containers/Data/InternalDaemon",
+ 	    "Library/Caches/com.apple.LaunchServices-4035-v2.csstore", ".sweet-before-amfi-service");
+ 	printf("SWEET APPS: LaunchServices stores set aside for the AMFI service=%d\n", stores);
++
++	/*
++	 * Dark mode makes SpringBoard's lock screen style a Control Center hint through CoreImage,
++	 * which without Metal takes Apple's OpenGL ES path, whose functions are missing here: it
++	 * crashed at every start. Set the preference aside once; the default is light.
++	 */
++	extern int sweet_kernel_rename(const char *from, const char *to);
++	int style = sweet_kernel_rename(
++	    "/private/var/mobile/Library/Preferences/com.apple.uikitservices.userInterfaceStyleMode.plist",
++	    "/private/var/mobile/Library/Preferences/com.apple.uikitservices.userInterfaceStyleMode.plist.sweet-dark");
++	printf("SWEET APPS: dark mode preference set aside rc=%d\n", style);
+ }
+ #endif
+ 

@@ -141,6 +141,10 @@ PATCHES += (('xnu/patches/0182-sweet-a618-direct-panel.patch', {
     'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 PATCHES += (('xnu/patches/0184-sweet-direct-frames-stay-on-panel.patch', {
     'iokit/Kernel/arm/SweetAdreno.cpp'}),)
+PATCHES += (('xnu/patches/0190-sweet-gpu-level-request.patch', {
+    'bsd/dev/sweet_gmu_board_profile.h', 'bsd/dev/sweet_gmu_board_profile.c',
+    'bsd/dev/sweet_gmu_dcvs.h', 'bsd/dev/sweet_gmu_dcvs.c', 'bsd/dev/sweet_gpu_probe.c',
+    'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 
 
 def main():

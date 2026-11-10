@@ -9,7 +9,8 @@
 #define DCVS_REQUEST (1u<<23)
 #define DCVS_ACK (1u<<31)
 #define DCVS_CLEAR (1u<<31)
-#define DCVS_PERF_MINIMUM 0x30000001u /* ATLEAST3, profile index1 */
+#define DCVS_PERF_ATLEAST(index) (0x30000000u|((index)&0xffu)) /* FREQ_VOTE(index, ATLEAST3) */
+#define DCVS_BW_LEVEL(level) ((((level)&0xfffu)<<12)|((level)&0xfffu)) /* BW_VOTE(level) */
 #define DCVS_BW_UNCHANGED 0x000ff0ffu /* INVALID0xff in both12bit fields */
 static int rd(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,uint32_t a,uint32_t *v)
 {
@@ -34,7 +35,7 @@ static int health(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot
 }
 int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,
     const struct sweet_gmu_postboot_state *p,const struct sweet_gmu_config_state *c,
-    const struct sweet_hfi_transport *t,const struct sweet_gmu_board_profile *b)
+    const struct sweet_hfi_transport *t,const struct sweet_gmu_board_profile *b,unsigned gpu_index)
 {
     if(!s || !o || !p || !c || !t || !b || !o->read32 || !o->write32 || !o->barrier ||
         !o->delay_us || !o->check || s->attempted)return -1;
@@ -45,13 +46,20 @@ int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_po
         p->session_transport_ctx!=t->ctx || p->session_barrier!=t->barrier || p->session_doorbell!=t->doorbell ||
         p->session_ops.ctx!=o->ctx || p->session_ops.read32!=o->read32 || p->session_ops.write32!=o->write32 ||
         p->session_ops.barrier!=o->barrier || p->session_ops.delay_us!=o->delay_us || p->session_ops.check!=o->check ||
-        b->initial_gpu_index!=1 || b->max_requested_gpu_index!=1 || b->perf.gpu_count!=8 ||
-        b->perf.gpu[1].frequency_khz!=180000 || b->perf.gpu[1].vote!=p->vote)return -3;
+        b->initial_gpu_index!=1 || b->max_requested_gpu_index!=7 || b->perf.gpu_count!=8 ||
+        b->perf.gpu[1].frequency_khz!=180000 || b->perf.gpu[1].vote!=p->vote ||
+        gpu_index<1 || gpu_index>b->max_requested_gpu_index || !b->perf.gpu[gpu_index].frequency_khz ||
+        (gpu_index>1 && (b->gpu_bus_level[gpu_index]<b->initial_bw_level ||
+        b->gpu_bus_level[gpu_index]>=b->bw.levels)))return -3;
+    s->gpu_index=gpu_index;
+    s->bw_level=gpu_index>1?b->gpu_bus_level[gpu_index]:0;
+    s->perf_setting=DCVS_PERF_ATLEAST(gpu_index);
+    s->bw_setting=gpu_index>1?DCVS_BW_LEVEL(s->bw_level):DCVS_BW_UNCHANGED;
     int rc=health(s,o);if(rc)return rc;
     if(s->host_irq&DCVS_ACK)return -3; /* reject a stale completion */
     rc=wr(s,o,DCVS_ACK_OPTION,0);if(rc)return rc;
-    rc=wr(s,o,DCVS_PERF_SETTING,DCVS_PERF_MINIMUM);if(rc)return rc;
-    rc=wr(s,o,DCVS_BW_SETTING,DCVS_BW_UNCHANGED);if(rc)return rc;
+    rc=wr(s,o,DCVS_PERF_SETTING,s->perf_setting);if(rc)return rc;
+    rc=wr(s,o,DCVS_BW_SETTING,s->bw_setting);if(rc)return rc;
     rc=health(s,o);if(rc)return rc;
     if(s->host_irq&DCVS_ACK)return -3;
     s->request_attempted=1;

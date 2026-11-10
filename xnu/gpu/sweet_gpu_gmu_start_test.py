@@ -385,8 +385,8 @@ int main(){
   post_writes=writes;assert(sweet_gpu_gmu_configure(167)==-1 && writes==post_writes);retained();
  }
 
- reset();assert(sweet_gpu_gmu_dcvs_start()==-3 && !writes);
- assert(sweet_gpu_gmu_dcvs_start()==-1);
+ reset();assert(sweet_gpu_gmu_dcvs_start(1)==-3 && !writes);
+ assert(sweet_gpu_gmu_dcvs_start(1)==-1);
  for(unsigned mode=0;mode<10;mode++){
   reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
   assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167));
@@ -400,7 +400,7 @@ int main(){
   if(mode==7)gmu_full[0x14648/4]|=4;
   if(mode==8)probe.transport.poisoned=1;
   if(mode==9)dcvs_sticky=true;
-  int rc=sweet_gpu_gmu_dcvs_start();
+  int rc=sweet_gpu_gmu_dcvs_start(1);
   if(mode==0 && (rc || writes!=prior_writes+6))fprintf(stderr,"DCVS model rc=%d writes=%u delta=%u log=%s\n",rc,writes,writes-prior_writes,messages.c_str());
   if(mode==0){
    assert(!rc && writes==prior_writes+6 && probe.dcvs.acked && probe.dcvs.return_valid);
@@ -412,7 +412,7 @@ int main(){
   else assert(rc && writes==prior_writes && !probe.dcvs.request_attempted);
   if(mode<3)assert(probe.dcvs.response_clear_attempted && probe.dcvs.request_clear_attempted);
   assert(!memcmp(prior_hfi,hfi_words,sizeof(hfi_words)) && probe.transport.tx_closed);
-  prior_writes=writes;assert(sweet_gpu_gmu_dcvs_start()==-1 && writes==prior_writes);
+  prior_writes=writes;assert(sweet_gpu_gmu_dcvs_start(1)==-1 && writes==prior_writes);
   retained();
  }
 
@@ -420,7 +420,7 @@ int main(){
  assert(sweet_gpu_a618_prepare()==-1);
  for(unsigned mode=0;mode<34;mode++){
   reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   unsigned prior_writes=writes;
   if(mode==1)dcvs_succeeded=false;
   if(mode==2)idle_enable=1;
@@ -464,14 +464,14 @@ int main(){
  }
  for(unsigned bad=0;bad<a618_register_count;bad++){
   reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   gpu_regs[a618_snapshot_regs[bad].dword]=UINT32_MAX;unsigned prior_writes=writes;
   assert(sweet_gpu_a618_prepare()==-2 && gpu_reads==bad+1 && !a618_preparation.prepared);
   assert(writes==prior_writes && prep_creates==4 && prep_clean==18);retained();
  }
  for(unsigned bad=1;bad<=21;bad++){
   reset();assert(!run());post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   prep_check_active=true;prep_fail_guard=bad;unsigned prior_writes=writes;
   assert(sweet_gpu_a618_prepare()==-3 && !a618_preparation.prepared && prep_guard_reads==bad);
   assert(gpu_reads==(bad<=2?0:bad-3) && writes==prior_writes);
@@ -499,7 +499,7 @@ int main(){
   assert(smmu[0x804/4]==0x80000000 && smmu[0xc04/4]==0x301 && smmu[0x9024/4]==0x20001);
   assert(gpu_smmu_writes==14 && prep_creates==5 && prep_clean==21);
   post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   unsigned prior_writes=writes,prior_cleans=prep_clean;
   assert(!sweet_gpu_a618_mapping_verify() && a618_mapping.observations==3);
   assert(writes==prior_writes && prep_clean==prior_cleans && gpu_reads==18);
@@ -517,7 +517,7 @@ int main(){
  assert(a618_mapping.tables[2].cpu[0x22]==(0x105040000ull | 0x60000000000e43ull));
  assert(a618_mapping.tables[2].cpu[0x20]==(0x105020000ull | 0x60000000000e03ull));
  post_active=post_compact_ack=true;post_gx_status=0x28;
- assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+ assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
  assert(!sweet_gpu_a618_mapping_verify() && a618_mapping.observations==3);retained();
  reset();cold_map_enabled=true;prep_create_fail=5;
  assert(run(1)!=0 && !released && !gpu_smmu_writes && !a618_mapping.pinned);retained();
@@ -525,7 +525,7 @@ int main(){
  for(unsigned mode=0;mode<7;mode++){
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   assert(!sweet_gpu_a618_mapping_verify());
   if(mode==4)gpu_regs[0x84f]=UINT32_MAX;
   if(mode==6)gmu_full[0x14648/4]|=1u<<24;
@@ -542,7 +542,7 @@ int main(){
  for(unsigned mode=0;mode<28;mode++){
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   assert(!sweet_gpu_a618_mapping_verify());cp_mode=mode;
   if(mode==1)gpu_regs[0x3c46]=3;
   if(mode==6)gpu_regs[0xf800]=0x40000000;
@@ -594,7 +594,7 @@ int main(){
   pas_calls=pas_writes=0;
   reset();cold_map_enabled=true;assert(!run());
   post_active=post_compact_ack=true;post_gx_status=0x28;
-  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start());
+  assert(!sweet_gpu_gmu_hfi_start() && !sweet_gpu_gmu_configure(167) && !sweet_gpu_gmu_dcvs_start(1));
   assert(!sweet_gpu_a618_mapping_verify());
   gpu_regs[0xf400]=1;
   assert(sweet_gpu_a618_oob_probe(0,1)==-1 && !pas_calls);
@@ -626,7 +626,7 @@ int main(){
   assert(gpu_regs[0x3cc2]==(mode==4?0x2f2e2322u:0x12345678u));
   unsigned prior=writes;assert(sweet_gpu_a618_configure(167)==-1 && writes==prior);
   if(!rc){
-   assert(!sweet_gpu_gmu_dcvs_start() && !sweet_gpu_a618_mapping_verify());
+   assert(!sweet_gpu_gmu_dcvs_start(1) && !sweet_gpu_a618_mapping_verify());
    rc=sweet_gpu_a618_oob_probe(1);
    const bool ready=mode==1 || mode==5;
    assert((rc==0)==ready && cp_started==ready && gpu_oob_held==cp_started);

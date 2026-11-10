@@ -208,11 +208,11 @@ sweet_gpu_probe(void)
     if(requested_gpu_oob && (requested_gpu_oob!=1 || requested_mapping!=1)) {
         printf("SWEET A618 OOB: requires oob=1 map=1\n");return;
     }
-    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
-        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
+    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs<1 || requested_dcvs>7)) {
+        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1..7\n");return;
     }
-    if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
-        printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
+    if(requested_dcvs && (requested_dcvs<1 || requested_dcvs>7 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+        printf("SWEET GMU DCVS: requires dcvs=1..7 cfg=1 profile=167 hfi=1 start=1\n");return;
     }
     if((requested_config || selected_profile) &&
         (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
@@ -468,9 +468,9 @@ sweet_gpu_probe(void)
                                                                 sweet_gpu_a618_configure((unsigned)selected_profile) :
                                                                 sweet_gpu_gmu_configure((unsigned)selected_profile);
                                                             printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
-                                                            if(!config_rc && requested_dcvs==1) {
-                                                                extern int sweet_gpu_gmu_dcvs_start(void);
-                                                                int dcvs_rc=sweet_gpu_gmu_dcvs_start();
+                                                            if(!config_rc && requested_dcvs>=1) {
+                                                                extern int sweet_gpu_gmu_dcvs_start(unsigned);
+                                                                int dcvs_rc=sweet_gpu_gmu_dcvs_start((unsigned)requested_dcvs);
                                                                 printf("SWEET GMU DCVS: entry rc=%d\n",dcvs_rc);
                                                                 int prepare=0;
                                                                 PE_parse_boot_argn("sweetgpuprep",&prepare,sizeof(prepare));

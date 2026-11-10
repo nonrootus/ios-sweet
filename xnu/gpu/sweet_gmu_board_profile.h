@@ -3,12 +3,15 @@
 #include "sweet_hfi_perf.h"
 #include "sweet_hfi_bw.h"
 #define SWEET_GMU_RECOVERY167 167u
-/* Explicit recovery-matched operating profile, NOT a fuse result. The only
- * permitted frequency request is index1/180MHz until bins are verified. */
+/* Explicit recovery-matched operating profile, NOT a fuse result. Recovery's
+ * kgsl lists exactly bin 167's rates (180..800MHz), so requests up to
+ * index7/800MHz are permitted. gpu_bus_level[i] is bin 167's stock bus level
+ * for GMU index i, sent with a request for that index. */
 struct sweet_gmu_board_profile {
     struct sweet_hfi_perf_table perf;
     struct sweet_hfi_bw_table bw;
     unsigned initial_gpu_index, initial_bw_level, max_requested_gpu_index;
+    unsigned gpu_bus_level[8];
 };
 struct sweet_gmu_profile_ops {
     void *ctx;

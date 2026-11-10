@@ -79,7 +79,7 @@ int main(void){
   assert(!rh_lock);database[mutate[i]]^=1;
  }
  assert(!sweet_gmu_board_profile_build(&out,&ops,167) && !rh_lock);
- assert(out.initial_gpu_index==1 && out.initial_bw_level==4 && out.max_requested_gpu_index==1);
+ assert(out.initial_gpu_index==1 && out.initial_bw_level==4 && out.max_requested_gpu_index==7 && out.gpu_bus_level[1]==4 && out.gpu_bus_level[7]==11);
  struct sweet_hfi_perf_table p={0};struct sweet_hfi_bw_table b={0};
  SETUP
  assert(!memcmp(&out.perf,&p,sizeof(p)) && !memcmp(&out.bw,&b,sizeof(b)));

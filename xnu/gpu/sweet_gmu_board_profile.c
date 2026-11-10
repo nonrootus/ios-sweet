@@ -17,6 +17,8 @@ static const struct profile_opp gpu_opps[]={
     {650000u,321u,0x01400306u},
     {800000u,385u,0x01800407u},
 };
+/* Bin 167 qcom,bus-freq per GPU level, in GMU index order (index1 180MHz .. index7 800MHz). */
+static const unsigned gpu_bus_levels[8]={0u,4u,6u,7u,8u,9u,10u,11u};
 static const struct profile_opp gmu_opps[]={
     {0u,1u,0x00000000u},
     {200000u,49u,0x00400202u},
@@ -80,6 +82,7 @@ int sweet_gmu_board_profile_build(struct sweet_gmu_board_profile *out,
     prepared.bw.ddr_wait=prepared.bw.cnoc_wait=1;
     for(unsigned i=0;i<12;i++)for(unsigned j=0;j<3;j++)prepared.bw.ddr_data[i][j]=ddr_data[i][j];
     for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)prepared.bw.cnoc_data[i][j]=cnoc_data[i][j];
-    prepared.initial_gpu_index=1;prepared.initial_bw_level=4;prepared.max_requested_gpu_index=1;
+    prepared.initial_gpu_index=1;prepared.initial_bw_level=4;prepared.max_requested_gpu_index=7;
+    for(unsigned i=0;i<8;i++)prepared.gpu_bus_level[i]=gpu_bus_levels[i];
     *out=prepared;return 0;
 }

@@ -14,14 +14,18 @@ struct sweet_gmu_dcvs_state {
     unsigned service_pending, ack_after_clear, abandoned_request;
     int cleanup_error;
     uint32_t firmware_return, host_irq, ao_irq, gx_status, last_offset, last_value;
+    unsigned gpu_index, bw_level;
+    uint32_t perf_setting, bw_setting;
 };
 /*0: stock DCVS response accepted and clear writes completed; -1 invalid/repeated,
  *-2 I/O, -3 guard, -4 deadline, -5 hardware IRQ, -6 pending service, -7 firmware.
  *ack_after_clear records a late/sticky response and rejects success with -3,
  *after attempting the request-clear write. No retry is permitted. IRQ/GX
  *fields are the last health sample BEFORE request clear, not post-clear state. */
+/* gpu_index: GMU perf index 1..profile max. Index 1 leaves the bus unchanged;
+ * a higher index also asks for that level's stock bus level. */
 int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *,
     const struct sweet_gmu_postboot_ops *,const struct sweet_gmu_postboot_state *,
     const struct sweet_gmu_config_state *,const struct sweet_hfi_transport *,
-    const struct sweet_gmu_board_profile *);
+    const struct sweet_gmu_board_profile *,unsigned gpu_index);
 #endif

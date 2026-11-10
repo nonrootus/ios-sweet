@@ -1,0 +1,173 @@
+--- a/bsd/dev/sweet_gmu_board_profile.c
++++ b/bsd/dev/sweet_gmu_board_profile.c
+@@ -17,6 +17,8 @@ static const struct profile_opp gpu_opps[]={
+     {650000u,321u,0x01400306u},
+     {800000u,385u,0x01800407u},
+ };
++/* Bin 167 qcom,bus-freq per GPU level, in GMU index order (index1 180MHz .. index7 800MHz). */
++static const unsigned gpu_bus_levels[8]={0u,4u,6u,7u,8u,9u,10u,11u};
+ static const struct profile_opp gmu_opps[]={
+     {0u,1u,0x00000000u},
+     {200000u,49u,0x00400202u},
+@@ -80,6 +82,7 @@ int sweet_gmu_board_profile_build(struct sweet_gmu_board_profile *out,
+     prepared.bw.ddr_wait=prepared.bw.cnoc_wait=1;
+     for(unsigned i=0;i<12;i++)for(unsigned j=0;j<3;j++)prepared.bw.ddr_data[i][j]=ddr_data[i][j];
+     for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)prepared.bw.cnoc_data[i][j]=cnoc_data[i][j];
+-    prepared.initial_gpu_index=1;prepared.initial_bw_level=4;prepared.max_requested_gpu_index=1;
++    prepared.initial_gpu_index=1;prepared.initial_bw_level=4;prepared.max_requested_gpu_index=7;
++    for(unsigned i=0;i<8;i++)prepared.gpu_bus_level[i]=gpu_bus_levels[i];
+     *out=prepared;return 0;
+ }
+--- a/bsd/dev/sweet_gmu_board_profile.h
++++ b/bsd/dev/sweet_gmu_board_profile.h
+@@ -3,12 +3,15 @@
+ #include "sweet_hfi_perf.h"
+ #include "sweet_hfi_bw.h"
+ #define SWEET_GMU_RECOVERY167 167u
+-/* Explicit recovery-matched operating profile, NOT a fuse result. The only
+- * permitted frequency request is index1/180MHz until bins are verified. */
++/* Explicit recovery-matched operating profile, NOT a fuse result. Recovery's
++ * kgsl lists exactly bin 167's rates (180..800MHz), so requests up to
++ * index7/800MHz are permitted. gpu_bus_level[i] is bin 167's stock bus level
++ * for GMU index i, sent with a request for that index. */
+ struct sweet_gmu_board_profile {
+     struct sweet_hfi_perf_table perf;
+     struct sweet_hfi_bw_table bw;
+     unsigned initial_gpu_index, initial_bw_level, max_requested_gpu_index;
++    unsigned gpu_bus_level[8];
+ };
+ struct sweet_gmu_profile_ops {
+     void *ctx;
+--- a/bsd/dev/sweet_gmu_dcvs.c
++++ b/bsd/dev/sweet_gmu_dcvs.c
+@@ -9,7 +9,8 @@
+ #define DCVS_REQUEST (1u<<23)
+ #define DCVS_ACK (1u<<31)
+ #define DCVS_CLEAR (1u<<31)
+-#define DCVS_PERF_MINIMUM 0x30000001u /* ATLEAST3, profile index1 */
++#define DCVS_PERF_ATLEAST(index) (0x30000000u|((index)&0xffu)) /* FREQ_VOTE(index, ATLEAST3) */
++#define DCVS_BW_LEVEL(level) ((((level)&0xfffu)<<12)|((level)&0xfffu)) /* BW_VOTE(level) */
+ #define DCVS_BW_UNCHANGED 0x000ff0ffu /* INVALID0xff in both12bit fields */
+ static int rd(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,uint32_t a,uint32_t *v)
+ {
+@@ -34,7 +35,7 @@ static int health(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot
+ }
+ int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_postboot_ops *o,
+     const struct sweet_gmu_postboot_state *p,const struct sweet_gmu_config_state *c,
+-    const struct sweet_hfi_transport *t,const struct sweet_gmu_board_profile *b)
++    const struct sweet_hfi_transport *t,const struct sweet_gmu_board_profile *b,unsigned gpu_index)
+ {
+     if(!s || !o || !p || !c || !t || !b || !o->read32 || !o->write32 || !o->barrier ||
+         !o->delay_us || !o->check || s->attempted)return -1;
+@@ -45,13 +46,20 @@ int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *s,const struct sweet_gmu_po
+         p->session_transport_ctx!=t->ctx || p->session_barrier!=t->barrier || p->session_doorbell!=t->doorbell ||
+         p->session_ops.ctx!=o->ctx || p->session_ops.read32!=o->read32 || p->session_ops.write32!=o->write32 ||
+         p->session_ops.barrier!=o->barrier || p->session_ops.delay_us!=o->delay_us || p->session_ops.check!=o->check ||
+-        b->initial_gpu_index!=1 || b->max_requested_gpu_index!=1 || b->perf.gpu_count!=8 ||
+-        b->perf.gpu[1].frequency_khz!=180000 || b->perf.gpu[1].vote!=p->vote)return -3;
++        b->initial_gpu_index!=1 || b->max_requested_gpu_index!=7 || b->perf.gpu_count!=8 ||
++        b->perf.gpu[1].frequency_khz!=180000 || b->perf.gpu[1].vote!=p->vote ||
++        gpu_index<1 || gpu_index>b->max_requested_gpu_index || !b->perf.gpu[gpu_index].frequency_khz ||
++        (gpu_index>1 && (b->gpu_bus_level[gpu_index]<b->initial_bw_level ||
++        b->gpu_bus_level[gpu_index]>=b->bw.levels)))return -3;
++    s->gpu_index=gpu_index;
++    s->bw_level=gpu_index>1?b->gpu_bus_level[gpu_index]:0;
++    s->perf_setting=DCVS_PERF_ATLEAST(gpu_index);
++    s->bw_setting=gpu_index>1?DCVS_BW_LEVEL(s->bw_level):DCVS_BW_UNCHANGED;
+     int rc=health(s,o);if(rc)return rc;
+     if(s->host_irq&DCVS_ACK)return -3; /* reject a stale completion */
+     rc=wr(s,o,DCVS_ACK_OPTION,0);if(rc)return rc;
+-    rc=wr(s,o,DCVS_PERF_SETTING,DCVS_PERF_MINIMUM);if(rc)return rc;
+-    rc=wr(s,o,DCVS_BW_SETTING,DCVS_BW_UNCHANGED);if(rc)return rc;
++    rc=wr(s,o,DCVS_PERF_SETTING,s->perf_setting);if(rc)return rc;
++    rc=wr(s,o,DCVS_BW_SETTING,s->bw_setting);if(rc)return rc;
+     rc=health(s,o);if(rc)return rc;
+     if(s->host_irq&DCVS_ACK)return -3;
+     s->request_attempted=1;
+--- a/bsd/dev/sweet_gmu_dcvs.h
++++ b/bsd/dev/sweet_gmu_dcvs.h
+@@ -14,14 +14,18 @@ struct sweet_gmu_dcvs_state {
+     unsigned service_pending, ack_after_clear, abandoned_request;
+     int cleanup_error;
+     uint32_t firmware_return, host_irq, ao_irq, gx_status, last_offset, last_value;
++    unsigned gpu_index, bw_level;
++    uint32_t perf_setting, bw_setting;
+ };
+ /*0: stock DCVS response accepted and clear writes completed; -1 invalid/repeated,
+  *-2 I/O, -3 guard, -4 deadline, -5 hardware IRQ, -6 pending service, -7 firmware.
+  *ack_after_clear records a late/sticky response and rejects success with -3,
+  *after attempting the request-clear write. No retry is permitted. IRQ/GX
+  *fields are the last health sample BEFORE request clear, not post-clear state. */
++/* gpu_index: GMU perf index 1..profile max. Index 1 leaves the bus unchanged;
++ * a higher index also asks for that level's stock bus level. */
+ int sweet_gmu_dcvs_once(struct sweet_gmu_dcvs_state *,
+     const struct sweet_gmu_postboot_ops *,const struct sweet_gmu_postboot_state *,
+     const struct sweet_gmu_config_state *,const struct sweet_hfi_transport *,
+-    const struct sweet_gmu_board_profile *);
++    const struct sweet_gmu_board_profile *,unsigned gpu_index);
+ #endif
+--- a/bsd/dev/sweet_gpu_probe.c
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -208,11 +208,11 @@ sweet_gpu_probe(void)
+     if(requested_gpu_oob && (requested_gpu_oob!=1 || requested_mapping!=1)) {
+         printf("SWEET A618 OOB: requires oob=1 map=1\n");return;
+     }
+-    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs!=1)) {
+-        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1\n");return;
++    if(requested_mapping && (requested_mapping!=1 || requested_preparation!=1 || requested_dcvs<1 || requested_dcvs>7)) {
++        printf("SWEET A618 MAP: requires map=1 prep=1 dcvs=1..7\n");return;
+     }
+-    if(requested_dcvs && (requested_dcvs!=1 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+-        printf("SWEET GMU DCVS: requires dcvs=1 cfg=1 profile=167 hfi=1 start=1\n");return;
++    if(requested_dcvs && (requested_dcvs<1 || requested_dcvs>7 || requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
++        printf("SWEET GMU DCVS: requires dcvs=1..7 cfg=1 profile=167 hfi=1 start=1\n");return;
+     }
+     if((requested_config || selected_profile) &&
+         (requested_config!=1 || selected_profile!=167 || requested_hfi!=1 || requested_start!=1)) {
+@@ -468,9 +468,9 @@ sweet_gpu_probe(void)
+                                                                 sweet_gpu_a618_configure((unsigned)selected_profile) :
+                                                                 sweet_gpu_gmu_configure((unsigned)selected_profile);
+                                                             printf("SWEET GMU CONFIG: entry rc=%d\n",config_rc);
+-                                                            if(!config_rc && requested_dcvs==1) {
+-                                                                extern int sweet_gpu_gmu_dcvs_start(void);
+-                                                                int dcvs_rc=sweet_gpu_gmu_dcvs_start();
++                                                            if(!config_rc && requested_dcvs>=1) {
++                                                                extern int sweet_gpu_gmu_dcvs_start(unsigned);
++                                                                int dcvs_rc=sweet_gpu_gmu_dcvs_start((unsigned)requested_dcvs);
+                                                                 printf("SWEET GMU DCVS: entry rc=%d\n",dcvs_rc);
+                                                                 int prepare=0;
+                                                                 PE_parse_boot_argn("sweetgpuprep",&prepare,sizeof(prepare));
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -401,17 +401,19 @@ extern "C" int sweet_gpu_gmu_configure(unsigned selected_profile)
+     return rc;
+ }
+ 
+-extern "C" int sweet_gpu_gmu_dcvs_start(void)
++extern "C" int sweet_gpu_gmu_dcvs_start(unsigned index)
+ {
+     auto *s=&probe;
+     if(!__sync_bool_compare_and_swap(&dcvs_attempted,0u,1u))return -1;
+-    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s))return -3;
+-    IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
++    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s) || index<1 || index>7)return -3;
++    if(index==1)IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
++    else IOLog("SWEET GMU DCVS: begin ATLEAST%uMHz index%u; BW level %u, boot request and DDR floor held\n",
++        s->profile.perf.gpu[index].frequency_khz/1000,index,s->profile.gpu_bus_level[index]);
+     /* The sole early-root caller has finished configuration. HFI TX is sealed,
+      * no IRQ/RX worker or other frequency owner has been started. All state,
+      * callbacks, mapping and votes remain retained even on an ambiguous write. */
+     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,nullptr};
+-    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile);
++    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile,index);
+     dcvs_succeeded = rc==0;
+     auto &d=s->dcvs;
+     report_faults(s);
+@@ -419,6 +421,7 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
+         rc,d.attempted,d.request_attempted,d.acked,d.return_valid,d.firmware_return,
+         d.response_clear_attempted,d.request_clear_attempted,d.cleanup_error,d.abandoned_request,
+         d.service_pending,d.ack_after_clear,d.host_irq,d.ao_irq,d.gx_status,d.last_offset,d.last_value);
++    IOLog("SWEET GMU DCVS: requested index=%u perf=%08x bw=%08x level=%u\n",d.gpu_index,d.perf_setting,d.bw_setting,d.bw_level);
+     IOLog("SWEET GMU DCVS: response acceptance only, not measured Hz; retained until reboot; SQE and rendering not started\n");
+     return rc;
+ }

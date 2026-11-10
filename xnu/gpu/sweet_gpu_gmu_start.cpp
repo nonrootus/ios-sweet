@@ -401,17 +401,19 @@ extern "C" int sweet_gpu_gmu_configure(unsigned selected_profile)
     return rc;
 }
 
-extern "C" int sweet_gpu_gmu_dcvs_start(void)
+extern "C" int sweet_gpu_gmu_dcvs_start(unsigned index)
 {
     auto *s=&probe;
     if(!__sync_bool_compare_and_swap(&dcvs_attempted,0u,1u))return -1;
-    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s))return -3;
-    IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
+    if(!config_attempted || s->postboot.stage!=SWEET_GMU_CONFIG_READY || post_check(s) || index<1 || index>7)return -3;
+    if(index==1)IOLog("SWEET GMU DCVS: begin ATLEAST180MHz index1; BW unchanged, boot request and DDR floor held\n");
+    else IOLog("SWEET GMU DCVS: begin ATLEAST%uMHz index%u; BW level %u, boot request and DDR floor held\n",
+        s->profile.perf.gpu[index].frequency_khz/1000,index,s->profile.gpu_bus_level[index]);
     /* The sole early-root caller has finished configuration. HFI TX is sealed,
      * no IRQ/RX worker or other frequency owner has been started. All state,
      * callbacks, mapping and votes remain retained even on an ambiguous write. */
     sweet_gmu_postboot_ops ops={s,post_read,post_write,complete,pause_us,post_check,nullptr};
-    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile);
+    int rc=sweet_gmu_dcvs_once(&s->dcvs,&ops,&s->postboot,&s->config,&s->transport,&s->profile,index);
     dcvs_succeeded = rc==0;
     auto &d=s->dcvs;
     report_faults(s);
@@ -419,6 +421,7 @@ extern "C" int sweet_gpu_gmu_dcvs_start(void)
         rc,d.attempted,d.request_attempted,d.acked,d.return_valid,d.firmware_return,
         d.response_clear_attempted,d.request_clear_attempted,d.cleanup_error,d.abandoned_request,
         d.service_pending,d.ack_after_clear,d.host_irq,d.ao_irq,d.gx_status,d.last_offset,d.last_value);
+    IOLog("SWEET GMU DCVS: requested index=%u perf=%08x bw=%08x level=%u\n",d.gpu_index,d.perf_setting,d.bw_setting,d.bw_level);
     IOLog("SWEET GMU DCVS: response acceptance only, not measured Hz; retained until reboot; SQE and rendering not started\n");
     return rc;
 }

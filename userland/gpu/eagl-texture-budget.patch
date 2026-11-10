@@ -1,0 +1,159 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -250,6 +250,9 @@ struct image {
+ 	GLenum to, internal, format, type;
+ 	uint32_t plane, seed;
+ 	GLsizei width, height;
++	unsigned last_used;             /* (texture budget) the frame in which it was last bound */
++	uint32_t resident;              /* ... bytes of the GPU's pool its copy holds; 0 if none or given back */
++	bool evicted;                   /* ... its storage was given back: filled again when it is bound */
+ 	int damage[4], damage_effective[4];     /* (sweet-readback-probe.inc) */
+ 	bool damage_any, damage_full, damage_seen, damage_effective_full;
+ };
+@@ -631,6 +634,94 @@ bytes_a_pixel(GLenum format, GLenum type)
+ 	}
+ }
+ 
++/*
++ * Sweet: a texture made of an IOSurface is a copy in the GPU's pinned pool here, not the surface's
++ * memory as on an iPhone, and CoreAnimation keeps them as if they cost nothing. Past a budget, the
++ * copies bound least recently (not in the last two frames, and to no unit now) give their storage
++ * back; binding one again fills it from its surface, the way a changed surface is filled.
++ */
++#define SWEET_TEXTURE_BUDGET (72u << 20)
++#define SWEET_TEXTURE_KEEP (56u << 20)
++static unsigned sweet_evictions, sweet_refills;
++
++static void
++sweet_texture_resident(struct image *image)
++{
++	if (image->evicted) {
++		sweet_refills++;
++	}
++	image->evicted = false;
++	image->resident = image->target || image->shared ? 0 : (uint32_t)image->width * (uint32_t)image->height * 4u;
++}
++
++static bool
++sweet_texture_bound(const struct eagl *e, GLuint texture)
++{
++	for (unsigned unit = 0; unit < 8; unit++) {
++		if (e->bound[unit] == texture) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static void
++sweet_texture_budget(struct eagl *e)
++{
++	uint64_t resident = 0;
++	unsigned copies = 0, evicted_now = 0;
++
++	for (unsigned i = 0; i < e->image_count; i++) {
++		resident += e->images[i].resident;
++		copies += e->images[i].resident != 0;
++	}
++	if (resident > SWEET_TEXTURE_BUDGET) {
++		GLint bound = 0, unpack = 0;
++
++		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
++		glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack);
++		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
++		while (resident > SWEET_TEXTURE_KEEP) {
++			struct image *oldest = NULL;
++
++			for (unsigned i = 0; i < e->image_count; i++) {
++				struct image *image = &e->images[i];
++
++				if (image->resident == 0 || image->to != GL_TEXTURE_2D || image->last_used + 2 > e->frames ||
++				    sweet_texture_bound(e, image->texture)) {
++					continue;
++				}
++				if (oldest == NULL || image->last_used < oldest->last_used) {
++					oldest = image;
++				}
++			}
++			if (oldest == NULL) {
++				break;
++			}
++			glBindTexture(GL_TEXTURE_2D, oldest->texture);
++			/* No pixels: just storage of one texel, of the kind the texture already has. */
++			if (oldest->xr10) {
++				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
++			} else {
++				glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal_format(oldest->internal, oldest->format), 1, 1, 0,
++				    oldest->format, oldest->type, NULL);
++			}
++			resident -= oldest->resident;
++			oldest->resident = 0;
++			oldest->evicted = true;
++			evicted_now++;
++		}
++		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
++		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)unpack);
++		sweet_evictions += evicted_now;
++	}
++	if ((evicted_now != 0 && sweet_evictions <= 256) || e->frames % 600 == 0) {
++		say("SWEET BUDGET: frame %u images %u copies %u resident %llu MiB, gave back %u (in all %u, filled again %u)\n",
++		    e->frames, e->image_count, copies, (unsigned long long)(resident >> 20), evicted_now, sweet_evictions,
++		    sweet_refills);
++	}
++}
++
+ /*
+  * For a surface drawn into (blit_targets): a second texture that is the surface's memory, for the
+  * frame to be copied into by the GPU; the texture CoreAnimation draws into stays the library's own.
+@@ -984,7 +1075,9 @@ static void
+ surface_to_texture(struct eagl *e, struct image *image)
+ {
+ 	if (image->xr10) {
+-		xr10_upload(e, image);
++		if (xr10_upload(e, image)) {
++			sweet_texture_resident(image);
++		}
+ 		return;
+ 	}
+ 	IOSurfaceRef surface = image->surface;
+@@ -1093,6 +1186,7 @@ surface_to_texture(struct eagl *e, struct image *image)
+ 	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+ 	free(flipped);
+ 	image->seed = IOSurfaceGetSeed(surface);
++	sweet_texture_resident(image);
+ 	e->uploads++;
+ 	e->upload_bytes += row * (size_t)image->height;
+ }
+@@ -1324,6 +1418,7 @@ frame_end(struct eagl *e, bool finished)
+ 	after = now_us();
+ 	e->in_frame = false;
+ 	e->frames++;
++	sweet_texture_budget(e);
+ 	if (latency_lines) {
+ 		/* "tl: g FRAME began US ended US DRAWS": microseconds of mach_absolute_time (tools/latency.py) */
+ 		say("tl: g %u began %llu ended %llu %u\n", e->frames, e->began, after, e->draws);
+@@ -1448,7 +1543,7 @@ static void
+ my_glBindTexture(void *context, GLenum target, GLuint texture)
+ {
+ 	struct eagl *e = context;
+-	struct image *image;
++	struct image *image = NULL;
+ 
+ 	EAGL_ENTER(e, 0x30);
+ 	if (eagl_tracing) {
+@@ -1458,9 +1553,12 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
+ 	if (target == GL_TEXTURE_2D && e->unit < 8) {
+ 		e->bound[e->unit] = texture;
+ 	}
+-	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL && !image->shared &&
+-	    (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
+-	    image->wrapped && !image->painted && surface_changed(e, image))) {
++	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL) {
++		image->last_used = e->frames;
++	}
++	if (image != NULL && !image->shared &&
++	    (image->evicted || (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
++	    image->wrapped && !image->painted && surface_changed(e, image)))) {
+ 		surface_to_texture(e, image);
+ 	}
+ 	EAGL_LEAVE(e, 0x30);

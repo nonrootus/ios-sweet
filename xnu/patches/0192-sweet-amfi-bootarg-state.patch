@@ -1,0 +1,63 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -373,9 +373,45 @@ static mac_policy_handle_t sweet_amfi_mac_handle;
+ /* 20H392 dyld's AMFI policy query passes two 64-bit words:
+  * input flags and a user pointer to the output flags. Serve only the signed
+  * window server from the GPU test root, launched by launchd. */
++static int sweet_renderer_dyld_enabled;
++static uint64_t sweet_amfi_calls_seen;
++
++/*
++ * libamfi's amfi_interface_query_bootarg_state(uint64_t *out) is
++ * __mac_syscall("AMFI", 0x60, &state) and copies the 64-bit state to *out
++ * (20H392 cache 0x1d1fe655c). ExtensionKit in lsd needs it before it reads
++ * its extension point cache; without that cache no framework-declared
++ * extension point exists (posterkit, widgetkit). 0: no relaxing boot-arg.
++ */
++static int
++sweet_amfi_bootarg_state(proc_t p, user_addr_t arg)
++{
++	const uint64_t state = 0;
++	int error = copyout(&state, arg, sizeof(state));
++	if (!(sweet_amfi_calls_seen & (1ULL << 0x3f))) {
++		sweet_amfi_calls_seen |= 1ULL << 0x3f;
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf("SWEET AMFI: boot-arg state query from %s -> 0 (rc=%d)\n", name, error);
++	}
++	return error;
++}
++
+ static int
+ sweet_renderer_dyld_policy(proc_t p, int call, user_addr_t arg)
+ {
++	if (call == 0x60) {
++		return sweet_amfi_bootarg_state(p, arg);
++	}
++	if (call >= 0 && call < 0x3f && !(sweet_amfi_calls_seen & (1ULL << call))) {
++		sweet_amfi_calls_seen |= 1ULL << call;
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf("SWEET AMFI: first call %#x from %s\n", call, name);
++	}
++	if (!sweet_renderer_dyld_enabled) {
++		return ENOPOLICY;
++	}
+ 	static const unsigned char expected[CS_CDHASH_LEN] = {
+ 		0x89, 0xe6, 0x32, 0x85, 0x41, 0xc2, 0xe3, 0x75, 0x22, 0xd9,
+ 		0x0f, 0xa4, 0xa6, 0x93, 0xc7, 0x46, 0x82, 0x5b, 0x22, 0xa8,
+@@ -441,9 +477,10 @@ sweet_amfi_policy_register(void)
+ 	printf("SWEET Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ 	int renderer = 0;
+-	if (PE_parse_boot_argn("sweetcagpu", &renderer, sizeof(renderer)) && renderer == 1) {
+-		error = mac_policy_register(&sweet_renderer_dyld_conf, &sweet_renderer_dyld_handle, NULL);
+-		printf("SWEET CA: backboardd dyld policy registration rc=%d\n", error);
+-	}
++	sweet_renderer_dyld_enabled = PE_parse_boot_argn("sweetcagpu", &renderer, sizeof(renderer)) && renderer == 1;
++	/* Always: the "AMFI" policy also answers the boot-arg state query (0x60). */
++	error = mac_policy_register(&sweet_renderer_dyld_conf, &sweet_renderer_dyld_handle, NULL);
++	printf("SWEET CA: backboardd dyld policy registration rc=%d (dyld answer %s)\n", error,
++	    sweet_renderer_dyld_enabled ? "on" : "off");
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

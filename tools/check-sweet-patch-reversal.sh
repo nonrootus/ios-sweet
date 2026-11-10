@@ -12,7 +12,7 @@ grep -Fx 'iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp                        optio
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_memory_probe.cpp --exclude=iokit/conf/files.arm64 "$GITHUB_WORKSPACE/xnu/patches/0130-sweet-gpu-memory-probe.patch"
 grep -Fx 'iokit/Kernel/arm/sweet_gpu_memory_probe.cpp                      optional iokitcpp' dxb/xnu/iokit/conf/files.arm64 > /dev/null
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0131-sweet-pmap-highmem-cache-sync.patch"
-git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.h "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.cpp --exclude=iokit/Kernel/arm/sweet_gpu_hfi_memory.h --exclude=iokit/Kernel/arm/sweet_gpu_memory.cpp "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=bsd/dev/sweet_smmu_context.c --exclude=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0133-sweet-smmu-context-lifetime.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=bsd/dev/sweet_smmu_k6a.c --exclude=iokit/Kernel/arm/sweet_gpu_smmu_probe.cpp --exclude=iokit/conf/files.arm64 "$GITHUB_WORKSPACE/xnu/patches/0134-sweet-k6a-smmu-register-probe.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_context.c --exclude=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0135-sweet-smmu-preserve-fault-streams.patch"
@@ -84,12 +84,15 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0194-sweet
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: AppleMobileFileIntegrity service registered' > /dev/null
 # 0195: 256 MiB render pool, panel GPU VA 0x58000000.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0195-sweet-a618-render-pool-256m.patch"
-# 0197: validate the complete combined patch, then restore the 0196 surface in a scratch copy.
+# 0197: validate the combined patch, then restore the pre-0197 context for 0196 and 0132.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
 surface_check=$(mktemp -d)
 trap 'rm -rf -- "$surface_check"' EXIT
 surface_file=iokit/Kernel/arm/SweetSurface.cpp
+memory_file=iokit/Kernel/arm/sweet_gpu_memory.cpp
 mkdir -p "$surface_check/$(dirname "$surface_file")"
 cp "dxb/xnu/$surface_file" "$surface_check/$surface_file"
-git -C "$surface_check" apply --reverse --include="$surface_file" "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
+cp "dxb/xnu/$memory_file" "$surface_check/$memory_file"
+git -C "$surface_check" apply --reverse --include="$surface_file" --include="$memory_file" "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
 git -C "$surface_check" apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0196-sweet-iosurface-icon-wrap-size.patch"
+git -C "$surface_check" apply --reverse --check --include="$memory_file" "$GITHUB_WORKSPACE/xnu/patches/0132-sweet-hfi-normal-nc-memory.patch"

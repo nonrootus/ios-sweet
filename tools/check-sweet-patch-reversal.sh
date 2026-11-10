@@ -100,6 +100,8 @@ git -C "$surface_check" apply --reverse --check --include="$memory_file" "$GITHU
 # 0198: the complete Mesa and EAGL replacement fits in the renderer RAM disk.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0198-sweet-mesa-renderer-overlay.patch"
 # 0199: the dark-mode preference set aside once (SpringBoard crashed in CoreImage GL).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0199-sweet-dark-mode-preference-aside.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0199-sweet-dark-mode-preference-aside.patch"
 # 0200: SpringBoard starts with the renderer loader (CoreImage on the CPU).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"
+# 0201: the accessibility preferences (Bold Text) set aside (SpringBoard crashed in CoreImage GL).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"

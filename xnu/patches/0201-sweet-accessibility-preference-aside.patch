@@ -1,0 +1,19 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -634,6 +634,16 @@ sweet_promote_staged_apps(void)
+ 	    "/private/var/mobile/Library/Preferences/com.apple.uikitservices.userInterfaceStyleMode.plist",
+ 	    "/private/var/mobile/Library/Preferences/com.apple.uikitservices.userInterfaceStyleMode.plist.sweet-dark");
+ 	printf("SWEET APPS: dark mode preference set aside rc=%d\n", style);
++
++	/*
++	 * Bold Text (and the other accessibility settings) also make UIKit style that Control Center
++	 * hint through CoreImage: SpringBoard kept crashing after dark mode was gone. Set the
++	 * accessibility preferences aside the same way; their defaults come back.
++	 */
++	int accessibility = sweet_kernel_rename(
++	    "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist",
++	    "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist.sweet-bold");
++	printf("SWEET APPS: accessibility preferences set aside rc=%d\n", accessibility);
+ }
+ #endif
+ 

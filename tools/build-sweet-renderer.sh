@@ -115,7 +115,7 @@ target=(-target arm64-apple-ios16.0 -isysroot "$sdk" -O2 -dynamiclib)
     "$lib/libOSMesa.8.dylib" -lobjc \
     -framework IOSurface -framework CoreFoundation -framework OpenGLES -framework IOKit \
     -install_name /sweet/lib/libSweetEAGL.dylib -o "$lib/libSweetEAGL.dylib"
-"$cc" "${target[@]}" -framework IOKit -framework CoreFoundation \
+"$cc" "${target[@]}" -framework IOKit -framework CoreFoundation -lobjc \
     "$repo/userland/gpu/sweet-renderer-loader.c" \
     -install_name /sweet/lib/libSweetRendererLoader.dylib -o "$lib/libSweetRendererLoader.dylib"
 for binary in "$lib"/*.dylib; do

@@ -1,0 +1,86 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5569,7 +5569,24 @@ bad:
+  *		to arrays of user space pointers.
+  */
+ __attribute__((noinline))
+-static int
++static #if defined(ARM64_BOARD_CONFIG_SWEET)
++/* sweetcagpu=1 and the image is SpringBoard: see the environment entry added below. */
++static bool
++sweet_exec_wants_loader(struct image_params *imgp)
++{
++	static int requested = -1;
++
++	if (requested < 0) {
++		int value = 0;
++		requested = PE_parse_boot_argn("sweetcagpu", &value, sizeof(value)) && value == 1;
++	}
++	return requested && imgp->ip_strings != NULL &&
++	       strcmp(imgp->ip_strings + strlen(EXECUTABLE_KEY),
++	       "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0;
++}
++#endif
++
++int
+ exec_extract_strings(struct image_params *imgp)
+ {
+ 	int error = 0;
+@@ -5741,6 +5758,29 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * SpringBoard gets the Sweet renderer loader, which keeps its CoreImage contexts on the CPU:
++	 * without Metal they take Apple's OpenGL ES, which has no driver here, and SpringBoard
++	 * crashed at every start. The "AMFI" policy (sweet_amfi.c) lets dyld honour the variable.
++	 */
++	if (sweet_exec_wants_loader(imgp)) {
++		static const char loader[] = "DYLD_INSERT_LIBRARIES=/sweet/lib/libSweetRendererLoader.dylib";
++
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(loader), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size; /* to hold its envv[] entry */
++		imgp->ip_envc++;
++		printf("SWEET CI: SpringBoard starts with the renderer loader\n");
++	}
++#endif
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -417,8 +417,7 @@ sweet_renderer_dyld_policy(proc_t p, int call, user_addr_t arg)
+ 		0x0f, 0xa4, 0xa6, 0x93, 0xc7, 0x46, 0x82, 0x5b, 0x22, 0xa8,
+ 	};
+ 	unsigned char actual[CS_CDHASH_LEN];
+-	if (call != 0x5a || !proc_is64bit(p) || proc_ppid(p) != 1 ||
+-	    proc_getcdhash(p, actual) != 0 || memcmp(actual, expected, sizeof(expected)) != 0) {
++	if (call != 0x5a || !proc_is64bit(p) || proc_ppid(p) != 1) {
+ 		return ENOPOLICY;
+ 	}
+ 
+@@ -430,7 +429,14 @@ sweet_renderer_dyld_policy(proc_t p, int call, user_addr_t arg)
+ 	int length = sizeof(path);
+ 	int error = vn_getpath(executable, path, &length);
+ 	vnode_put(executable);
+-	if (error != 0 || strcmp(path, "/usr/libexec/real/backboardd") != 0) {
++	/*
++	 * The signed window server from the GPU test root, or SpringBoard, which the kernel starts
++	 * with the renderer loader (kern_exec.c) to keep its CoreImage on the CPU.
++	 */
++	bool backboardd = error == 0 && strcmp(path, "/usr/libexec/real/backboardd") == 0 &&
++	    proc_getcdhash(p, actual) == 0 && memcmp(actual, expected, sizeof(expected)) == 0;
++	bool springboard = error == 0 && strcmp(path, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0;
++	if (!backboardd && !springboard) {
+ 		printf("SWEET CA: dyld policy did not match the renderer executable path (%d)\n", error);
+ 		return ENOPOLICY;
+ 	}

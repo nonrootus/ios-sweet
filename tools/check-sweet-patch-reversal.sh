@@ -75,7 +75,7 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0191-sweet-cpu-frequency-governor.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CPUFREQ: loop speed' > /dev/null
 # 0192: the AMFI policy answers the boot-arg state query (0x60).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0192-sweet-amfi-bootarg-state.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/sweet_amfi.c "$GITHUB_WORKSPACE/xnu/patches/0192-sweet-amfi-bootarg-state.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: boot-arg state query from' > /dev/null
 # 0193: one more LaunchServices rebuild, for the extension points 0192 brings.
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0193-sweet-launchservices-store-extension-points.patch"
@@ -101,3 +101,5 @@ git -C "$surface_check" apply --reverse --check --include="$memory_file" "$GITHU
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0198-sweet-mesa-renderer-overlay.patch"
 # 0199: the dark-mode preference set aside once (SpringBoard crashed in CoreImage GL).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0199-sweet-dark-mode-preference-aside.patch"
+# 0200: SpringBoard starts with the renderer loader (CoreImage on the CPU).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"

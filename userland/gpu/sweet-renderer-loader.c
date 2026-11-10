@@ -1,6 +1,8 @@
-/* Loaded into backboardd by the GPU-enabled iOS root. */
+/* Loaded into backboardd by the GPU-enabled iOS root, and into SpringBoard by the kernel (0200). */
+#include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <objc/runtime.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,9 +38,48 @@ static bool supported_shared_cache(void)
     return cache_uuid && cache_uuid(actual) && memcmp(actual, supported, sizeof(actual)) == 0;
 }
 
+/*
+ * SpringBoard: CoreImage contexts on the CPU. Without Metal, -[CIContext initWithOptions:] falls
+ * back to Apple's OpenGL ES, which has no driver here: CI::GLContext::init calls a NULL entry and
+ * SpringBoard crashed at every start (lock screen -> CSTeachableMomentsContainerView
+ * _addControlCenterTutors -> CUICatalog imageByStylingImage -> CUIShapeEffectStack
+ * sharedCIContext). The option "software_renderer" (kCIContextUseSoftwareRenderer) keeps every
+ * context on the CPU renderer.
+ */
+static IMP sweet_ci_original_init;
+
+static id sweet_ci_init_with_options(id self, SEL cmd, CFDictionaryRef options)
+{
+    CFMutableDictionaryRef forced = options ? CFDictionaryCreateMutableCopy(NULL, 0, options) :
+        CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (forced)
+        CFDictionarySetValue(forced, CFSTR("software_renderer"), kCFBooleanTrue);
+    id context = ((id (*)(id, SEL, CFDictionaryRef))sweet_ci_original_init)(self, cmd, forced ? forced : options);
+    if (forced)
+        CFRelease(forced);
+    return context;
+}
+
+static void sweet_ci_on_cpu(void)
+{
+    Class cls = objc_getClass("CIContext");
+    Method method = cls ? class_getInstanceMethod(cls, sel_registerName("initWithOptions:")) : NULL;
+    if (!method) {
+        fputs("SWEET CI: CIContext not loaded; CoreImage left alone\n", stderr);
+        return;
+    }
+    sweet_ci_original_init = method_setImplementation(method, (IMP)sweet_ci_init_with_options);
+    fputs("SWEET CI: CoreImage contexts of SpringBoard use the CPU renderer\n", stderr);
+}
+
 __attribute__((constructor)) static void load_sweet_renderer(void)
 {
     const char *name = getprogname();
+    if (name && strcmp(name, "SpringBoard") == 0) {
+        if (renderer_requested())
+            sweet_ci_on_cpu();
+        return;
+    }
     if (!name || strcmp(name, "backboardd") != 0 || !renderer_requested())
         return;
     if (!supported_shared_cache()) {

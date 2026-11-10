@@ -139,17 +139,3 @@
        list_addtail(&bo->node, &bucket->list);
        bucket->count++;
        simple_mtx_unlock(&cache->lock);
---- a/src/mesa/state_tracker/st_cb_readpixels.c
-+++ b/src/mesa/state_tracker/st_cb_readpixels.c
-@@ -349,7 +349,10 @@
-    struct pipe_resource *src = rb->texture;
-    struct pipe_resource *dst = NULL;
- 
--   if (ST_DEBUG & DEBUG_NOREADPIXCACHE)
-+   /* A small full-width strip must not allocate the entire read surface
-+    * in Sweet's fixed GPU pool. The caller will use region-sized staging. */
-+   if ((ST_DEBUG & DEBUG_NOREADPIXCACHE) ||
-+       (width == rb->Width && height < rb->Height && height <= 256))
-       return NULL;
- 
-    /* Reset cache after invalidation or switch of parameters. */

@@ -1,0 +1,60 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -418,6 +418,7 @@ class IOSurfaceRootUserClient : public IOUserClient {
+ 	IOReturn addRef(SweetSurface *s, SweetSurfaceRef **refOut, bool *existing);
+ 	IOReturn returnSurface(SweetSurface *s, IOExternalMethodArguments *args);
+ 	IOReturn wrapClient(uint32_t selector, IOExternalMethodArguments *args);
++	IOReturn wrapTaskMemory(SweetSurface *s, uint64_t address, uint64_t size);
+ 	IOReturn create(IOExternalMethodArguments *args);
+ 
+ public:
+@@ -761,6 +762,31 @@ IOSurfaceRootUserClient::wrapClient(uint32_t selector, IOExternalMethodArguments
+ 	return ret;
+ }
+ 
++/* A surface of the caller's own memory, wired for as long as the surface lives (as wrapClient). */
++IOReturn
++IOSurfaceRootUserClient::wrapTaskMemory(SweetSurface *s, uint64_t address, uint64_t size)
++{
++	if (address == 0 || size == 0 || size > (256ull << 20)) {
++		return kIOReturnBadArgument;
++	}
++	uint64_t first = trunc_page_64(address);
++	uint64_t length = round_page_64(address + size) - first;
++	IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(first, length, kIODirectionInOut, fTask);
++	if (md == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (md->prepare() != kIOReturnSuccess) {
++		md->release();
++		return kIOReturnVMError;
++	}
++	s->memory = md;
++	s->wrapped = true;
++	s->wrapDelta = (uint32_t)(address - first);
++	s->mapCache = kIOMapDefaultCache;
++	s->allocSize = (uint32_t)size;
++	return sweet_surface_publish(s) ? kIOReturnSuccess : kIOReturnNoResources;
++}
++
+ IOReturn
+ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ {
+@@ -799,7 +825,16 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 	}
+ 	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
+ 	ret = sweet_surface_layout(s, props);
+-	if (ret == kIOReturnSuccess) {
++	/* The picture may already be in the creator's memory (CoreAnimation's icons): a surface of it. */
++	OSNumber *client = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAddress"));
++	if (ret == kIOReturnSuccess && client != NULL && client->unsigned64BitValue() != 0) {
++		uint64_t size = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * s->height;
++		OSNumber *given = OSDynamicCast(OSNumber, props->getObject("IOSurfaceAllocSize"));
++		if (given != NULL && given->unsigned64BitValue() >= size) {
++			size = given->unsigned64BitValue();
++		}
++		ret = wrapTaskMemory(s, client->unsigned64BitValue(), size);
++	} else if (ret == kIOReturnSuccess) {
+ 		IOBufferMemoryDescriptor *mem = NULL;
+ 		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+ 		    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {

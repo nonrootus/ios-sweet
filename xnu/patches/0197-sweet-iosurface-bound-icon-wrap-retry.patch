@@ -1,0 +1,40 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -841,7 +841,9 @@
+ 		 * IconServices pictures start 32 bytes into a mapping that ends right after the
+ 		 * last row: the rounded allocation size runs into the next, unmapped page.
+ 		 */
+-		if (ret == kIOReturnVMError && needed != 0 && needed < size) {
++		// This footprint covers packed, single-plane images only.
++		if (ret == kIOReturnVMError && s->planeCount == 0 &&
++		    s->elementHeight == 1 && needed != 0 && needed < size) {
+ 			ret = wrapTaskMemory(s, address, needed);
+ 		}
+ 		if (ret != kIOReturnSuccess && sweet_surface_wrap_failures < 8) {
+--- a/iokit/Kernel/arm/sweet_gpu_memory.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_memory.cpp
+@@ -36,8 +36,11 @@
+ }
+ 
+ #define GPU_PAGE 4096u
+-#define GPU_MAX_PAGES 64u
++#define GPU_MAX_PAGES 128u
+ #define GPU_PA_LIMIT (UINT64_C(1) << 36)
++
++static_assert(SWEET_A618_RENDER_TABLES <= GPU_MAX_PAGES,
++    "the GPU allocator must fit the render pool page tables");
+ 
+ struct sweet_gpu_memory {
+     IOBufferMemoryDescriptor *buffer;
+--- a/iokit/Kernel/arm/sweet_a618_mapping.inc
++++ b/iokit/Kernel/arm/sweet_a618_mapping.inc
+@@ -105,7 +105,8 @@
+                     static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
+             }
+             m.render_ready=true;
+-            IOLog("SWEET CA: pinned 128 MiB private GPU BO pool before SID0 install\n");
++            IOLog("SWEET CA: pinned %u MiB private GPU BO pool before SID0 install\n",
++                SWEET_A618_RENDER_BYTES >> 20);
+         }
+     }
+ #endif

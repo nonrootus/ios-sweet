@@ -105,7 +105,8 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
                     static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
             }
             m.render_ready=true;
-            IOLog("SWEET CA: pinned 128 MiB private GPU BO pool before SID0 install\n");
+            IOLog("SWEET CA: pinned %u MiB private GPU BO pool before SID0 install\n",
+                SWEET_A618_RENDER_BYTES >> 20);
         }
     }
 #endif

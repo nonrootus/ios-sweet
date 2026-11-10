@@ -36,8 +36,11 @@ static bool nc_mapping_valid(void *cpu, uint64_t pa)
 }
 
 #define GPU_PAGE 4096u
-#define GPU_MAX_PAGES 64u
+#define GPU_MAX_PAGES 128u
 #define GPU_PA_LIMIT (UINT64_C(1) << 36)
+
+static_assert(SWEET_A618_RENDER_TABLES <= GPU_MAX_PAGES,
+    "the GPU allocator must fit the render pool page tables");
 
 struct sweet_gpu_memory {
     IOBufferMemoryDescriptor *buffer;

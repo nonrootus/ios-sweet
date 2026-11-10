@@ -147,6 +147,12 @@ PATCHES += (('xnu/patches/0190-sweet-gpu-level-request.patch', {
     'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 PATCHES += (('xnu/patches/0195-sweet-a618-render-pool-256m.patch', {'bsd/dev/sweet_a618_render_pool.h'}),)
 
+# The IOSurface hunk is checked against the actual builder tree by the shell gate.
+SURFACE = 'iokit/Kernel/arm/SweetSurface.cpp'
+WIRING.add(SURFACE)
+PATCHES += (('xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch', {
+    SURFACE, 'iokit/Kernel/arm/sweet_gpu_memory.cpp', 'iokit/Kernel/arm/sweet_a618_mapping.inc'}),)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

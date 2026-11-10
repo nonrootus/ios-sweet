@@ -78,4 +78,7 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0192-sweet-amfi-bootarg-state.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: boot-arg state query from' > /dev/null
 # 0193: one more LaunchServices rebuild, for the extension points 0192 brings.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0193-sweet-launchservices-store-extension-points.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0193-sweet-launchservices-store-extension-points.patch"
+# 0194: the AppleMobileFileIntegrity IOKit service vouches for cdhashes; one more store rebuild.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0194-sweet-amfi-iokit-service.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: AppleMobileFileIntegrity service registered' > /dev/null

@@ -1,11 +1,10 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5569,7 +5569,24 @@ bad:
+@@ -5568,6 +5568,23 @@ bad:
+  * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
- __attribute__((noinline))
--static int
-+static #if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
 +/* sweetcagpu=1 and the image is SpringBoard: see the environment entry added below. */
 +static bool
 +sweet_exec_wants_loader(struct image_params *imgp)
@@ -22,10 +21,9 @@
 +}
 +#endif
 +
-+int
+ __attribute__((noinline))
+ static int
  exec_extract_strings(struct image_params *imgp)
- {
- 	int error = 0;
 @@ -5741,6 +5758,29 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}

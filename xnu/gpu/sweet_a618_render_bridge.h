@@ -13,6 +13,9 @@ extern "C" void *sweet_a618_render_cpu(void);
 extern "C" int sweet_a618_render_submit(const uint64_t *iova,
     const uint32_t *dwords, unsigned count, uint32_t *fence);
 extern "C" uint32_t sweet_a618_render_completed(void);
+/* 0215: submissions return before the GPU is done; these tell and wait for completion. */
+extern "C" uint32_t sweet_a618_render_submitted(void);
+extern "C" int sweet_a618_render_wait(uint32_t fence, unsigned max_ms);
 extern "C" bool sweet_a618_panel_ready(void);
 /* AppleCLCD and the renderer: which surfaces are on the panel, and whether the
  * GPU has already put this one there. */

@@ -60,7 +60,7 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.c
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc "$GITHUB_WORKSPACE/xnu/patches/0179-sweet-gpu-bo-lifetime.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0180-sweet-usb-console-and-b3a8-evidence.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c --exclude=bsd/vfs/vfs_syscalls.c "$GITHUB_WORKSPACE/xnu/patches/0181-sweet-renderer-ramdisk.patch"
-git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=bsd/dev/sweet_a618_render_pool.c --exclude=bsd/dev/sweet_a618_address_space.c --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0182-sweet-a618-direct-panel.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=bsd/dev/sweet_a618_render_pool.c --exclude=bsd/dev/sweet_a618_address_space.c --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0182-sweet-a618-direct-panel.patch"
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0183-sweet-framebuffer-direct-frame.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0184-sweet-direct-frames-stay-on-panel.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0185-sweet-iosurface-wrap-client.patch"
@@ -106,7 +106,7 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/kern_exec.c --exclude=
 # 0201: the accessibility preferences (Bold Text) set aside (SpringBoard crashed in CoreImage GL).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"
 # 0202: the GPU is waited for by looking again at once, not by sleeping 1 ms.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0202-sweet-a618-fast-gpu-wait.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_render_ring.inc "$GITHUB_WORKSPACE/xnu/patches/0202-sweet-a618-fast-gpu-wait.patch"
 # 0203: the thread that submits GPU work stays on an A76 core.
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch"
 # 0204: MobileGestalt cache set aside once for the sRGB device tree.
@@ -118,7 +118,7 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cp
 # 0207: the import window tables come in two allocations of 128 pages.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0207-sweet-a618-import-tables-in-halves.patch"
 # 0208: GPU buffers from wired system memory in the GPU window; the pinned pool is the fallback.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0208-sweet-a618-system-memory-buffers.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0208-sweet-a618-system-memory-buffers.patch"
 # 0209: CPU idle (WFI) after the GPU is up when wfi != 0.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0209-sweet-cpu-idle-after-gpu.patch"
 # 0210: no L1 clean+invalidate before every idle WFI.
@@ -131,3 +131,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0212-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0213-sweet-jailbreak-tweak-injection.patch"
 # 0214: the GPU runtime health check no longer requires CPU idle off.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0214-sweet-gpu-runtime-allows-cpu-idle.patch"
+# 0215: asynchronous GPU submission with fences and deferred buffer release.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0215-sweet-a618-async-submit.patch"

@@ -77,6 +77,7 @@ static_assert(kFieldPitch%64==0 && kOddOffset%64==0);
 static constexpr unsigned kSlots=SWEET_A618_RENDER_BYTES/16384u;
 static constexpr unsigned kHandles=8192;
 static constexpr unsigned kMaxBOs=1024,kMaxCMDs=64;
+static constexpr unsigned kZombies=1024;
 static uint64_t allocated[kSlots/64];
 static IOLock *pool_lock;
 static unsigned pool_in_use, pool_released_logs, pool_full_logs;
@@ -209,6 +210,7 @@ struct sweet_bo {
     IOMemoryDescriptor *memory;uint64_t size,iova;uint32_t flags;
     /* An imported IOSurface: its pages in the import window, and when the CPU cache was last cleaned. */
     SweetSurface *surface;unsigned import_first,import_pages;uint32_t seed;uint64_t flushed;
+    uint32_t fence;     /* the last submission that named it (0215: the GPU may still be at it) */
 };
 
 /*
@@ -223,6 +225,22 @@ static unsigned import_count,import_logs,import_flushes;
 static unsigned window_bos,window_logs,window_made;   /* BOs of system memory in the window */
 static uint64_t window_bytes;
 static uint64_t import_flushed_bytes,import_flush_ticks;
+
+static bool fence_done(uint32_t fence)
+{
+    return !fence || static_cast<int32_t>(sweet_a618_render_completed()-fence)>=0;
+}
+
+/* An absolute msm timeout (CLOCK_MONOTONIC) as milliseconds from now, at most 3 s; 0: only look. */
+static unsigned timeout_ms(int64_t seconds,int64_t nanoseconds)
+{
+    uint64_t now=0;
+    absolutetime_to_nanoseconds(mach_continuous_time(),&now);
+    const int64_t deadline=seconds*1000000000+nanoseconds;
+    if(deadline<=static_cast<int64_t>(now))return 0;
+    const uint64_t left=(static_cast<uint64_t>(deadline)-now)/1000000;
+    return left>3000 ? 3000 : static_cast<unsigned>(left)+1;
+}
 
 static bool import_taken(unsigned page)
 {
@@ -358,6 +376,8 @@ class SweetAdrenoUserClient : public IOUserClient {
     task_t owner;
     IOLock *lock;
     sweet_bo *bos;
+    sweet_bo *zombies;          /* closed BOs the GPU may still be using (0215) */
+    unsigned zombie_count;
     uint32_t next_handle,queue_count;
     unsigned shadow_first,shadow_units;
     bool client_ok() const {return current_task()==owner && sweet_a618_render_ready();}
@@ -373,6 +393,8 @@ class SweetAdrenoUserClient : public IOUserClient {
     IOReturn newWindowBO(uint64_t bytes,uint32_t flags,uint32_t *handle);
     IOReturn direct(sweet_direct_request *request);
     void releaseBOs();
+    void releaseBO(sweet_bo *bo);
+    void reapLocked();
 public:
     virtual bool initWithTask(task_t task,void *sid,UInt32 type,OSDictionary *props) APPLE_KEXT_OVERRIDE;
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -404,16 +426,21 @@ bool SweetAdrenoUserClient::start(IOService *provider)
     if(!sweet_a618_render_ready() || !IOUserClient::start(provider))return false;
     lock=IOLockAlloc();
     bos=static_cast<sweet_bo *>(IOMallocZero(kHandles*sizeof(sweet_bo)));
-    return lock && bos;
+    zombies=static_cast<sweet_bo *>(IOMallocZero(kZombies*sizeof(sweet_bo)));
+    return lock && bos && zombies;
 }
 
 void SweetAdrenoUserClient::releaseBOs()
 {
     if(!lock || !bos)return;
+    /* The GPU first finishes what it was given: nothing is released under it. */
+    (void)sweet_a618_render_wait(sweet_a618_render_submitted(),2000);
     IOLockLock(lock);
     for(unsigned i=0;i<kHandles;i++){
-        if(bos[i].memory)dropBO(&bos[i]);
+        if(bos[i].memory)releaseBO(&bos[i]);
     }
+    for(unsigned i=0;zombies && i<zombie_count;i++)releaseBO(&zombies[i]);
+    zombie_count=0;
     IOLockUnlock(lock);
 }
 
@@ -430,6 +457,7 @@ void SweetAdrenoUserClient::free()
     releaseBOs();
     if(shadow_units){pool_return(shadow_first,shadow_units);shadow_units=0;}
     if(bos){IOFree(bos,kHandles*sizeof(sweet_bo));bos=nullptr;}
+    if(zombies){IOFree(zombies,kZombies*sizeof(sweet_bo));zombies=nullptr;}
     if(lock){IOLockFree(lock);lock=nullptr;}
     IOUserClient::free();
 }
@@ -476,6 +504,7 @@ IOReturn SweetAdrenoUserClient::submit(msm_gem_submit *request)
         result=kIOReturnVMError;goto out;
     }
     IOLockLock(lock);
+    reapLocked();
     for(unsigned i=0;i<request->nr_bos;i++){
         sweet_bo *bo=lookup(sb[i].handle);
         if(!bo){result=kIOReturnBadArgument;goto unlock;}
@@ -501,6 +530,11 @@ IOReturn SweetAdrenoUserClient::submit(msm_gem_submit *request)
     request->fence=0;
     if(sweet_a618_render_submit(iova,dwords,count,&request->fence)){
         result=kIOReturnTimeout;goto unlock;
+    }
+    /* Each BO named is in use until this fence completes (0215: the call does not wait for it). */
+    for(unsigned i=0;i<request->nr_bos;i++){
+        sweet_bo *bo=lookup(sb[i].handle);
+        if(bo)bo->fence=request->fence;
     }
     if(request->flags&0x20000000u)request->fence_fd=-1;
     result=kIOReturnSuccess;
@@ -590,8 +624,42 @@ IOReturn SweetAdrenoUserClient::surfaceBuffer(redwood_surface *request)
     return kIOReturnSuccess;
 }
 
-/* With the client lock held. */
+/*
+ * With the client lock held. Mesa gives a BO back when it flushes the last submission naming it,
+ * not when the GPU is done with it: one the GPU may still use is kept (zombies) until its fence.
+ */
 void SweetAdrenoUserClient::dropBO(sweet_bo *bo)
+{
+    if(!fence_done(bo->fence) && sweet_a618_render_ready() && zombies){
+        if(zombie_count==kZombies){
+            (void)sweet_a618_render_wait(zombies[0].fence,500);
+            reapLocked();
+        }
+        if(zombie_count<kZombies){
+            zombies[zombie_count++]=*bo;
+            bo->memory=nullptr;
+            bo->surface=nullptr;
+            return;
+        }
+    }
+    releaseBO(bo);
+}
+
+/* With the client lock held: release closed BOs whose last submission has completed. */
+void SweetAdrenoUserClient::reapLocked()
+{
+    if(!zombies)return;
+    const bool ready=sweet_a618_render_ready();
+    unsigned kept=0;
+    for(unsigned i=0;i<zombie_count;i++){
+        if(fence_done(zombies[i].fence) || !ready)releaseBO(&zombies[i]);
+        else zombies[kept++]=zombies[i];
+    }
+    zombie_count=kept;
+}
+
+/* With the client lock held, the GPU done with it. */
+void SweetAdrenoUserClient::releaseBO(sweet_bo *bo)
 {
     auto *memory=bo->memory;
     if(bo->surface){
@@ -903,17 +971,30 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
         }
         IOLockUnlock(lock);break;
     }
-    case kCpuPrep:
+    case kCpuPrep:{
         if(size<sizeof(r.prep))return kIOReturnBadArgument;
-        IOLockLock(lock);result=lookup(r.prep.handle)?kIOReturnSuccess:kIOReturnBadArgument;
-        IOLockUnlock(lock);break;
+        IOLockLock(lock);
+        const sweet_bo *bo=lookup(r.prep.handle);
+        const uint32_t fence=bo ? bo->fence : 0;
+        IOLockUnlock(lock);
+        if(!bo){result=kIOReturnBadArgument;break;}
+        if(r.prep.op&4u){               /* MSM_PREP_NOSYNC: only tell */
+            result=fence_done(fence) ? kIOReturnSuccess : kIOReturnBusy;
+            break;
+        }
+        result=sweet_a618_render_wait(fence,timeout_ms(r.prep.timeout.seconds,r.prep.timeout.nanoseconds))==0 ?
+            kIOReturnSuccess : kIOReturnTimeout;
+        break;
+    }
     case kSubmit:
         if(size<sizeof(r.submit))return kIOReturnBadArgument;
         result=submit(&r.submit);break;
     case kWaitFence:
         if(size<sizeof(r.wait))return kIOReturnBadArgument;
-        result=r.wait.fence<=sweet_a618_render_completed()?
-            kIOReturnSuccess:kIOReturnTimeout;break;
+        result=sweet_a618_render_wait(r.wait.fence,timeout_ms(r.wait.timeout.seconds,r.wait.timeout.nanoseconds))==0 ?
+            kIOReturnSuccess : kIOReturnTimeout;
+        IOLockLock(lock);reapLocked();IOLockUnlock(lock);
+        break;
     case kMadvise:
         if(size<sizeof(r.madvise))return kIOReturnBadArgument;
         r.madvise.retained=1;break;

@@ -159,6 +159,7 @@ PATCHES += (('xnu/patches/0207-sweet-a618-import-tables-in-halves.patch', {'ioki
 PATCHES += (('xnu/patches/0208-sweet-a618-system-memory-buffers.patch', {'iokit/Kernel/arm/SweetAdreno.cpp', 'iokit/Kernel/arm/sweet_a618_renderer.inc'}),)
 PATCHES += (('xnu/patches/0212-sweet-gpu-bringup-accepts-wfi.patch', {'bsd/dev/sweet_gpu_probe.c'}),)
 PATCHES += (('xnu/patches/0214-sweet-gpu-runtime-allows-cpu-idle.patch', {'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
+PATCHES += (('xnu/patches/0215-sweet-a618-async-submit.patch', {'iokit/Kernel/arm/sweet_a618_render_ring.inc', 'iokit/Kernel/arm/sweet_a618_renderer.inc', 'iokit/Kernel/arm/sweet_a618_render_bridge.h', 'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 
 
 def main():

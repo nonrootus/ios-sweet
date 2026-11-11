@@ -140,4 +140,6 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet
 # 0218: RNDIS answers never a whole number of EP0 packets (no ZLP needed).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"
 # 0219: the USB device survives a bus reset; RNDIS notifications and answers queued.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"
+# 0222: USB network keeps going: endpoint halt requests, failed TX starts, TX watchdog.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0222-sweet-usb-endpoint-halt-and-tx-watchdog.patch"

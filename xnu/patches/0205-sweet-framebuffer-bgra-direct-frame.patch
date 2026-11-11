@@ -1,0 +1,23 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -452,6 +452,20 @@ AppleCLCD::present(const uint8_t *rec)
+ 			s->release();
+ 			continue;
+ 		}
++		/* The sRGB device tree makes the display surfaces BGRA: same rule as for b3a8 above. */
++		if (s->pixelFormat == SWEET_FB_FORMAT_BGRA && mask == 1 && layer == 0 && dx == 0 && dy == 0 &&
++		    sx == 22 && sy == 18 && w == 1080 && h == 2400 && fWidth == 1080 && fHeight == 2400 &&
++		    fRowBytes == 4320) {
++			sweet_a618_note_display(id);
++			if (sweet_a618_direct_take(id)) {
++				static unsigned bgra_skipped;
++				if (bgra_skipped++ < 8) {
++					IOLog("SWEET FB: BGRA frame already on the panel swap=%u surface=%u\n", get32(rec, 0x50), id);
++				}
++				s->release();
++				continue;
++			}
++		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||

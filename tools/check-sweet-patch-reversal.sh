@@ -111,3 +111,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0202-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch"
 # 0204: MobileGestalt cache set aside once for the sRGB device tree.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0204-sweet-mobilegestalt-cache-aside.patch"
+# 0205: a full-screen BGRA layer the GPU already put on the panel is not copied again.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0205-sweet-framebuffer-bgra-direct-frame.patch"

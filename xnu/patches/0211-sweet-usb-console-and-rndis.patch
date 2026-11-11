@@ -1,0 +1,668 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -39,7 +39,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_usb_probe(void);
+-static void sweet_usb_gadget_start(vm_offset_t dwc, bool serial);
++static void sweet_usb_gadget_start(vm_offset_t dwc, int mode);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+ #define GCC_PA                  0x00100000
+@@ -80,7 +80,7 @@ sweet_usb_probe(void)
+ 	uint32_t gdscr, cbcr[sizeof(usb_cbcr) / sizeof(usb_cbcr[0])];
+ 	bool clocks_on = true;
+ 
+-	/* sweetusb=0 off, 1 probe, 2 ECM, 3 ACM console output. */
++	/* sweetusb=0 off, 1 probe, 2 ECM, 3 ACM console output, 4 ACM console + RNDIS network. */
+ 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		return;
+@@ -116,8 +116,8 @@ sweet_usb_probe(void)
+ 	printf("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+-	if (enabled == 2 || enabled == 3) {
+-		sweet_usb_gadget_start(dwc, enabled == 3);
++	if (enabled >= 2 && enabled <= 4) {
++		sweet_usb_gadget_start(dwc, enabled);
+ 	}
+ 	if (cbcr[5] & CBCR_CLK_OFF) {
+ 		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
+@@ -207,6 +207,13 @@ sweet_usb_probe(void)
+ #define UD_NOTIFY       0x1300          /* 16-byte notification */
+ #define UD_RX           0x2000          /* one received frame */
+ #define UD_TX           0x2800          /* one frame to send */
++/* sweetusb=4: the RNDIS function's own endpoints and buffers */
++#define UD_TRB_NRX      0x1060          /* ep3 OUT (bulk) */
++#define UD_TRB_NTX      0x1070          /* ep3 IN (bulk) */
++#define UD_TRB_NINT     0x1080          /* ep4 IN (interrupt) */
++#define UD_NNOTIFY      0x1320          /* 8-byte RESPONSE_AVAILABLE */
++#define UD_NRX          0x3000
++#define UD_NTX          0x3800
+ #define UD_FRAME_MAX    0x800
+ #define UD_SIZE         0x4000
+ 
+@@ -214,6 +221,9 @@ sweet_usb_probe(void)
+ #define EP_RX           2               /* 0x01 bulk OUT */
+ #define EP_TX           3               /* 0x81 bulk IN */
+ #define EP_INT          5               /* 0x82 interrupt IN */
++#define EP_NRX          6               /* 0x03 bulk OUT (RNDIS) */
++#define EP_NTX          7               /* 0x83 bulk IN (RNDIS) */
++#define EP_NINT         9               /* 0x84 interrupt IN (RNDIS) */
+ #define TRBCTL_NORMAL   (1u << 4)
+ 
+ #define UD_TXQ          32
+@@ -230,6 +240,17 @@ static struct {
+ 	bool        configured;
+ 	uint8_t     data_alt;       /* data interface alternate setting */
+ 	bool        serial, serial_dtr, serial_line_out;
++	bool        net, rndis;     /* a network function (ECM, or RNDIS beside the console) */
++	unsigned    ep_nrx, ep_ntx, ep_nint;
++	uint32_t    trb_nrx, trb_ntx, trb_nint, buf_nrx, buf_ntx, buf_nnotify;
++	uint32_t    net_addr;       /* ue0's IPv4 address; the host is .1 of the same /24 */
++	bool        net_tx_busy;
++	bool        rndis_cmd_out;
++	uint32_t    ep0_out_len;
++	uint32_t    rndis_filter;   /* OID_GEN_CURRENT_PACKET_FILTER: 0 = no data yet */
++	uint8_t     rndis_resp[512];
++	uint32_t    rndis_resp_len;
++	uint64_t    rx_dropped;
+ 	uint8_t     serial_line[7];
+ 	uint64_t    serial_position;
+ 	/* network */
+@@ -370,6 +391,35 @@ static const uint8_t ud_serial_cfg_desc[] = {
+ 	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
+ };
+ _Static_assert(sizeof(ud_serial_cfg_desc) == 67, "ACM configuration length");
++/* sweetusb=4: console (ACM, interfaces 0/1) and RNDIS (interfaces 2/3), each behind an IAD. */
++static const uint8_t ud_combo_dev_desc[18] = {
++	18, 1, 0x00, 0x02, 0xef, 0x02, 0x01, 64,
++	0x09, 0x12, 0x03, 0x00, 0x00, 0x01, 1, 2, 3, 1,
++};
++static const uint8_t ud_combo_cfg_desc[] = {
++	9, 2, 141, 0, 4, 1, 0, 0x80, 250,
++	8, 0x0b, 0, 2, 0x02, 0x02, 0x01, 0,       /* IAD: ACM console */
++	9, 4, 0, 0, 1, 0x02, 0x02, 0x01, 0,
++	5, 0x24, 0x00, 0x10, 0x01,
++	5, 0x24, 0x01, 0, 1,
++	4, 0x24, 0x02, 2,
++	5, 0x24, 0x06, 0, 1,
++	7, 5, 0x82, 0x03, 16, 0, 9,
++	9, 4, 1, 0, 2, 0x0a, 0, 0, 0,
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
++	8, 0x0b, 2, 2, 0xe0, 0x01, 0x03, 0,       /* IAD: RNDIS (wireless controller / RNDIS) */
++	9, 4, 2, 0, 1, 0xe0, 0x01, 0x03, 0,
++	5, 0x24, 0x00, 0x10, 0x01,
++	5, 0x24, 0x01, 0, 3,
++	4, 0x24, 0x02, 0,
++	5, 0x24, 0x06, 2, 3,
++	7, 5, 0x84, 0x03, 8, 0, 9,
++	9, 4, 3, 0, 2, 0x0a, 0, 0, 0,
++	7, 5, 0x83, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x03, 0x02, 0x00, 0x02, 0,
++};
++_Static_assert(sizeof(ud_combo_cfg_desc) == 141, "console + RNDIS configuration length");
+ extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ extern uint64_t sweet_log_position(void);
+ 
+@@ -389,7 +439,8 @@ ud_string(unsigned idx, uint8_t *out)
+ 	if (idx >= sizeof(ud_strings) / sizeof(ud_strings[0])) {
+ 		return 0;
+ 	}
+-	const char *str = ud.serial && idx == 2 ? "Sweet iOS (USB console)" : ud_strings[idx];
++	const char *str = ud.rndis && idx == 2 ? "Sweet iOS (USB console + network)" :
++	    ud.serial && idx == 2 ? "Sweet iOS (USB console)" : ud_strings[idx];
+ 	uint32_t n = 2;
+ 	for (; *str && n < 126; str++) {
+ 		out[n++] = (uint8_t)*str;
+@@ -401,9 +452,195 @@ ud_string(unsigned idx, uint8_t *out)
+ }
+ 
+ static void ud_rx_arm(void);
++static void ud_serial_rx_arm(void);
+ static void ud_tx_kick_locked(void);
+ static void ud_link_event(bool up);
+ 
++/* ---- RNDIS control (sweetusb=4) ---- */
++
++#define RNDIS_PACKET            1
++#define RNDIS_INIT              2
++#define RNDIS_HALT              3
++#define RNDIS_QUERY             4
++#define RNDIS_SET               5
++#define RNDIS_RESET             6
++#define RNDIS_KEEPALIVE         8
++#define RNDIS_CMPLT             0x80000000u
++#define RNDIS_SUCCESS           0u
++#define RNDIS_NOT_SUPPORTED     0xc00000bbu
++#define RNDIS_INVALID_DATA      0xc0010015u
++#define RNDIS_HEADER            44u
++#define RNDIS_MAX_TRANSFER      1600u
++
++static void
++rndis_put32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
++}
++
++static uint32_t
++rndis_get32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++/* The host side's MAC: RNDIS reports it as the adapter's own (OID_802_3_*_ADDRESS). */
++static const uint8_t ud_host_mac[ETHER_ADDR_LEN] = { 0x02, 0x00, 0x5e, 0x77, 0xee, 0x01 };
++
++/* Answer to an OID query in out; its length, or ~0u if the OID is not supported. */
++static uint32_t
++rndis_query(uint32_t oid, uint8_t *out)
++{
++	static const uint32_t supported[] = {
++		0x00010101, 0x00010102, 0x00010103, 0x00010104, 0x00010106, 0x00010107, 0x0001010a,
++		0x0001010b, 0x0001010c, 0x0001010d, 0x0001010e, 0x00010111, 0x00010114, 0x00010202,
++		0x00020101, 0x00020102, 0x00020103, 0x00020104, 0x00020105,
++		0x01010101, 0x01010102, 0x01010103, 0x01010104,
++		0x01020101, 0x01020102, 0x01020103,
++	};
++	uint32_t value;
++
++	switch (oid) {
++	case 0x00010101:        /* OID_GEN_SUPPORTED_LIST */
++		for (unsigned i = 0; i < sizeof(supported) / sizeof(supported[0]); i++) {
++			rndis_put32(out + 4 * i, supported[i]);
++		}
++		return sizeof(supported);
++	case 0x0001010d: {      /* OID_GEN_VENDOR_DESCRIPTION */
++		static const char desc[] = "ios-sweet USB network";
++		memcpy(out, desc, sizeof(desc));
++		return sizeof(desc);
++	}
++	case 0x01010101:        /* OID_802_3_PERMANENT_ADDRESS */
++	case 0x01010102:        /* OID_802_3_CURRENT_ADDRESS */
++		memcpy(out, ud_host_mac, ETHER_ADDR_LEN);
++		return ETHER_ADDR_LEN;
++	case 0x00010102: value = 0; break;                      /* hardware status: ready */
++	case 0x00010103: case 0x00010104: value = 0; break;     /* medium: 802.3 */
++	case 0x00010106: value = ETHERMTU; break;               /* maximum frame size */
++	case 0x00010107: value = 4800000; break;                /* link speed, 100 bps units: 480 Mbit/s */
++	case 0x0001010a: case 0x0001010b: value = ETHER_MAX_LEN - ETHER_CRC_LEN; break;
++	case 0x0001010c: value = 0x00ffffff; break;             /* vendor ID: none */
++	case 0x0001010e: value = ud.rndis_filter; break;
++	case 0x00010111: value = RNDIS_HEADER + ETHER_MAX_LEN - ETHER_CRC_LEN; break;
++	case 0x00010114: value = 0; break;                      /* media connect status: connected */
++	case 0x00010202: value = 0; break;                      /* physical medium: unspecified */
++	case 0x00020101: value = (uint32_t)ud.tx_frames; break;
++	case 0x00020102: value = (uint32_t)ud.rx_frames; break;
++	case 0x00020103: case 0x00020104: value = 0; break;
++	case 0x00020105: value = (uint32_t)ud.rx_dropped; break;
++	case 0x01010103: value = 0xe0000000u; break;            /* multicast list: the base only */
++	case 0x01010104: value = 32; break;                     /* maximum multicast list size */
++	case 0x01020101: case 0x01020102: case 0x01020103: value = 0; break;
++	default:
++		return ~0u;
++	}
++	rndis_put32(out, value);
++	return 4;
++}
++
++/* RESPONSE_AVAILABLE on the RNDIS interrupt endpoint: the host then asks for it on endpoint 0. */
++static void
++rndis_notify(void)
++{
++	uint8_t *n = (uint8_t *)(ud.dma + ud.buf_nnotify);
++	memset(n, 0, 8);
++	n[0] = 1;
++	ud_start_trb(ud.ep_nint, ud.trb_nint, ud.buf_nnotify, 8, TRBCTL_NORMAL);
++}
++
++/* One encapsulated command (len bytes at msg): its completion goes to ud.rndis_resp. */
++static void
++rndis_command(const uint8_t *msg, uint32_t len)
++{
++	uint8_t *r = ud.rndis_resp;
++	uint32_t type = len >= 8 ? rndis_get32(msg) : 0;
++	uint32_t id = len >= 12 ? rndis_get32(msg + 8) : 0;
++	static unsigned logged;
++
++	if (logged++ < 24) {
++		printf("SWEET USB: RNDIS message %u (%u bytes)\n", type, len);
++	}
++	memset(r, 0, 64);
++	switch (type) {
++	case RNDIS_INIT:
++		rndis_put32(r, RNDIS_INIT | RNDIS_CMPLT);
++		rndis_put32(r + 4, 52);
++		rndis_put32(r + 8, id);
++		rndis_put32(r + 12, RNDIS_SUCCESS);
++		rndis_put32(r + 16, 1);                 /* version 1.0 */
++		rndis_put32(r + 24, 1);                 /* connectionless */
++		rndis_put32(r + 28, 0);                 /* 802.3 */
++		rndis_put32(r + 32, 1);                 /* one packet a transfer */
++		rndis_put32(r + 36, RNDIS_MAX_TRANSFER);
++		ud.rndis_resp_len = 52;
++		break;
++	case RNDIS_QUERY: {
++		uint32_t oid = len >= 16 ? rndis_get32(msg + 12) : 0;
++		uint32_t n = rndis_query(oid, r + 24);
++		bool ok = n != ~0u;
++		rndis_put32(r, RNDIS_QUERY | RNDIS_CMPLT);
++		rndis_put32(r + 4, 24 + (ok ? n : 0));
++		rndis_put32(r + 8, id);
++		rndis_put32(r + 12, ok ? RNDIS_SUCCESS : RNDIS_NOT_SUPPORTED);
++		rndis_put32(r + 16, ok ? n : 0);
++		rndis_put32(r + 20, ok && n ? 16 : 0);
++		ud.rndis_resp_len = 24 + (ok ? n : 0);
++		if (!ok && logged < 48) {
++			printf("SWEET USB: RNDIS query of OID 0x%08x not supported\n", oid);
++		}
++		break;
++	}
++	case RNDIS_SET: {
++		uint32_t oid = len >= 16 ? rndis_get32(msg + 12) : 0;
++		uint32_t blen = len >= 20 ? rndis_get32(msg + 16) : 0;
++		uint32_t boff = len >= 24 ? rndis_get32(msg + 20) + 8 : 0;
++		uint32_t status = RNDIS_SUCCESS;
++		if (oid == 0x0001010e) {                /* OID_GEN_CURRENT_PACKET_FILTER */
++			if (blen >= 4 && boff <= len && blen <= len - boff) {
++				bool was = ud.rndis_filter != 0;
++				ud.rndis_filter = rndis_get32(msg + boff);
++				printf("SWEET USB: RNDIS packet filter 0x%x\n", ud.rndis_filter);
++				if (!was && ud.rndis_filter) {
++					ud_link_event(true);
++				}
++			} else {
++				status = RNDIS_INVALID_DATA;
++			}
++		} else if (oid != 0x01010103 && oid != 0x00010116) {    /* multicast list, driver version */
++			status = RNDIS_NOT_SUPPORTED;
++		}
++		rndis_put32(r, RNDIS_SET | RNDIS_CMPLT);
++		rndis_put32(r + 4, 16);
++		rndis_put32(r + 8, id);
++		rndis_put32(r + 12, status);
++		ud.rndis_resp_len = 16;
++		break;
++	}
++	case RNDIS_RESET:
++		rndis_put32(r, RNDIS_RESET | RNDIS_CMPLT);
++		rndis_put32(r + 4, 16);
++		rndis_put32(r + 8, RNDIS_SUCCESS);
++		rndis_put32(r + 12, 1);                 /* addressing reset */
++		ud.rndis_filter = 0;
++		ud.rndis_resp_len = 16;
++		break;
++	case RNDIS_KEEPALIVE:
++		rndis_put32(r, RNDIS_KEEPALIVE | RNDIS_CMPLT);
++		rndis_put32(r + 4, 16);
++		rndis_put32(r + 8, id);
++		rndis_put32(r + 12, RNDIS_SUCCESS);
++		ud.rndis_resp_len = 16;
++		break;
++	case RNDIS_HALT:
++		ud.rndis_filter = 0;
++		return;                                 /* no completion */
++	default:
++		return;
++	}
++	rndis_notify();
++}
++
+ /* NETWORK_CONNECTION notification: the host brings its link up on it. */
+ static void
+ ud_notify_connected(void)
+@@ -434,10 +671,28 @@ ud_configure(void)
+ 		printf("SWEET USB: data endpoints setup failed\n");
+ 		return;
+ 	}
+-	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | (1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT));
++	/* The RNDIS function: bulk 0x03/0x83 (TX FIFO 3), interrupt 0x84 (TX FIFO 4). */
++	if (ud.rndis &&
++	    (ud_epcmd(EP_NRX, DEPCMD_SETEPCONFIG, (2u << 1) | (512u << 3), (1u << 8) | ((uint32_t)EP_NRX << 25), 0) ||
++	    ud_epcmd(EP_NRX, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
++	    ud_epcmd(EP_NTX, DEPCMD_SETEPCONFIG, (2u << 1) | (512u << 3) | (3u << 17), (1u << 8) | ((uint32_t)EP_NTX << 25), 0) ||
++	    ud_epcmd(EP_NTX, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
++	    ud_epcmd(EP_NINT, DEPCMD_SETEPCONFIG, (3u << 1) | (8u << 3) | (4u << 17),
++	    (1u << 8) | (8u << 16) | ((uint32_t)EP_NINT << 25), 0) ||
++	    ud_epcmd(EP_NINT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0))) {
++		printf("SWEET USB: RNDIS endpoints setup failed\n");
++		return;
++	}
++	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | (1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT) |
++	    (ud.rndis ? (1u << EP_NRX) | (1u << EP_NTX) | (1u << EP_NINT) : 0));
+ 	ud.configured = true;
+-	ud_rx_arm();
+-	printf("SWEET USB: %s endpoints configured\n", ud.serial ? "ACM" : "ECM");
++	if (ud.serial) {
++		ud_serial_rx_arm();
++	}
++	if (ud.net) {
++		ud_rx_arm();
++	}
++	printf("SWEET USB: %s endpoints configured\n", ud.rndis ? "ACM + RNDIS" : ud.serial ? "ACM" : "ECM");
+ }
+ 
+ static void
+@@ -455,7 +710,24 @@ ud_setup(void)
+ 	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
+ 	ud.data_in = (type & 0x80) != 0;
+ 	ud.serial_line_out = false;
+-	if (ud.serial && (type & 0x60) == 0x20) {
++	ud.rndis_cmd_out = false;
++	if (ud.rndis && (type & 0x60) == 0x20 && (index & 0xff) == 2) {
++		if (type == 0x21 && req == 0x00 && length > 0 && length <= 512) {
++			ud.rndis_cmd_out = true;        /* SEND_ENCAPSULATED_COMMAND */
++			ud.ep0_out_len = length;
++		} else if (type == 0xa1 && req == 0x01) {       /* GET_ENCAPSULATED_RESPONSE */
++			if (ud.rndis_resp_len) {
++				n = ud.rndis_resp_len;
++				memcpy(data, ud.rndis_resp, n);
++				ud.rndis_resp_len = 0;
++			} else {
++				data[0] = 0;
++				n = 1;
++			}
++		} else {
++			ok = false;
++		}
++	} else if (ud.serial && (type & 0x60) == 0x20) {
+ 		if (type == 0x21 && req == 0x20 && index == 0 && length == sizeof(ud.serial_line)) {
+ 			ud.serial_line_out = true; /* SET_LINE_CODING */
+ 		} else if (type == 0xa1 && req == 0x21 && index == 0) {
+@@ -479,11 +751,11 @@ ud_setup(void)
+ 		switch (value >> 8) {
+ 		case 1:
+ 			n = sizeof(ud_dev_desc);
+-			memcpy(data, ud.serial ? ud_serial_dev_desc : ud_dev_desc, n);
++			memcpy(data, ud.rndis ? ud_combo_dev_desc : ud.serial ? ud_serial_dev_desc : ud_dev_desc, n);
+ 			break;
+ 		case 2:
+-			n = ud.serial ? sizeof(ud_serial_cfg_desc) : sizeof(ud_cfg_desc);
+-			memcpy(data, ud.serial ? ud_serial_cfg_desc : ud_cfg_desc, n);
++			n = ud.rndis ? sizeof(ud_combo_cfg_desc) : ud.serial ? sizeof(ud_serial_cfg_desc) : sizeof(ud_cfg_desc);
++			memcpy(data, ud.rndis ? ud_combo_cfg_desc : ud.serial ? ud_serial_cfg_desc : ud_cfg_desc, n);
+ 			break;
+ 		case 3: n = ud_string(value & 0xff, data); ok = n != 0; break;
+ 		default: ok = false; break;
+@@ -502,7 +774,7 @@ ud_setup(void)
+ 	} else if (req == 0) {          /* GET_STATUS */
+ 		data[0] = 0; data[1] = 0; n = 2;
+ 	} else if (req == 11) {         /* SET_INTERFACE */
+-		if (!ud.serial && index == 1) {
++		if (ud.net && !ud.rndis && index == 1) {
+ 			ud.data_alt = (uint8_t)value;
+ 			if (value == 1 && ud.configured) {
+ 				ud_notify_connected();
+@@ -530,9 +802,9 @@ ud_setup(void)
+ 		}
+ 		ud_start(1, UD_DATA, n, TRBCTL_DATA);
+ 	} else {
+-		/* DWC3 control OUT TRBs cover one whole EP0 packet, including
+-		 * the seven-byte ACM SET_LINE_CODING payload. */
+-		ud_start(0, UD_DATA, 64, TRBCTL_DATA);
++		/* DWC3 control OUT TRBs cover whole EP0 packets: the seven-byte ACM
++		 * SET_LINE_CODING payload, or an RNDIS message of up to 512 bytes. */
++		ud_start(0, UD_DATA, (length + 63u) & ~63u, TRBCTL_DATA);
+ 	}
+ }
+ 
+@@ -540,6 +812,13 @@ ud_setup(void)
+ 
+ static void
+ ud_rx_arm(void)
++{
++	ud_start_trb(ud.ep_nrx, ud.trb_nrx, ud.buf_nrx, UD_FRAME_MAX, TRBCTL_NORMAL);
++}
++
++/* The console's OUT endpoint: anything the host sends is ignored. */
++static void
++ud_serial_rx_arm(void)
+ {
+ 	ud_start_trb(EP_RX, UD_TRB_RX, UD_RX, UD_FRAME_MAX, TRBCTL_NORMAL);
+ }
+@@ -547,10 +826,23 @@ ud_rx_arm(void)
+ static void
+ ud_rx_done(void)
+ {
+-	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + UD_TRB_RX);
+-	ud_sync(UD_TRB_RX, 16);
++	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + ud.trb_nrx);
++	ud_sync(ud.trb_nrx, 16);
+ 	uint32_t len = UD_FRAME_MAX - (t[2] & 0xffffff);
+-	ud_sync(UD_RX, UD_FRAME_MAX);
++	ud_sync(ud.buf_nrx, UD_FRAME_MAX);
++	const uint8_t *frame = (const uint8_t *)(ud.dma + ud.buf_nrx);
++	if (ud.rndis) {
++		/* One RNDIS_PACKET_MSG a transfer (INIT_CMPLT said so): the frame is DataOffset after +8. */
++		uint32_t off = len >= RNDIS_HEADER ? rndis_get32(frame + 8) + 8 : 0;
++		uint32_t dlen = len >= RNDIS_HEADER ? rndis_get32(frame + 12) : 0;
++		if (len < RNDIS_HEADER || rndis_get32(frame) != RNDIS_PACKET || off < 8 || off > len || dlen > len - off) {
++			ud.rx_dropped++;
++			len = 0;
++		} else {
++			frame += off;
++			len = dlen;
++		}
++	}
+ 	if (ud.ifp != NULL && len >= ETHER_HDR_LEN && len <= ETHER_MAX_LEN) {
+ 		/*
+ 		 * One mbuf with a 2 KiB cluster holds any frame. (mbuf_allocpacket
+@@ -562,7 +854,7 @@ ud_rx_done(void)
+ 		    mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
+ 		    (mbuf_flags(m) & MBUF_EXT) && mbuf_maxlen(m) >= len) {
+ 			struct ifnet_stat_increment_param stats = {};
+-			memcpy(mbuf_data(m), (const void *)(ud.dma + UD_RX), len);
++			memcpy(mbuf_data(m), frame, len);
+ 			mbuf_setlen(m, len);
+ 			mbuf_pkthdr_setlen(m, len);
+ 			void *frame_header = mbuf_data(m);
+@@ -585,7 +877,7 @@ ud_rx_done(void)
+ static void
+ ud_tx_kick_locked(void)
+ {
+-	while (!ud.tx_busy && ud.txq_count > 0 && ud.configured) {
++	while (!ud.net_tx_busy && ud.txq_count > 0 && ud.configured) {
+ 		mbuf_t m = ud.txq[ud.txq_head];
+ 		ud.txq_head = (ud.txq_head + 1) % UD_TXQ;
+ 		ud.txq_count--;
+@@ -594,16 +886,27 @@ ud_tx_kick_locked(void)
+ 			mbuf_freem(m);
+ 			continue;
+ 		}
+-		mbuf_copydata(m, 0, len, (void *)(ud.dma + UD_TX));
++		uint8_t *out = (uint8_t *)(ud.dma + ud.buf_ntx);
++		size_t head = ud.rndis ? RNDIS_HEADER : 0;
++		if (ud.rndis) {
++			memset(out, 0, RNDIS_HEADER);
++			rndis_put32(out, RNDIS_PACKET);
++			rndis_put32(out + 4, (uint32_t)(RNDIS_HEADER + len));
++			rndis_put32(out + 8, RNDIS_HEADER - 8);         /* DataOffset, from +8 */
++			rndis_put32(out + 12, (uint32_t)len);
++		}
++		mbuf_copydata(m, 0, len, out + head);
+ 		mbuf_freem(m);
+-		/* A frame of a multiple of 512 bytes would need a zero-length
+-		 * packet to end it; one pad byte does the same (IP ignores it). */
++		len += head;
++		/* A transfer of a multiple of 512 bytes would need a zero-length
++		 * packet to end it; one pad byte does the same (IP and Windows'
++		 * RNDIS driver ignore it, as with Linux's gadget). */
+ 		if ((len % 512) == 0) {
+-			((uint8_t *)(ud.dma + UD_TX))[len++] = 0;
++			out[len++] = 0;
+ 		}
+-		ud.tx_busy = true;
++		ud.net_tx_busy = true;
+ 		ud.tx_frames++;
+-		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, (uint32_t)len, TRBCTL_NORMAL);
++		ud_start_trb(ud.ep_ntx, ud.trb_ntx, ud.buf_ntx, (uint32_t)len, TRBCTL_NORMAL);
+ 	}
+ }
+ 
+@@ -611,7 +914,7 @@ static errno_t
+ ud_if_output(ifnet_t ifp, mbuf_t m)
+ {
+ 	lck_mtx_lock(ud.lock);
+-	if (ud.txq_count == UD_TXQ || !ud.configured) {
++	if (ud.txq_count == UD_TXQ || !ud.configured || (ud.rndis && ud.rndis_filter == 0)) {
+ 		lck_mtx_unlock(ud.lock);
+ 		mbuf_freem(m);
+ 		ifnet_stat_increment_out(ifp, 0, 0, 1);
+@@ -678,7 +981,8 @@ ud_if_detach(ifnet_t ifp __unused)
+ {
+ }
+ 
+-/* ue0, 192.168.7.2/24 (the host side is 192.168.7.1). */
++/* ue0, 192.168.7.2/24 (the host side is 192.168.7.1); with RNDIS 192.168.137.2/24, beside the
++ * PC's Internet Connection Sharing at 192.168.137.1. */
+ static void
+ ud_if_create(void)
+ {
+@@ -737,7 +1041,7 @@ ud_if_create(void)
+ 		struct sockaddr_in *a = (struct sockaddr_in *)&ifra.ifra_addr;
+ 		a->sin_len = sizeof(*a);
+ 		a->sin_family = AF_INET;
+-		a->sin_addr.s_addr = htonl(0xc0a80702);         /* 192.168.7.2 */
++		a->sin_addr.s_addr = htonl(ud.net_addr);
+ 		a = (struct sockaddr_in *)&ifra.ifra_mask;
+ 		a->sin_len = sizeof(*a);
+ 		a->sin_family = AF_INET;
+@@ -745,12 +1049,13 @@ ud_if_create(void)
+ 		a = (struct sockaddr_in *)&ifra.ifra_broadaddr;
+ 		a->sin_len = sizeof(*a);
+ 		a->sin_family = AF_INET;
+-		a->sin_addr.s_addr = htonl(0xc0a807ff);
++		a->sin_addr.s_addr = htonl((ud.net_addr & 0xffffff00u) | 0xff);
+ 		err = sock_ioctl(so, SIOCAIFADDR, &ifra);
+ 		sock_close(so);
+ 	}
+ 	ifnet_set_flags(ud.ifp, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);
+-	printf("SWEET USB: ue0 192.168.7.2/24 %s (err %d)\n", err ? "NOT configured" : "up", err);
++	printf("SWEET USB: ue0 %u.%u.%u.%u/24 %s (err %d)\n", ud.net_addr >> 24, (ud.net_addr >> 16) & 0xff,
++	    (ud.net_addr >> 8) & 0xff, ud.net_addr & 0xff, err ? "NOT configured" : "up", err);
+ }
+ 
+ /* Poll-thread only. Short packets let usbser deliver the stream promptly. */
+@@ -793,25 +1098,25 @@ ud_event(uint32_t ev)
+ 	unsigned type = (ev >> 6) & 0xf;
+ 	unsigned status = (ev >> 12) & 0xf;
+ 
+-	if (ep == EP_RX && type == 1) {
+-		if (ud.serial) {
+-			ud_rx_arm(); /* console output only */
+-			return;
+-		}
++	if (ud.net && ep == ud.ep_nrx && type == 1) {
+ 		ud_rx_done();
+ 		return;
+ 	}
+-	if (ep == EP_TX && type == 1) {
+-		if (ud.serial) {
+-			ud.tx_busy = false;
+-			return;
+-		}
++	if (ud.net && ep == ud.ep_ntx && type == 1) {
+ 		lck_mtx_lock(ud.lock);
+-		ud.tx_busy = false;
++		ud.net_tx_busy = false;
+ 		ud_tx_kick_locked();
+ 		lck_mtx_unlock(ud.lock);
+ 		return;
+ 	}
++	if (ud.serial && ep == EP_RX && type == 1) {
++		ud_serial_rx_arm(); /* console output only */
++		return;
++	}
++	if (ud.serial && ep == EP_TX && type == 1) {
++		ud.tx_busy = false;
++		return;
++	}
+ 	if (ep > 1) {
+ 		return;
+ 	}
+@@ -828,6 +1133,11 @@ ud_event(uint32_t ev)
+ 			ud_setup();
+ 			break;
+ 		case EP0_DATA:
++			if (ud.rndis_cmd_out) {
++				ud_sync(UD_DATA, ud.ep0_out_len);
++				rndis_command((const uint8_t *)(ud.dma + UD_DATA), ud.ep0_out_len);
++				ud.rndis_cmd_out = false;
++			}
+ 			if (ud.serial_line_out) {
+ 				ud_sync(UD_DATA, sizeof(ud.serial_line));
+ 				memcpy(ud.serial_line, (const void *)(ud.dma + UD_DATA), sizeof(ud.serial_line));
+@@ -872,8 +1182,9 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 		}
+ 		if (ud.serial) {
+ 			ud_serial_tx();
+-		} else if ((++ticks % 30000) == 0) {
+-			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
++		}
++		if (ud.net && (++ticks % 30000) == 0) {
++			printf("SWEET USB: ue0 rx %llu tx %llu frames, %llu dropped\n", ud.rx_frames, ud.tx_frames, ud.rx_dropped);
+ 		}
+ 		ud_sleep_ms(1);
+ 	}
+@@ -900,7 +1211,7 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+ 	to.sin_len = sizeof(to);
+ 	to.sin_family = AF_INET;
+ 	to.sin_port = htons(5140);
+-	to.sin_addr.s_addr = htonl(0xc0a80701);         /* 192.168.7.1 */
++	to.sin_addr.s_addr = htonl((ud.net_addr & 0xffffff00u) | 1);   /* the host */
+ 	for (;;) {
+ 		ud_sleep_ms(100);
+ 		if (!ud.configured) {
+@@ -926,8 +1237,9 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+ }
+ 
+ static void
+-sweet_usb_gadget_start(vm_offset_t dwc, bool serial)
++sweet_usb_gadget_start(vm_offset_t dwc, int mode)
+ {
++	bool serial = mode == 3 || mode == 4;
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
+@@ -942,12 +1254,28 @@ sweet_usb_gadget_start(vm_offset_t dwc, bool serial)
+ 	}
+ 	ud.dma_pa = ptoa_64(pn);
+ 	ud.serial = serial;
++	ud.net = mode == 2 || mode == 4;
++	ud.rndis = mode == 4;
++	if (ud.rndis) {
++		ud.ep_nrx = EP_NRX; ud.ep_ntx = EP_NTX; ud.ep_nint = EP_NINT;
++		ud.trb_nrx = UD_TRB_NRX; ud.trb_ntx = UD_TRB_NTX; ud.trb_nint = UD_TRB_NINT;
++		ud.buf_nrx = UD_NRX; ud.buf_ntx = UD_NTX; ud.buf_nnotify = UD_NNOTIFY;
++		ud.net_addr = 0xc0a88902;               /* 192.168.137.2 */
++	} else {
++		ud.ep_nrx = EP_RX; ud.ep_ntx = EP_TX; ud.ep_nint = EP_INT;
++		ud.trb_nrx = UD_TRB_RX; ud.trb_ntx = UD_TRB_TX; ud.trb_nint = UD_TRB_INT;
++		ud.buf_nrx = UD_RX; ud.buf_ntx = UD_TX; ud.buf_nnotify = UD_NOTIFY;
++		ud.net_addr = 0xc0a80702;               /* 192.168.7.2 */
++	}
+ 	if (serial) {
+ 		const uint8_t line[] = {0x00, 0xc2, 0x01, 0x00, 0, 0, 8}; /* 115200 8N1 */
+ 		memcpy(ud.serial_line, line, sizeof(line));
+-	} else {
++	}
++	if (ud.net) {
+ 		ud_if_create();
+ 	}
++	printf("SWEET USB: TX FIFOs 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n", dwc_rd(0xc300), dwc_rd(0xc304),
++	    dwc_rd(0xc308), dwc_rd(0xc30c), dwc_rd(0xc310));
+ 
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+@@ -1007,7 +1335,8 @@ sweet_usb_gadget_start(vm_offset_t dwc, bool serial)
+ 	}
+ 	int livelog = 1;
+ 	PE_parse_boot_argn("sweetusblog", &livelog, sizeof(livelog));
+-	if (livelog && ud.ifp != NULL && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
++	/* (with the console beside it, the console carries the log) */
++	if (livelog && ud.ifp != NULL && !ud.serial && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+ }

@@ -1,0 +1,72 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5577,7 +5577,8 @@ sweet_exec_wants_loader(struct image_params *imgp)
+ 
+ 	if (requested < 0) {
+ 		int value = 0;
+-		requested = PE_parse_boot_argn("sweetcagpu", &value, sizeof(value)) && value == 1;
++		/* Off unless sweetsbloader=1: a jailbroken root injects SpringBoard's tweaks itself. */
++		requested = PE_parse_boot_argn("sweetsbloader", &value, sizeof(value)) && value == 1;
+ 	}
+ 	return requested && imgp->ip_strings != NULL &&
+ 	       strcmp(imgp->ip_strings + strlen(EXECUTABLE_KEY),
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -412,38 +412,14 @@ sweet_renderer_dyld_policy(proc_t p, int call, user_addr_t arg)
+ 	if (!sweet_renderer_dyld_enabled) {
+ 		return ENOPOLICY;
+ 	}
+-	static const unsigned char expected[CS_CDHASH_LEN] = {
+-		0x89, 0xe6, 0x32, 0x85, 0x41, 0xc2, 0xe3, 0x75, 0x22, 0xd9,
+-		0x0f, 0xa4, 0xa6, 0x93, 0xc7, 0x46, 0x82, 0x5b, 0x22, 0xa8,
+-	};
+-	unsigned char actual[CS_CDHASH_LEN];
+ 	if (call != 0x5a || !proc_is64bit(p) || proc_ppid(p) != 1) {
+ 		return ENOPOLICY;
+ 	}
+-
+-	vnode_t executable = proc_getexecutablevnode(p);
+-	if (executable == NULLVP) {
+-		return ENOPOLICY;
+-	}
+-	char path[MAXPATHLEN];
+-	int length = sizeof(path);
+-	int error = vn_getpath(executable, path, &length);
+-	vnode_put(executable);
+ 	/*
+-	 * The signed window server from the GPU test root, or SpringBoard, which the kernel starts
+-	 * with the renderer loader (kern_exec.c) to keep its CoreImage on the CPU.
++	 * Every child of launchd: backboardd's renderer loader, SpringBoard's and the apps' tweaks
++	 * (ElleKit's TweakInject.dylib, set in launchd.plist and by its launchd hook).
+ 	 */
+-	bool backboardd = error == 0 && strcmp(path, "/usr/libexec/real/backboardd") == 0 &&
+-	    proc_getcdhash(p, actual) == 0 && memcmp(actual, expected, sizeof(expected)) == 0;
+-	bool springboard = error == 0 && strcmp(path, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") == 0;
+-	if (!backboardd && !springboard) {
+-		static unsigned mismatches;
+-		if (mismatches++ < 4) {
+-			printf("SWEET CA: dyld policy did not match the renderer executable path (%d)\n", error);
+-		}
+-		return ENOPOLICY;
+-	}
+-
++	int error;
+ 	struct {
+ 		uint64_t input_flags;
+ 		user_addr_t output_flags;
+@@ -456,8 +432,13 @@ sweet_renderer_dyld_policy(proc_t p, int call, user_addr_t arg)
+ 	 * optional inserted library cannot load. Leave other policy bits clear. */
+ 	const uint64_t flags = (1ULL << 1) | (1ULL << 5);
+ 	error = copyout(&flags, query.output_flags, sizeof(flags));
+-	printf("SWEET CA: backboardd dyld policy input=0x%llx rc=%d\n",
+-	    (unsigned long long)query.input_flags, error);
++	static unsigned answered;
++	if (answered++ < 16) {
++		char name[32];
++		proc_name(proc_pid(p), name, sizeof(name));
++		printf("SWEET CA: dyld policy for %s input=0x%llx rc=%d\n", name,
++		    (unsigned long long)query.input_flags, error);
++	}
+ 	return error;
+ }
+ 

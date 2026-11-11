@@ -102,7 +102,7 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0198-sweet
 # 0199: the dark-mode preference set aside once (SpringBoard crashed in CoreImage GL).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0199-sweet-dark-mode-preference-aside.patch"
 # 0200: SpringBoard starts with the renderer loader (CoreImage on the CPU).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/kern_exec.c --exclude=bsd/kern/sweet_amfi.c "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"
 # 0201: the accessibility preferences (Bold Text) set aside (SpringBoard crashed in CoreImage GL).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"
 # 0202: the GPU is waited for by looking again at once, not by sleeping 1 ms.
@@ -127,3 +127,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0210-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0211-sweet-usb-console-and-rndis.patch"
 # 0212: the GPU bring-up accepts wfi=1 too (jtag=1 still keeps CPU idle off until bsd_init).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0212-sweet-gpu-bringup-accepts-wfi.patch"
+# 0213: no kernel loader in SpringBoard; DYLD variables for every launchd child (tweaks).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0213-sweet-jailbreak-tweak-injection.patch"

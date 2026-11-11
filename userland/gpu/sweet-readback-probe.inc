@@ -71,8 +71,10 @@ enum { SWEET_DIRECT_NOT_STARTED, SWEET_DIRECT_TARGET_MADE, SWEET_DIRECT_BLIT_DON
 static bool
 sweet_probe_display(const struct image *image)
 {
+	uint32_t format = IOSurfaceGetPixelFormat(image->surface);
+
 	return image->width == SWEET_LOGICAL_WIDTH && image->height == SWEET_LOGICAL_HEIGHT &&
-	    IOSurfaceGetPixelFormat(image->surface) == SWEET_B3A8_FORMAT;
+	    (format == SWEET_B3A8_FORMAT || format == 'BGRA');
 }
 
 static bool

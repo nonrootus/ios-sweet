@@ -104,8 +104,10 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WO
 # 0200: SpringBoard starts with the renderer loader (CoreImage on the CPU).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"
 # 0201: the accessibility preferences (Bold Text) set aside (SpringBoard crashed in CoreImage GL).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"
 # 0202: the GPU is waited for by looking again at once, not by sleeping 1 ms.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0202-sweet-a618-fast-gpu-wait.patch"
 # 0203: the thread that submits GPU work stays on an A76 core.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch"
+# 0204: MobileGestalt cache set aside once for the sRGB device tree.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0204-sweet-mobilegestalt-cache-aside.patch"

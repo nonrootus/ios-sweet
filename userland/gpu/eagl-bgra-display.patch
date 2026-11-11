@@ -1,0 +1,35 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -1201,6 +1201,23 @@ target_to_surface(struct eagl *e, struct image *image)
+ 
+ 	sweet_probe_damage_close(e, image);
+ 	image->drawn = false;
++	/* A full-screen BGRA target goes to the panel the way a b3a8 one does. */
++	if (!image->xr10 && sweet_probe_display(image)) {
++		GLint previous = 0;
++		bool direct;
++
++		if (e->reader == 0) {
++			glGenFramebuffers(1, &e->reader);
++		}
++		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
++		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
++		direct = sweet_direct_frame(e, image);
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous);
++		if (direct) {
++			return;
++		}
++	}
+ 	if (image->mirror != 0) {
+ 		GLint read = 0, draw = 0;
+ 
+@@ -4006,6 +4023,8 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
+ 			eagl_leave(e, 0x970);
+ 			return NO;
+ 		}
++	} else if (sweet_direct_keep_contents(e, image)) {
++		/* the last frame: the surface's own memory is stale while frames go to the panel */
+ 	} else if (surface_mirrored(e, image) || !surface_shared(e, image)) {
+ 		surface_changed(e, image);              /* (what it adds up to now) */
+ 		surface_to_texture(e, image);

@@ -1,0 +1,18 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -644,6 +644,15 @@ sweet_promote_staged_apps(void)
+ 	    "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist",
+ 	    "/private/var/mobile/Library/Preferences/com.apple.Accessibility.plist.sweet-bold");
+ 	printf("SWEET APPS: accessibility preferences set aside rc=%d\n", accessibility);
++
++	/*
++	 * The device tree says the display is sRGB, so that CoreAnimation draws in plain BGRA and
++	 * not in 10-bit surfaces. MobileGestalt's cache still holds the answer for a P3 display:
++	 * set it aside once and it is made again.
++	 */
++	int gestalt = sweet_kernel_rename_below("/private/var/containers/Shared/SystemGroup",
++	    "Library/Caches/com.apple.MobileGestalt.plist", ".sweet-p3");
++	printf("SWEET APPS: MobileGestalt caches set aside for sRGB=%d\n", gestalt);
+ }
+ #endif
+ 

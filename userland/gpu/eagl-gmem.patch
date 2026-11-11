@@ -1,0 +1,14 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -4112,6 +4112,11 @@ install(void)
+ 
+ 	sweet_install_ca_uniforms();
+ 	(void)sweet_gpu_calls_install();
++	/* sweet: freedreno chooses GMEM (tiled) or sysmem per batch; the loader forced sysmem. */
++	if (getenv("FD_MESA_DEBUG") != NULL) {
++		unsetenv("FD_MESA_DEBUG");
++		say("redwood-gl: FD_MESA_DEBUG cleared: GMEM rendering allowed\n");
++	}
+ 	/* the kernel's boot-args are where a run is told things */
+ 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+ 		if ((argument = strstr(arguments, "gltrace=")) != NULL) {

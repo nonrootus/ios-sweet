@@ -114,7 +114,7 @@ jobs:
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET SURF: wrap %s id' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: panel memory at GPU VA' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: renderer RAM disk mount rc=' > /dev/null
-          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: backboardd dyld policy input=' > /dev/null
+          strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CA: dyld policy for %s input=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: boot bandwidth commands=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: PAS AUTH status=' > /dev/null
           strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET A618 FILL: pixels=' > /dev/null

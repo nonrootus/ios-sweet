@@ -44,12 +44,14 @@
     list_delinit(&bo->node);
     bucket->count--;
  }
-@@ -95,6 +97,8 @@
+@@ -95,6 +97,10 @@
     unsigned long size, cache_max_size = 64 * 1024 * 1024;
  
     cache->name = name;
 +   cache->cached_bytes = 0;
-+   cache->cache_limit = (coarse ? 8u : 24u) * 1024 * 1024;
++   /* 24/8 MiB while every BO came from the pinned pool (0198); with BOs in system memory (0208) a
++    * freed BO kept for reuse saves the kernel a fresh allocation, zeroing and mapping. */
++   cache->cache_limit = (coarse ? 16u : 96u) * 1024 * 1024;
     simple_mtx_init(&cache->lock, mtx_plain);
  
     /* OK, so power of two buckets was too wasteful of memory.

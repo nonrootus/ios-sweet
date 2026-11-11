@@ -1,0 +1,41 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1170,33 +1170,15 @@ ud_endpoint_halt(uint8_t addr, bool halt)
+ 		printf("SWEET USB: %s halt of endpoint 0x%02x\n", halt ? "set" : "clear", addr);
+ 	}
+ 	if (halt) {
+-		ud_end_transfer(ep);
+ 		(void)ud_epcmd(ep, DEPCMD_SETSTALL, 0, 0, 0);
+ 		return;
+ 	}
+-	ud_end_transfer(ep);
++	/*
++	 * Clear Stall alone resets the data sequence; the transfer already started there stays
++	 * (Linux 4.14 dwc3, this phone's own kernel). 0222 also ended and restarted it, 100 us apart,
++	 * and the console died right after Windows' usual halt clears at RNDIS start.
++	 */
+ 	(void)ud_epcmd(ep, DEPCMD_CLEARSTALL, 0, 0, 0);
+-	if (!ud.configured) {
+-		return;
+-	}
+-	if (ud.net && ep == ud.ep_nrx) {
+-		ud_rx_arm();
+-	} else if (ud.net && ep == ud.ep_ntx) {
+-		lck_mtx_lock(ud.lock);
+-		ud.net_tx_busy = false;
+-		ud_tx_kick_locked();
+-		lck_mtx_unlock(ud.lock);
+-	} else if (ud.rndis && ep == ud.ep_nint) {
+-		ud.nint_busy = false;
+-		if (ud.nint_pending) {
+-			ud.nint_pending--;
+-			rndis_notify();
+-		}
+-	} else if (ud.serial && ep == EP_RX) {
+-		ud_serial_rx_arm();
+-	} else if (ud.serial && ep == EP_TX) {
+-		ud.tx_busy = false;
+-	}
+ }
+ 
+ /*

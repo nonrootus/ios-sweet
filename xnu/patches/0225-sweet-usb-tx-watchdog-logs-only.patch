@@ -1,0 +1,44 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1327,30 +1327,27 @@ ud_event(uint32_t ev)
+ }
+ 
+ /*
+- * The network TX transfer has run for over 2 s: the host stopped reading it (a pipe reset, an
+- * error). End it, drop the frame and go on with the queue, rather than never sending again.
++ * A network TX transfer pending for over 2 s is only logged (once a stall). Ending it and
++ * starting the next one right away (0222..0224) stopped the whole controller at the RNDIS start,
++ * when Windows resets the pipes and does not read for a few seconds; the transfer completes by
++ * itself once the host reads again.
+  */
+ static void
+ ud_tx_watchdog(void)
+ {
+-	static uint64_t limit;
++	static uint64_t limit, reported;
++	static unsigned logged;
+ 	if (limit == 0) {
+ 		nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &limit);
+ 	}
+-	if (!ud.net || !ud.net_tx_busy || mach_absolute_time() - ud.tx_started < limit) {
++	if (!ud.net || !ud.net_tx_busy || mach_absolute_time() - ud.tx_started < limit ||
++	    reported == ud.tx_started) {
+ 		return;
+ 	}
+-	static unsigned fired;
+-	lck_mtx_lock(ud.lock);
+-	if (ud.net_tx_busy && mach_absolute_time() - ud.tx_started >= limit) {
+-		ud_end_transfer(ud.ep_ntx);
+-		ud.net_tx_busy = false;
+-		if (fired++ < 16) {
+-			printf("SWEET USB: ue0 TX stuck for 2 s: transfer ended, frame dropped\n");
+-		}
+-		ud_tx_kick_locked();
++	reported = ud.tx_started;
++	if (logged++ < 16) {
++		printf("SWEET USB: ue0 TX pending for 2 s (frame %llu)\n", ud.tx_frames);
+ 	}
+-	lck_mtx_unlock(ud.lock);
+ }
+ 
+ static void

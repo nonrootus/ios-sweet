@@ -146,4 +146,6 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WO
 # 0223: ENDPOINT_HALT clear is Clear Stall only (Linux 4.14 dwc3).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0223-sweet-usb-halt-clear-stall-only.patch"
 # 0224: ENDPOINT_HALT requests acknowledged only (as up to 0219).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0224-sweet-usb-halt-acknowledged-only.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0224-sweet-usb-halt-acknowledged-only.patch"
+# 0225: the USB TX watchdog only logs.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0225-sweet-usb-tx-watchdog-logs-only.patch"

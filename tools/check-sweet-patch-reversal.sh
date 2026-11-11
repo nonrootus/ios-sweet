@@ -144,4 +144,6 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WO
 # 0222: USB network keeps going: endpoint halt requests, failed TX starts, TX watchdog.
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0222-sweet-usb-endpoint-halt-and-tx-watchdog.patch"
 # 0223: ENDPOINT_HALT clear is Clear Stall only (Linux 4.14 dwc3).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0223-sweet-usb-halt-clear-stall-only.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0223-sweet-usb-halt-clear-stall-only.patch"
+# 0224: ENDPOINT_HALT requests acknowledged only (as up to 0219).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0224-sweet-usb-halt-acknowledged-only.patch"

@@ -1,0 +1,23 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1169,16 +1169,12 @@ ud_endpoint_halt(uint8_t addr, bool halt)
+ 	if (logged++ < 16) {
+ 		printf("SWEET USB: %s halt of endpoint 0x%02x\n", halt ? "set" : "clear", addr);
+ 	}
+-	if (halt) {
+-		(void)ud_epcmd(ep, DEPCMD_SETSTALL, 0, 0, 0);
+-		return;
+-	}
+ 	/*
+-	 * Clear Stall alone resets the data sequence; the transfer already started there stays
+-	 * (Linux 4.14 dwc3, this phone's own kernel). 0222 also ended and restarted it, 100 us apart,
+-	 * and the console died right after Windows' usual halt clears at RNDIS start.
++	 * Acknowledged only. End Transfer + Clear Stall + restart (0222) and Clear Stall alone (0223)
++	 * both silenced the console and the network right after Windows' usual halt clears at the
++	 * RNDIS start; acknowledging them, as up to 0219, kept RNDIS running.
+ 	 */
+-	(void)ud_epcmd(ep, DEPCMD_CLEARSTALL, 0, 0, 0);
++	(void)halt;
+ }
+ 
+ /*

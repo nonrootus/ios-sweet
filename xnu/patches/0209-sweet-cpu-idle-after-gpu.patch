@@ -1,0 +1,24 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1194,6 +1194,21 @@ bsd_init(void)
+ 		/* The CPUs run at the boot loader's clocks until something asks the OSM. */
+ 		extern void sweet_cpufreq_start(void);
+ 		sweet_cpufreq_start();
++		/*
++		 * jtag=1 keeps idle_enable FALSE, so the GPU bring-up above ran with no CPU idle (its
++		 * guards require that), and idle cores went on spinning: warm while doing nothing. With
++		 * wfi != 0 they wait in WFI from here on: clock gating only, no PSCI suspend, so no
++		 * cluster power collapse and no RPMh sleep set under the GPU's votes.
++		 */
++		extern boolean_t idle_enable;
++		unsigned int sweet_wfi = 1;
++		(void)PE_parse_boot_argn("wfi", &sweet_wfi, sizeof(sweet_wfi));
++		if (sweet_wfi != 0 && !idle_enable) {
++			idle_enable = TRUE;
++			printf("SWEET IDLE: CPU idle enabled after GPU start (wfi=%u)\n", sweet_wfi);
++		} else {
++			printf("SWEET IDLE: CPU idle unchanged (wfi=%u idle_enable=%d)\n", sweet_wfi, idle_enable);
++		}
+ 	}
+ #endif
+ 

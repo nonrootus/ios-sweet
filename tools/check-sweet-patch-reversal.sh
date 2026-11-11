@@ -72,7 +72,7 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WO
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0190-sweet-gpu-level-request.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET GMU DCVS: requested index=' > /dev/null
 # 0191: OSM CPU frequency governor.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0191-sweet-cpu-frequency-governor.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0191-sweet-cpu-frequency-governor.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET CPUFREQ: loop speed' > /dev/null
 # 0192: the AMFI policy answers the boot-arg state query (0x60).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/sweet_amfi.c "$GITHUB_WORKSPACE/xnu/patches/0192-sweet-amfi-bootarg-state.patch"
@@ -119,3 +119,5 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cp
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0207-sweet-a618-import-tables-in-halves.patch"
 # 0208: GPU buffers from wired system memory in the GPU window; the pinned pool is the fallback.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0208-sweet-a618-system-memory-buffers.patch"
+# 0209: CPU idle (WFI) after the GPU is up when wfi != 0.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0209-sweet-cpu-idle-after-gpu.patch"

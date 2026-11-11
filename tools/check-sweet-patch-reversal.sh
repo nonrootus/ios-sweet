@@ -52,7 +52,7 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exc
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_a618_present.inc "$GITHUB_WORKSPACE/xnu/patches/0171-sweet-a618-iosurface-span.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc "$GITHUB_WORKSPACE/xnu/patches/0172-sweet-a618-bounded-present.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_a618_address_space.c --exclude=bsd/dev/sweet_a618_render_pool.c --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0173-sweet-a618-render-pool.patch"
-git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc "$GITHUB_WORKSPACE/xnu/patches/0174-sweet-a618-mesa-client.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_render_ring.inc --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc "$GITHUB_WORKSPACE/xnu/patches/0174-sweet-a618-mesa-client.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/sweet_amfi.c "$GITHUB_WORKSPACE/xnu/patches/0175-sweet-backboardd-dyld-policy.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0176-sweet-iosurface-refuse-empty-wrap.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0177-sweet-b3a8-framebuffer.patch"
@@ -105,3 +105,5 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WO
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0200-sweet-springboard-coreimage-cpu.patch"
 # 0201: the accessibility preferences (Bold Text) set aside (SpringBoard crashed in CoreImage GL).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0201-sweet-accessibility-preference-aside.patch"
+# 0202: the GPU is waited for by looking again at once, not by sleeping 1 ms.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0202-sweet-a618-fast-gpu-wait.patch"

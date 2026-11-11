@@ -146,6 +146,7 @@ PATCHES += (('xnu/patches/0190-sweet-gpu-level-request.patch', {
     'bsd/dev/sweet_gmu_dcvs.h', 'bsd/dev/sweet_gmu_dcvs.c', 'bsd/dev/sweet_gpu_probe.c',
     'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 PATCHES += (('xnu/patches/0195-sweet-a618-render-pool-256m.patch', {'bsd/dev/sweet_a618_render_pool.h'}),)
+PATCHES += (('xnu/patches/0202-sweet-a618-fast-gpu-wait.patch', {'iokit/Kernel/arm/sweet_a618_render_ring.inc'}),)
 
 # The IOSurface hunk is checked against the actual builder tree by the shell gate.
 SURFACE = 'iokit/Kernel/arm/SweetSurface.cpp'

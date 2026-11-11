@@ -1,6 +1,8 @@
 /* Kernel ring writer for the renderer's own packets. All callers hold the
  * GPU submit lock. This is the full 32 KiB ring configured by CP_RB_CNTL.
  * After publishing WPTR any failure must permanently stop submissions. */
+#include <mach/mach_time.h>
+
 static int a618_render_ring(persistent_gmu *s, const a618_cp_run &run,
     const uint32_t *packet, unsigned count, unsigned &tail)
 {
@@ -63,7 +65,17 @@ static int a618_render_ring(persistent_gmu *s, const a618_cp_run &run,
             return false;
         return wrap ? pointer >= tail || pointer <= end : pointer >= tail && pointer <= end;
     };
-    for (unsigned waited_ms = 0; waited_ms <= 100; ++waited_ms) {
+    /*
+     * A sleep between looks made every submission take about 2 ms however little the GPU had
+     * to do. Look again every 10 us for the first 8 ms; then sleep. A timeout stops the GPU
+     * until reboot, so the limit stays well above the ~200 ms the old sleeps came to.
+     */
+    uint64_t pause_ticks = 0, spin_ticks = 0, limit_ticks = 0;
+    nanoseconds_to_absolutetime(10000, &pause_ticks);
+    nanoseconds_to_absolutetime(8000000, &spin_ticks);
+    nanoseconds_to_absolutetime(500000000, &limit_ticks);
+    const uint64_t began = mach_absolute_time();
+    for (;;) {
         uint32_t status = UINT32_MAX, busy = UINT32_MAX;
         if (a618_cp_guard(s, run) || post_read(s, a618_fence_status, &status) || status ||
             post_read(s, busy_off, &busy) || busy == UINT32_MAX || a618_cp_read(run, 0x807) != end)
@@ -78,10 +90,32 @@ static int a618_render_ring(persistent_gmu *s, const a618_cp_run &run,
             if (wrap)
                 IOLog("SWEET CA: ring wrap tail=%u end=%u pages=%02x\n", tail, end, dirty);
             tail = end;
+            /* Under the submit lock, so plain counters do. */
+            static uint64_t waited_ticks, longest_ticks;
+            static unsigned waits;
+            const uint64_t waited = mach_absolute_time() - began;
+            waited_ticks += waited;
+            if (waited > longest_ticks)
+                longest_ticks = waited;
+            if (++waits == 4096) {
+                uint64_t mean_ns = 0, longest_ns = 0;
+                absolutetime_to_nanoseconds(waited_ticks / waits, &mean_ns);
+                absolutetime_to_nanoseconds(longest_ticks, &longest_ns);
+                IOLog("SWEET CA: GPU wait mean %llu us longest %llu us over %u submissions\n",
+                    mean_ns / 1000, longest_ns / 1000, waits);
+                waited_ticks = longest_ticks = 0;
+                waits = 0;
+            }
             return 0;
         }
-        if (waited_ms < 100)
+        const uint64_t now = mach_absolute_time();
+        if (now - began >= limit_ticks)
+            return -4;
+        if (now - began >= spin_ticks) {
             IOSleep(1);
+        } else {
+            while (mach_absolute_time() - now < pause_ticks)
+                __asm__ volatile("yield");
+        }
     }
-    return -4;
 }

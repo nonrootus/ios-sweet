@@ -156,6 +156,7 @@ PATCHES += (('xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch', {
     SURFACE, 'iokit/Kernel/arm/sweet_gpu_memory.cpp', 'iokit/Kernel/arm/sweet_a618_mapping.inc'}),)
 PATCHES += (('xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch', {'bsd/dev/sweet_a618_render_pool.h', 'bsd/dev/sweet_a618_render_pool.c', 'bsd/dev/sweet_a618_address_space.c', 'bsd/dev/sweet_smmu_context.c', 'bsd/dev/sweet_smmu_context.h', 'iokit/Kernel/arm/sweet_a618_mapping.inc', 'iokit/Kernel/arm/sweet_a618_renderer.inc', 'iokit/Kernel/arm/sweet_a618_render_bridge.h', 'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 PATCHES += (('xnu/patches/0207-sweet-a618-import-tables-in-halves.patch', {'iokit/Kernel/arm/sweet_a618_mapping.inc'}),)
+PATCHES += (('xnu/patches/0208-sweet-a618-system-memory-buffers.patch', {'iokit/Kernel/arm/SweetAdreno.cpp', 'iokit/Kernel/arm/sweet_a618_renderer.inc'}),)
 
 
 def main():

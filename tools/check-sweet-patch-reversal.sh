@@ -114,6 +114,8 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0204-sweet
 # 0205: a full-screen BGRA layer the GPU already put on the panel is not copied again.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0205-sweet-framebuffer-bgra-direct-frame.patch"
 # 0206: BGRA IOSurfaces read by the GPU in place (import window, TLB invalidation, cache cleaning).
-git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch"
 # 0207: the import window tables come in two allocations of 128 pages.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0207-sweet-a618-import-tables-in-halves.patch"
+# 0208: GPU buffers from wired system memory in the GPU window; the pinned pool is the fallback.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0208-sweet-a618-system-memory-buffers.patch"

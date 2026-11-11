@@ -76,8 +76,10 @@ extern "C" int sweet_a618_render_submit(const uint64_t *iova,
     packet[used++]=0x31;
     packet[used++]=a618_pkt7(0x26,0); // Wait for invalidation before reused BOs are read.
     for(unsigned i=0;i<count;i++){
-        const uint64_t base=SWEET_A618_RENDER_IOVA;
-        const uint64_t end=base+SWEET_A618_RENDER_BYTES;
+        /* Command buffers live in the pinned pool or in the window of system memory (SweetAdreno.cpp). */
+        const bool pool=iova[i]>=SWEET_A618_RENDER_IOVA && iova[i]<SWEET_A618_RENDER_IOVA+SWEET_A618_RENDER_BYTES;
+        const uint64_t base=pool ? SWEET_A618_RENDER_IOVA : SWEET_A618_IMPORT_IOVA;
+        const uint64_t end=pool ? base+SWEET_A618_RENDER_BYTES : base+static_cast<uint64_t>(SWEET_A618_IMPORT_PAGES)*4096u;
         const uint64_t bytes=static_cast<uint64_t>(dwords[i])*4;
         if(!dwords[i] || dwords[i]>0x100000 || (iova[i]&3) ||
             iova[i]<base || iova[i]>=end || bytes>end-iova[i])return -1;

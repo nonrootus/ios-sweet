@@ -1,0 +1,177 @@
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -151,6 +151,7 @@ static int pool_reserve(unsigned units)
+ class SweetAdrenoBO : public IOGeneralMemoryDescriptor {
+     OSDeclareDefaultStructors(SweetAdrenoBO);
+     unsigned pool_first, pool_units;
++    IOBufferMemoryDescriptor *backing;  /* a window BO's own memory */
+ public:
+     bool initPoolRange(void *address,unsigned first,unsigned units)
+     {
+@@ -171,6 +172,16 @@ public:
+         return initPoolRange(address,0,units) && (pool_units=0,true);
+     }
+ 
++    /* Wired, write-combined memory of its own (a window BO): released with the BO. */
++    bool initBacking(IOBufferMemoryDescriptor *buffer,unsigned units)
++    {
++        if(!initPoolRange(buffer->getBytesNoCopy(),0,units))return false;
++        pool_units=0;
++        backing=buffer;
++        buffer->retain();
++        return true;
++    }
++
+     IOMemoryMap *makeMapping(IOMemoryDescriptor *owner,task_t task,
+         IOVirtualAddress address,IOOptionBits options,IOByteCount offset,
+         IOByteCount length) APPLE_KEXT_OVERRIDE
+@@ -185,8 +196,11 @@ public:
+         /* IOMemoryMap retains this descriptor until after unmap. GEM_CLOSE
+          * drops the handle under the same lock held through the GPU fence. */
+         const unsigned first=pool_first, units=pool_units;
++        IOBufferMemoryDescriptor *own=backing;
++        backing=nullptr;
+         IOGeneralMemoryDescriptor::free();
+         if(units)pool_return(first,units);
++        if(own)own->release();
+     }
+ };
+ OSDefineMetaClassAndStructors(SweetAdrenoBO,IOGeneralMemoryDescriptor);
+@@ -206,6 +220,8 @@ struct sweet_bo {
+ static constexpr unsigned kImportPages=SWEET_A618_IMPORT_PAGES;
+ static uint64_t import_used[kImportPages/64],import_stale[kImportPages/64];
+ static unsigned import_count,import_logs,import_flushes;
++static unsigned window_bos,window_logs,window_made;   /* BOs of system memory in the window */
++static uint64_t window_bytes;
+ static uint64_t import_flushed_bytes,import_flush_ticks;
+ 
+ static bool import_taken(unsigned page)
+@@ -354,6 +370,7 @@ class SweetAdrenoUserClient : public IOUserClient {
+     IOReturn surfaceBuffer(redwood_surface *request);
+     IOReturn importSurface(redwood_surface *request);
+     void dropBO(sweet_bo *bo);
++    IOReturn newWindowBO(uint64_t bytes,uint32_t flags,uint32_t *handle);
+     IOReturn direct(sweet_direct_request *request);
+     void releaseBOs();
+ public:
+@@ -577,11 +594,95 @@ IOReturn SweetAdrenoUserClient::surfaceBuffer(redwood_surface *request)
+ void SweetAdrenoUserClient::dropBO(sweet_bo *bo)
+ {
+     auto *memory=bo->memory;
+-    if(bo->surface)import_release(*bo);
++    if(bo->surface){
++        import_release(*bo);
++    }else if(bo->import_pages){
++        /* A window BO: its leaves go now; its VA range waits for the next invalidation. */
++        sweet_a618_import_unmap(bo->import_first,bo->import_pages);
++        import_forget(bo->import_first,bo->import_pages,true);
++        window_bytes-=bo->size;
++        window_bos--;
++    }
+     bo->memory=nullptr;
+     memory->release();
+ }
+ 
++/*
++ * A BO of wired system memory, write-combined like the pool, entered page by page into the GPU
++ * window: no contiguous run of the pinned pool is needed, and the pool no longer bounds the total.
++ * kIOReturnUnsupported or kIOReturnNoMemory: the caller falls back to the pool.
++ */
++IOReturn SweetAdrenoUserClient::newWindowBO(uint64_t bytes,uint32_t flags,uint32_t *handle_out)
++{
++    if(!sweet_a618_import_ready() || !bytes || (bytes&16383u) || bytes>static_cast<uint64_t>(kImportPages)*4096u)
++        return kIOReturnUnsupported;
++    auto *buffer=IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++        kIODirectionInOut | kIOMemoryMapperNone | kIOMapWriteCombineCache,bytes,16384u);
++    void *cpu=buffer ? buffer->getBytesNoCopy():nullptr;
++    auto *bo=cpu ? OSTypeAlloc(SweetAdrenoBO):nullptr;
++    if(!bo || !bo->initBacking(buffer,static_cast<unsigned>(bytes/16384u))){
++        if(bo)bo->release();
++        if(buffer)buffer->release();
++        return kIOReturnNoMemory;
++    }
++    buffer->release(); // the BO holds it
++    const unsigned pages=static_cast<unsigned>(bytes/4096u);
++    const size_t list_bytes=pages*sizeof(uint64_t);
++    auto *physical=static_cast<uint64_t *>(IOMallocData(list_bytes));
++    bool ok=physical!=nullptr;
++    for(unsigned i=0;ok && i<pages;i++){
++        IOByteCount length=0;
++        const addr64_t page=buffer->getPhysicalSegment(static_cast<IOByteCount>(i)*4096u,&length,kIOMemoryMapperNone);
++        ok=page && !(page&4095u) && length>=4096u;
++        physical[i]=page;
++    }
++    bzero(cpu,bytes);
++    __asm__ volatile("dsb sy" ::: "memory"); // Cleared in memory before the GPU can see it.
++    int first=-1;
++    if(ok){
++        IOLockLock(pool_lock);
++        first=import_reserve(pages);
++        IOLockUnlock(pool_lock);
++    }
++    const bool mapped=first>=0 && !sweet_a618_import_map(static_cast<unsigned>(first),physical,pages);
++    if(physical)IOFreeData(physical,list_bytes);
++    if(!mapped){
++        if(first>=0)import_forget(static_cast<unsigned>(first),pages,false);
++        static unsigned refused;
++        if(refused++<8)IOLog("SWEET CA: window BO of %llu KB refused (%s); pool used instead, %u window BOs, %llu MB\n",
++            bytes>>10,!ok ? "no physical pages" : first<0 ? "no room in the window" : "leaves refused",
++            window_bos,window_bytes>>20);
++        bo->release();
++        return kIOReturnNoMemory;
++    }
++    sweet_bo entry={bo,bytes,SWEET_A618_IMPORT_IOVA+static_cast<uint64_t>(first)*4096u,flags,
++        nullptr,static_cast<unsigned>(first),pages,0,0};
++    unsigned handle=0;
++    IOLockLock(lock);
++    for(unsigned i=0;i<kHandles;i++){
++        unsigned candidate=(next_handle+i)%kHandles;
++        if(!bos[candidate].memory){handle=candidate+1;break;}
++    }
++    window_bos++;
++    window_bytes+=bytes;
++    if(handle){
++        bos[handle-1]=entry;
++        next_handle=handle%kHandles;
++    }else{
++        dropBO(&entry);
++    }
++    IOLockUnlock(lock);
++    if(!handle)return kIOReturnNoMemory;
++    *handle_out=handle;
++    window_made++;
++    if(window_logs<8 || window_made%1024==0){
++        window_logs++;
++        IOLog("SWEET CA: window BO %llu KB at GPU VA %llx; %u window BOs, %llu MB; %u made\n",
++            bytes>>10,static_cast<unsigned long long>(entry.iova),window_bos,window_bytes>>20,window_made);
++    }
++    return kIOReturnSuccess;
++}
++
+ /*
+  * An IOSurface as a buffer the GPU reads in place: what Mesa's freedreno-darwin.patch asks
+  * for. One plane of BGRA in wired kernel memory (IOBufferMemoryDescriptor), rows a multiple
+@@ -759,6 +860,8 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
+         if(size<sizeof(r.gem_new) || !r.gem_new.size ||
+             r.gem_new.size>SWEET_A618_RENDER_BYTES)return kIOReturnBadArgument;
+         const uint64_t bytes=(r.gem_new.size+16383u)&~UINT64_C(16383);
++        /* System memory in the GPU window first; a contiguous run of the pinned pool if that fails. */
++        if(newWindowBO(bytes,r.gem_new.flags,&r.gem_new.handle)==kIOReturnSuccess)break;
+         const unsigned units=static_cast<unsigned>(bytes/16384u);
+         int first=pool_reserve(units);
+         if(first<0)return kIOReturnNoMemory;
+--- a/iokit/Kernel/arm/sweet_a618_renderer.inc
++++ b/iokit/Kernel/arm/sweet_a618_renderer.inc
+@@ -76,8 +76,10 @@ extern "C" int sweet_a618_render_submit(const uint64_t *iova,
+     packet[used++]=0x31;
+     packet[used++]=a618_pkt7(0x26,0); // Wait for invalidation before reused BOs are read.
+     for(unsigned i=0;i<count;i++){
+-        const uint64_t base=SWEET_A618_RENDER_IOVA;
+-        const uint64_t end=base+SWEET_A618_RENDER_BYTES;
++        /* Command buffers live in the pinned pool or in the window of system memory (SweetAdreno.cpp). */
++        const bool pool=iova[i]>=SWEET_A618_RENDER_IOVA && iova[i]<SWEET_A618_RENDER_IOVA+SWEET_A618_RENDER_BYTES;
++        const uint64_t base=pool ? SWEET_A618_RENDER_IOVA : SWEET_A618_IMPORT_IOVA;
++        const uint64_t end=pool ? base+SWEET_A618_RENDER_BYTES : base+static_cast<uint64_t>(SWEET_A618_IMPORT_PAGES)*4096u;
+         const uint64_t bytes=static_cast<uint64_t>(dwords[i])*4;
+         if(!dwords[i] || dwords[i]>0x100000 || (iova[i]&3) ||
+             iova[i]<base || iova[i]>=end || bytes>end-iova[i])return -1;

@@ -40,7 +40,7 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_board_profile.c --exclude=bsd/dev/sweet_gmu_board_profile.h --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0153-sweet-gmu-configuration.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_dcvs.c --exclude=bsd/dev/sweet_gmu_dcvs.h --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0154-sweet-gmu-dcvs-request.patch"
 #0156 supersedes all0155 hunks; exact sources verified below.
-git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_context.h --exclude=bsd/dev/sweet_a618_address_space.c --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --include=bsd/dev/sweet_smmu_context.c --include=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gpu_probe.c --exclude=bsd/dev/sweet_smmu_context.h --exclude=bsd/dev/sweet_a618_address_space.c --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --include=bsd/dev/sweet_smmu_context.c --include=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0157-sweet-a618-gpu-oob.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
 # 0160 supersedes the sole 0159 target. Canonical bytes are checked below.
@@ -125,3 +125,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0209-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0210-sweet-idle-without-l1-flush.patch"
 # 0211: sweetusb=4, the USB console beside an RNDIS network function.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0211-sweet-usb-console-and-rndis.patch"
+# 0212: the GPU bring-up accepts wfi=1 too (jtag=1 still keeps CPU idle off until bsd_init).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0212-sweet-gpu-bringup-accepts-wfi.patch"

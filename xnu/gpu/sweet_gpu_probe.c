@@ -238,7 +238,8 @@ sweet_gpu_probe(void)
         }
         PE_parse_boot_argn("jtag", &jtag, sizeof(jtag));
         PE_parse_boot_argn("wfi", &wfi_mode, sizeof(wfi_mode));
-        if (jtag != 1 || wfi_mode != 0) { printf("SWEET GMU BOOT: requires jtag=1 wfi=0\n"); return; }
+        /* jtag=1 keeps CPU idle off (idle_enable FALSE) until bsd_init, so wfi=1 is safe here. */
+        if (jtag != 1 || wfi_mode > 1) { printf("SWEET GMU BOOT: requires jtag=1 and wfi=0 or 1\n"); return; }
     }
     if (!PE_parse_boot_argn("sweetgpuprobe", &enabled, sizeof(enabled)) || enabled != 1 ||
         !PE_parse_boot_argn("sweetk6a", &k6a, sizeof(k6a)) || k6a != 1) {
@@ -446,7 +447,7 @@ sweet_gpu_probe(void)
                                         PE_parse_boot_argn("sweetgmuload", &load_arg, sizeof(load_arg));
                                         PE_parse_boot_argn("sweetgpusmmuinit", &smmu_arg, sizeof(smmu_arg));
                                         if (!gmu_status_ok || gmu_reset != 1u || gmu_busy || gmu_init ||
-                                            gmu_retention || jtag != 1 || wfi_mode != 0 || load_arg || smmu_arg)
+                                            gmu_retention || jtag != 1 || wfi_mode > 1 || load_arg || smmu_arg)
                                             printf("SWEET GPU: BCM handoff skipped: reset, idle flags or conflicting probe\n");
                                         else {
                                             int bw_rc = requested_fill ? sweet_rpmh_gpu_zap_bw_bootstrap() : sweet_rpmh_gpu_bw_bootstrap();

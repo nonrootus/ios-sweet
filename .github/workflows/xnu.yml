@@ -263,6 +263,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/sweet-renderer/sweet/lib/*.dylib
+            ${{ runner.temp }}/sweet-renderer/sweet/bin/sweetnet
             ${{ runner.temp }}/sweet-renderer/CREDITS.md
             ${{ runner.temp }}/sweet-renderer/Mesa-license.rst
             ${{ runner.temp }}/sweet-renderer/SOURCES.txt

@@ -119,7 +119,11 @@ target=(-target arm64-apple-ios16.0 -isysroot "$sdk" -O2 -dynamiclib)
 "$cc" "${target[@]}" -framework IOKit -framework CoreFoundation -lobjc \
     "$repo/userland/gpu/sweet-renderer-loader.c" \
     -install_name /sweet/lib/libSweetRendererLoader.dylib -o "$lib/libSweetRendererLoader.dylib"
-for binary in "$lib"/*.dylib; do
+bin="$out/sweet/bin"
+mkdir -p "$bin"
+# Jailbreak root (USB network): publishes ue0 to configd; installed by the root builder.
+"$cc" -target arm64-apple-ios16.0 -isysroot "$sdk" -O2 -framework CoreFoundation -framework SystemConfiguration     "$repo/userland/jb/sweet-net.c" -o "$bin/sweetnet"
+for binary in "$lib"/*.dylib "$bin/sweetnet"; do
     codesign --force --sign - --timestamp=none "$binary"
     codesign --verify "$binary"
     [ "$(xcrun lipo -archs "$binary")" = arm64 ]
@@ -128,4 +132,4 @@ xcrun otool -L "$lib/libSweetEAGL.dylib" | grep -F '/sweet/lib/libOSMesa.8.dylib
 cp "$stage/CREDITS.md" "$out/CREDITS.md"
 cp "$mesa/docs/license.rst" "$out/Mesa-license.rst"
 printf 'ios-topaz %s\nhakios %s\nMesa %s %s\n' "$topaz" "$hakios" "$mesa_version" "$mesa_sha" > "$out/SOURCES.txt"
-(cd "$out" && shasum -a 256 sweet/lib/*.dylib > SHA256SUMS)
+(cd "$out" && shasum -a 256 sweet/lib/*.dylib sweet/bin/sweetnet > SHA256SUMS)

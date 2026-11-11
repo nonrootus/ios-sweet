@@ -134,6 +134,8 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0214-sweet
 # 0215: asynchronous GPU submission with fences and deferred buffer release.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0215-sweet-a618-async-submit.patch"
 # 0216: RNDIS first in the sweetusb=4 composite device (Windows RNDIS starts).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0216-sweet-usb-rndis-first.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0216-sweet-usb-rndis-first.patch"
 # 0217: GPU submitting threads alternate between A76 cores 7 and 6.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet-gpu-threads-on-both-a76.patch"
+# 0218: RNDIS answers never a whole number of EP0 packets (no ZLP needed).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"

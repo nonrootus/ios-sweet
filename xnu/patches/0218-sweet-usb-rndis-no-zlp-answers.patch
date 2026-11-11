@@ -1,0 +1,31 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -501,6 +501,7 @@ rndis_query(uint32_t oid, uint8_t *out)
+ 		0x00010101, 0x00010102, 0x00010103, 0x00010104, 0x00010106, 0x00010107, 0x0001010a,
+ 		0x0001010b, 0x0001010c, 0x0001010d, 0x0001010e, 0x00010111, 0x00010114, 0x00010202,
+ 		0x00020101, 0x00020102, 0x00020103, 0x00020104, 0x00020105,
++		0x00010116,
+ 		0x01010101, 0x01010102, 0x01010103, 0x01010104,
+ 		0x01020101, 0x01020102, 0x01020103,
+ 	};
+@@ -528,6 +529,7 @@ rndis_query(uint32_t oid, uint8_t *out)
+ 	case 0x0001010a: case 0x0001010b: value = ETHER_MAX_LEN - ETHER_CRC_LEN; break;
+ 	case 0x0001010c: value = 0x00ffffff; break;             /* vendor ID: none */
+ 	case 0x0001010e: value = ud.rndis_filter; break;
++	case 0x00010116: value = 1; break;                      /* vendor driver version (as Linux) */
+ 	case 0x00010111: value = RNDIS_HEADER + ETHER_MAX_LEN - ETHER_CRC_LEN; break;
+ 	case 0x00010114: value = 0; break;                      /* media connect status: connected */
+ 	case 0x00010202: value = 0; break;                      /* physical medium: unspecified */
+@@ -728,6 +730,12 @@ ud_setup(void)
+ 				n = ud.rndis_resp_len;
+ 				memcpy(data, ud.rndis_resp, n);
+ 				ud.rndis_resp_len = 0;
++				/* A whole number of 64-byte packets shorter than wLength would need a
++				 * zero-length packet to end it, which EP0 here does not send: one zero byte
++				 * more instead (MessageLength still gives the response's own length). */
++				if ((n % 64) == 0 && n < length && n < sizeof(ud.rndis_resp)) {
++					data[n++] = 0;
++				}
+ 			} else {
+ 				data[0] = 0;
+ 				n = 1;

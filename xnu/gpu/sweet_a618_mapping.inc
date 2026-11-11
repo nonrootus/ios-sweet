@@ -12,7 +12,7 @@ static struct {
     sweet_gpu_memory *panel_tables_memory;
     sweet_gpu_table_page panel_tables[SWEET_A618_PANEL_TABLES];
     bool panel_ready;
-    sweet_gpu_memory *import_tables_memory;
+    sweet_gpu_memory *import_tables_memory[2];
     sweet_gpu_table_page import_tables[SWEET_A618_IMPORT_TABLES];
     bool import_ready;
     sweet_smmu_context context;
@@ -108,17 +108,23 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
                 IOLog("SWEET CA: panel memory not mapped: console %llx %lux%lu stride %lu\n",
                     static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
             }
-            /* IOSurfaces read in place: empty leaf tables now, leaves at run time. Optional. */
-            m.import_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_IMPORT_TABLES);
-            bool imports=m.import_tables_memory!=nullptr;
-            for(unsigned i=0;imports && i<SWEET_A618_IMPORT_TABLES;i++){
-                void *cpu=nullptr;uint64_t pa=0;
-                if(sweet_gpu_memory_page(m.import_tables_memory,i,&cpu,&pa))imports=false;
-                else m.import_tables[i]={static_cast<uint64_t *>(cpu),pa};
+            /* IOSurfaces read in place: empty leaf tables now, leaves at run time. Optional.
+             * The allocator takes at most 128 pages at a time (GPU_MAX_PAGES): two halves. */
+            constexpr unsigned half=SWEET_A618_IMPORT_TABLES/2;
+            static_assert(half*2==SWEET_A618_IMPORT_TABLES && half<=128, "import tables in two allocations");
+            bool imports=true;
+            for(unsigned h=0;imports && h<2;h++){
+                m.import_tables_memory[h]=sweet_gpu_memory_create_nc(half);
+                imports=m.import_tables_memory[h]!=nullptr;
+                for(unsigned i=0;imports && i<half;i++){
+                    void *cpu=nullptr;uint64_t pa=0;
+                    if(sweet_gpu_memory_page(m.import_tables_memory[h],i,&cpu,&pa))imports=false;
+                    else m.import_tables[h*half+i]={static_cast<uint64_t *>(cpu),pa};
+                }
             }
             if(imports && !sweet_a618_import_attach(m.tables,m.import_tables)){
                 for(unsigned i=0;i<SWEET_A618_IMPORT_TABLES;i++)
-                    if(sweet_gpu_memory_clean(m.import_tables_memory,i))return -5;
+                    if(sweet_gpu_memory_clean(m.import_tables_memory[i/half],i%half))return -5;
                 m.import_ready=true;
                 IOLog("SWEET CA: IOSurface import window at GPU VA %x, %u MiB\n",
                     SWEET_A618_IMPORT_IOVA,SWEET_A618_IMPORT_PAGES>>8);

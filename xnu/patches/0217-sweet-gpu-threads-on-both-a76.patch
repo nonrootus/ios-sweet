@@ -1,0 +1,40 @@
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -347,9 +347,11 @@ extern "C" bool sweet_a618_direct_take(uint32_t surface)
+ }
+ 
+ /*
+- * The thread that submits GPU work does the CPU half of every frame. Keep it on an A76:
+- * core 7 is MPIDR Aff1 = 7 (sweet_cpufreq.c). The scheduler knows nothing of big and little
+- * here. These are the kernel's own functions; their headers are not visible to IOKit.
++ * The threads that submit GPU work do the CPU half of every frame. Keep them on the A76s:
++ * cores 7 and 6 are MPIDR Aff1 = 7 and 6 (sweet_cpufreq.c). The scheduler knows nothing of big
++ * and little here. Bound threads alternate, core 7 first, so two render threads busy at once
++ * each have a fast core. These are the kernel's own functions; their headers are not visible
++ * to IOKit.
+  */
+ extern "C" void *sweet_thread_bind(void *processor) __asm("_thread_bind");
+ extern "C" void *sweet_cpu_to_processor(int cpu) __asm("_cpu_to_processor");
+@@ -357,14 +359,20 @@ extern "C" int sweet_thread_block(void *continuation) __asm("_thread_block");
+ 
+ static void bind_thread_to_fast_core(void)
+ {
++    static uint32_t bound_total;
++    const uint32_t n=__atomic_fetch_add(&bound_total,1u,__ATOMIC_RELAXED);
++    const unsigned core=(n&1u) ? 6u:7u;
+     const ml_topology_info_t *topology=ml_get_topology_info();
+     for(unsigned i=0;i<topology->num_cpus;i++){
+-        if(((topology->cpus[i].phys_id>>8)&0xffu)!=7u)continue;
++        if(((topology->cpus[i].phys_id>>8)&0xffu)!=core)continue;
+         void *processor=sweet_cpu_to_processor(topology->cpus[i].cpu_id);
+         if(!processor)return;
+         sweet_thread_bind(processor);
+         sweet_thread_block(nullptr);
+-        IOLog("SWEET CA: GPU thread bound to A76 core 7 (cpu %d)\n",topology->cpus[i].cpu_id);
++        char name[32]={};
++        proc_selfname(name,(int)sizeof(name));
++        IOLog("SWEET CA: GPU thread %u of %s bound to A76 core %u (cpu %d)\n",n+1u,name,core,
++            topology->cpus[i].cpu_id);
+         return;
+     }
+ }

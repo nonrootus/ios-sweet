@@ -135,3 +135,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0214-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0215-sweet-a618-async-submit.patch"
 # 0216: RNDIS first in the sweetusb=4 composite device (Windows RNDIS starts).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0216-sweet-usb-rndis-first.patch"
+# 0217: GPU submitting threads alternate between A76 cores 7 and 6.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet-gpu-threads-on-both-a76.patch"

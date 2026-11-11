@@ -1,0 +1,206 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -248,8 +248,15 @@ static struct {
+ 	bool        rndis_cmd_out;
+ 	uint32_t    ep0_out_len;
+ 	uint32_t    rndis_filter;   /* OID_GEN_CURRENT_PACKET_FILTER: 0 = no data yet */
+-	uint8_t     rndis_resp[512];
++	uint8_t     rndis_resp[512];        /* the answer being built */
+ 	uint32_t    rndis_resp_len;
++	uint8_t     rndis_q[4][512];        /* answers not read yet, oldest first */
++	uint32_t    rndis_q_len[4];
++	unsigned    rndis_q_head, rndis_q_count;
++	bool        nint_busy;              /* a RESPONSE_AVAILABLE in flight */
++	unsigned    nint_pending;           /* ... and how many more to send after it */
++	uint8_t     rsc[16];                /* each physical endpoint's transfer resource index */
++	bool        active[16];             /* a transfer started there and not completed */
+ 	uint64_t    rx_dropped;
+ 	uint8_t     serial_line[7];
+ 	uint64_t    serial_position;
+@@ -329,7 +336,12 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+ 		ud_sync(buf, len);
+ 	}
+ 	uint64_t tpa = ud.dma_pa + trb;
+-	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	int err = ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	if (!err && ep < 16) {
++		ud.rsc[ep] = (uint8_t)((dwc_rd(DEPCMD(ep)) >> 16) & 0x7f);
++		ud.active[ep] = true;
++	}
++	return err;
+ }
+ 
+ static void
+@@ -352,6 +364,21 @@ ud_stall(void)
+ 	ud_start_setup();
+ }
+ 
++#define DEPCMD_ENDTRANSFER      8
++#define DEPCMD_HIPRI_FORCERM    (1u << 11)
++
++/* End the transfer running on physical endpoint ep, if any. */
++static void
++ud_end_transfer(unsigned ep)
++{
++	if (ep >= 16 || !ud.active[ep]) {
++		return;
++	}
++	ud.active[ep] = false;
++	(void)ud_epcmd(ep, DEPCMD_ENDTRANSFER | DEPCMD_HIPRI_FORCERM | ((uint32_t)ud.rsc[ep] << 16), 0, 0, 0);
++	delay(100);     /* as Linux dwc3: the command completes before the controller is done with it */
++}
++
+ /*
+  * USB descriptors: a CDC-ECM (Ethernet) function, which Linux (cdc_ether)
+  * and macOS drive without extra drivers. VID 0x1209 / PID 0x0001 =
+@@ -551,10 +578,15 @@ rndis_query(uint32_t oid, uint8_t *out)
+ static void
+ rndis_notify(void)
+ {
++	/* One at a time on the interrupt endpoint; the others go as each one completes. */
++	if (ud.nint_busy) {
++		ud.nint_pending++;
++		return;
++	}
+ 	uint8_t *n = (uint8_t *)(ud.dma + ud.buf_nnotify);
+ 	memset(n, 0, 8);
+ 	n[0] = 1;
+-	ud_start_trb(ud.ep_nint, ud.trb_nint, ud.buf_nnotify, 8, TRBCTL_NORMAL);
++	ud.nint_busy = ud_start_trb(ud.ep_nint, ud.trb_nint, ud.buf_nnotify, 8, TRBCTL_NORMAL) == 0;
+ }
+ 
+ /* One encapsulated command (len bytes at msg): its completion goes to ud.rndis_resp. */
+@@ -618,6 +650,10 @@ rndis_command(const uint8_t *msg, uint32_t len)
+ 		} else if (oid != 0x01010103 && oid != 0x00010116) {    /* multicast list, driver version */
+ 			status = RNDIS_NOT_SUPPORTED;
+ 		}
++		static unsigned sets_logged;
++		if (sets_logged++ < 16) {
++			printf("SWEET USB: RNDIS set OID 0x%08x (%u bytes) -> 0x%x\n", oid, blen, status);
++		}
+ 		rndis_put32(r, RNDIS_SET | RNDIS_CMPLT);
+ 		rndis_put32(r + 4, 16);
+ 		rndis_put32(r + 8, id);
+@@ -646,6 +682,16 @@ rndis_command(const uint8_t *msg, uint32_t len)
+ 	default:
+ 		return;
+ 	}
++	if (ud.rndis_q_count == 4) {
++		printf("SWEET USB: RNDIS answers not read, the oldest dropped\n");
++		ud.rndis_q_head = (ud.rndis_q_head + 1) % 4;
++		ud.rndis_q_count--;
++	}
++	unsigned slot = (ud.rndis_q_head + ud.rndis_q_count) % 4;
++	memcpy(ud.rndis_q[slot], r, ud.rndis_resp_len);
++	ud.rndis_q_len[slot] = ud.rndis_resp_len;
++	ud.rndis_q_count++;
++	ud.rndis_resp_len = 0;
+ 	rndis_notify();
+ }
+ 
+@@ -726,10 +772,11 @@ ud_setup(void)
+ 			ud.rndis_cmd_out = true;        /* SEND_ENCAPSULATED_COMMAND */
+ 			ud.ep0_out_len = length;
+ 		} else if (type == 0xa1 && req == 0x01) {       /* GET_ENCAPSULATED_RESPONSE */
+-			if (ud.rndis_resp_len) {
+-				n = ud.rndis_resp_len;
+-				memcpy(data, ud.rndis_resp, n);
+-				ud.rndis_resp_len = 0;
++			if (ud.rndis_q_count) {
++				n = ud.rndis_q_len[ud.rndis_q_head];
++				memcpy(data, ud.rndis_q[ud.rndis_q_head], n);
++				ud.rndis_q_head = (ud.rndis_q_head + 1) % 4;
++				ud.rndis_q_count--;
+ 				/* A whole number of 64-byte packets shorter than wLength would need a
+ 				 * zero-length packet to end it, which EP0 here does not send: one zero byte
+ 				 * more instead (MessageLength still gives the response's own length). */
+@@ -1089,6 +1136,48 @@ ud_serial_tx(void)
+ 	}
+ }
+ 
++/*
++ * USB reset (Linux dwc3_gadget_reset_interrupt): the host may reset the bus in the middle of a
++ * control transfer (Windows does when a request times out). Every transfer still running ends,
++ * the device is unconfigured and SETUP is armed again. Before this EP0 stayed in its data or
++ * status stage and the host's next GET_DESCRIPTOR never completed.
++ */
++static void
++ud_bus_reset(void)
++{
++	static unsigned resets;
++	bool was = ud.configured || ud.state != EP0_SETUP;
++
++	if (ud.net && ud.lock != NULL) {
++		lck_mtx_lock(ud.lock);
++	}
++	for (unsigned ep = 2; ep < 16; ep++) {
++		ud_end_transfer(ep);
++	}
++	ud.configured = false;
++	ud.net_tx_busy = false;
++	ud.tx_busy = false;
++	if (ud.net && ud.lock != NULL) {
++		lck_mtx_unlock(ud.lock);
++	}
++	ud.serial_dtr = false;
++	ud.serial_line_out = false;
++	ud.rndis_cmd_out = false;
++	ud.rndis_filter = 0;
++	ud.rndis_resp_len = 0;
++	ud.rndis_q_head = ud.rndis_q_count = 0;
++	ud.nint_busy = false;
++	ud.nint_pending = 0;
++	if (ud.state != EP0_SETUP) {
++		ud_end_transfer(0);
++		ud_end_transfer(1);
++		ud_start_setup();
++	}
++	if (resets++ < 16) {
++		printf("SWEET USB: bus reset%s\n", was ? ": transfers ended, SETUP armed again" : "");
++	}
++}
++
+ static void
+ ud_event(uint32_t ev)
+ {
+@@ -1096,7 +1185,7 @@ ud_event(uint32_t ev)
+ 		uint32_t type = (ev >> 8) & 0xf;
+ 		if (type == 1) {        /* USB reset */
+ 			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
+-			printf("SWEET USB: bus reset\n");
++			ud_bus_reset();
+ 		} else if (type == 2) { /* connect done */
+ 			uint32_t speed = dwc_rd(DSTS) & 7;
+ 			/* ep0 max packet: 64 at high/full speed (modify action) */
+@@ -1114,6 +1203,17 @@ ud_event(uint32_t ev)
+ 	unsigned type = (ev >> 6) & 0xf;
+ 	unsigned status = (ev >> 12) & 0xf;
+ 
++	if (type == 1 && ep < 16) {
++		ud.active[ep] = false;
++	}
++	if (ud.rndis && ep == ud.ep_nint && type == 1) {
++		ud.nint_busy = false;
++		if (ud.nint_pending) {
++			ud.nint_pending--;
++			rndis_notify();
++		}
++		return;
++	}
+ 	if (ud.net && ep == ud.ep_nrx && type == 1) {
+ 		ud_rx_done();
+ 		return;
+@@ -1169,6 +1269,13 @@ ud_event(uint32_t ev)
+ 		}
+ 		return;
+ 	}
++	if (type == 3 && status == 1 && ud.state == EP0_DATA && ep != (ud.data_in ? 1u : 0u)) {
++		/* XferNotReady for the other direction: the host gave the data stage up (Linux dwc3) */
++		ud_end_transfer(0);
++		ud_end_transfer(1);
++		ud_stall();
++		return;
++	}
+ 	if (type == 3 && status == 2) { /* XferNotReady, control status phase */
+ 		if (ud.state == EP0_WAIT_STATUS2 || ud.state == EP0_WAIT_STATUS3) {
+ 			uint32_t ctl = ud.state == EP0_WAIT_STATUS3 ? TRBCTL_STATUS3 : TRBCTL_STATUS2;

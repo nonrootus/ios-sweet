@@ -138,4 +138,6 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WO
 # 0217: GPU submitting threads alternate between A76 cores 7 and 6.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet-gpu-threads-on-both-a76.patch"
 # 0218: RNDIS answers never a whole number of EP0 packets (no ZLP needed).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"
+# 0219: the USB device survives a bus reset; RNDIS notifications and answers queued.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"

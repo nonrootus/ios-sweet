@@ -40,7 +40,7 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_postboot.c "$
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_board_profile.c --exclude=bsd/dev/sweet_gmu_board_profile.h --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0153-sweet-gmu-configuration.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_gmu_dcvs.c --exclude=bsd/dev/sweet_gmu_dcvs.h --exclude=bsd/conf/files --exclude=bsd/dev/sweet_gpu_probe.c --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp "$GITHUB_WORKSPACE/xnu/patches/0154-sweet-gmu-dcvs-request.patch"
 #0156 supersedes all0155 hunks; exact sources verified below.
-git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_a618_address_space.c --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --include=bsd/dev/sweet_smmu_context.c --include=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_smmu_context.h --exclude=bsd/dev/sweet_a618_address_space.c --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc --include=bsd/dev/sweet_smmu_context.c --include=bsd/dev/sweet_smmu_context.h "$GITHUB_WORKSPACE/xnu/patches/0156-sweet-a618-cold-context.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0157-sweet-a618-gpu-oob.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/conf/files --exclude=iokit/Kernel/arm/sweet_a618_cp_run.inc --exclude=iokit/Kernel/arm/sweet_gpu_gmu_start.cpp --exclude=iokit/Kernel/arm/sweet_a618_gpu_oob.inc --exclude=bsd/dev/sweet_gpu_probe.c "$GITHUB_WORKSPACE/xnu/patches/0158-sweet-a618-first-cp.patch"
 # 0160 supersedes the sole 0159 target. Canonical bytes are checked below.
@@ -60,7 +60,7 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.c
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc "$GITHUB_WORKSPACE/xnu/patches/0179-sweet-gpu-bo-lifetime.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0180-sweet-usb-console-and-b3a8-evidence.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c --exclude=bsd/vfs/vfs_syscalls.c "$GITHUB_WORKSPACE/xnu/patches/0181-sweet-renderer-ramdisk.patch"
-git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0182-sweet-a618-direct-panel.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=bsd/dev/sweet_a618_render_pool.c --exclude=bsd/dev/sweet_a618_address_space.c --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0182-sweet-a618-direct-panel.patch"
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0183-sweet-framebuffer-direct-frame.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0184-sweet-direct-frames-stay-on-panel.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0185-sweet-iosurface-wrap-client.patch"
@@ -83,9 +83,9 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WO
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WORKSPACE/xnu/patches/0194-sweet-amfi-iokit-service.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET AMFI: AppleMobileFileIntegrity service registered' > /dev/null
 # 0195: 256 MiB render pool, panel GPU VA 0x58000000.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0195-sweet-a618-render-pool-256m.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_a618_render_pool.h "$GITHUB_WORKSPACE/xnu/patches/0195-sweet-a618-render-pool-256m.patch"
 # 0197: validate the combined patch, then restore the pre-0197 context for 0196 and 0132.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0197-sweet-iosurface-bound-icon-wrap-retry.patch"
 surface_check=$(mktemp -d)
 trap 'rm -rf -- "$surface_check"' EXIT
 surface_file=iokit/Kernel/arm/SweetSurface.cpp
@@ -108,8 +108,10 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c "$GITHUB_WO
 # 0202: the GPU is waited for by looking again at once, not by sleeping 1 ms.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0202-sweet-a618-fast-gpu-wait.patch"
 # 0203: the thread that submits GPU work stays on an A76 core.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch"
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch"
 # 0204: MobileGestalt cache set aside once for the sRGB device tree.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0204-sweet-mobilegestalt-cache-aside.patch"
 # 0205: a full-screen BGRA layer the GPU already put on the panel is not copied again.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0205-sweet-framebuffer-bgra-direct-frame.patch"
+# 0206: BGRA IOSurfaces read by the GPU in place (import window, TLB invalidation, cache cleaning).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch"

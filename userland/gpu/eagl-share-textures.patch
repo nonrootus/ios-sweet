@@ -1,0 +1,20 @@
+--- a/userland/gpu/eagl.c
++++ b/userland/gpu/eagl.c
+@@ -356,6 +356,8 @@ static uint32_t slot_calls[SLOTS];
+ static uint64_t slot_us[SLOTS];         /* topaz: time spent in each entry */
+ static int check_errors = 1;            /* ask the library for an error after every call (the first frames) */
+ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
++/* sweet: a surface drawn into keeps a texture of the library's own; only shown ones are shared */
++static int share_targets = 0;
+ /*
+  * A frame is not drawn into its surface's memory but into a texture of the library's own, and the
+  * GPU copies it into the surface at the frame's end (one blit; the display's driver waits for that
+@@ -4025,7 +4027,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
+ 		}
+ 	} else if (sweet_direct_keep_contents(e, image)) {
+ 		/* the last frame: the surface's own memory is stale while frames go to the panel */
+-	} else if (surface_mirrored(e, image) || !surface_shared(e, image)) {
++	} else if (!share_targets || surface_mirrored(e, image) || !surface_shared(e, image)) {
+ 		surface_changed(e, image);              /* (what it adds up to now) */
+ 		surface_to_texture(e, image);
+ 	}

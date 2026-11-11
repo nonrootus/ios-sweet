@@ -18,5 +18,10 @@ extern "C" bool sweet_a618_panel_ready(void);
  * GPU has already put this one there. */
 extern "C" void sweet_a618_note_display(uint32_t surface);
 extern "C" bool sweet_a618_direct_take(uint32_t surface);
+/* IOSurfaces read by the GPU in place: pages of the import window (render_pool.h). */
+extern "C" bool sweet_a618_import_ready(void);
+extern "C" int sweet_a618_import_map(unsigned first, const uint64_t *physical, unsigned count);
+extern "C" void sweet_a618_import_unmap(unsigned first, unsigned count);
+extern "C" int sweet_a618_import_invalidate(void);
 
 #endif

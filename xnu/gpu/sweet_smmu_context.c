@@ -336,3 +336,9 @@ int sweet_smmu_context_remove_unmatched(struct sweet_smmu_context *c)
     c->ops.unpin(c->ops.ctx);
     return 0;
 }
+
+int sweet_smmu_context_invalidate(struct sweet_smmu_context *c)
+{
+    if (!c || c->state != SWEET_SMMU_CONTEXT_ACTIVE) return SWEET_SMMU_CONTEXT_INVALID;
+    return invalidate(c);
+}

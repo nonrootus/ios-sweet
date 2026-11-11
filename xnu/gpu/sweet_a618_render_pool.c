@@ -10,6 +10,10 @@ _Static_assert((SWEET_A618_PANEL_IOVA >> 30)==1u, "panel must share SID0 L1");
 _Static_assert(((SWEET_A618_PANEL_IOVA >> 21)&511u)==SWEET_A618_PANEL_L2, "panel L2 start");
 _Static_assert(SWEET_A618_PANEL_L2 >= 64u+SWEET_A618_RENDER_TABLES, "panel after the pool");
 _Static_assert(SWEET_A618_PANEL_PAGES <= SWEET_A618_PANEL_TABLES*TABLE_ENTRIES, "panel tables");
+_Static_assert((SWEET_A618_IMPORT_IOVA >> 30)==1u, "imports must share SID0 L1");
+_Static_assert(((SWEET_A618_IMPORT_IOVA >> 21)&511u)==SWEET_A618_IMPORT_L2, "import L2 start");
+_Static_assert(SWEET_A618_IMPORT_L2 >= SWEET_A618_PANEL_L2+SWEET_A618_PANEL_TABLES, "imports after the panel");
+_Static_assert(SWEET_A618_IMPORT_L2+SWEET_A618_IMPORT_TABLES <= TABLE_ENTRIES, "imports inside one L2 table");
 
 static int overlap(uintptr_t a, size_t as, uintptr_t b, size_t bs)
 {
@@ -110,4 +114,65 @@ int sweet_a618_render_pool_check(const struct sweet_gpu_table_page base[3],
     const uint64_t physical[SWEET_A618_RENDER_PAGES])
 {
     return valid(base,extra,physical,1);
+}
+
+int sweet_a618_import_attach(const struct sweet_gpu_table_page base[3],
+    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES])
+{
+    if (!base || !tables || !base[1].cpu) return -1;
+    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t) {
+        uint64_t descriptor;
+        if (!tables[t].cpu || ((uintptr_t)tables[t].cpu & (PAGE_BYTES-1)) ||
+            sweet_gpu_pte_table(tables[t].pa,&descriptor) ||
+            base[1].cpu[SWEET_A618_IMPORT_L2+t]) return -1;
+        for (unsigned j = 0; j < 3; ++j)
+            if (tables[t].pa == base[j].pa) return -1;
+        for (unsigned leaf = 0; leaf < TABLE_ENTRIES; ++leaf)
+            if (tables[t].cpu[leaf]) return -1;
+    }
+    /* Empty children before the L2 descriptors; the caller cleans them all. */
+    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t)
+        base[1].cpu[SWEET_A618_IMPORT_L2+t] = tables[t].pa | 3u;
+    return 0;
+}
+
+int sweet_a618_import_check(const struct sweet_gpu_table_page base[3],
+    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES])
+{
+    if (!base || !tables || !base[1].cpu) return -1;
+    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t)
+        if (base[1].cpu[SWEET_A618_IMPORT_L2+t] != (tables[t].pa | 3u)) return -1;
+    return 0;
+}
+
+int sweet_a618_import_set(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
+    unsigned first, const uint64_t *physical, unsigned count)
+{
+    if (!tables || !physical || !count || first >= SWEET_A618_IMPORT_PAGES ||
+        count > SWEET_A618_IMPORT_PAGES-first) return -1;
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned page = first+i;
+        uint64_t pte;
+        if (!tables[page/TABLE_ENTRIES].cpu || tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] ||
+            sweet_gpu_pte_page_access(physical[i],0,0,&pte)) return -1;
+    }
+    /* No fallible step after the first store. Same attributes as the pool: never execute. */
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned page = first+i;
+        uint64_t pte;
+        (void)sweet_gpu_pte_page_access(physical[i],0,0,&pte);
+        tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] = pte | (UINT64_C(3)<<53);
+    }
+    return 0;
+}
+
+void sweet_a618_import_clear(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
+    unsigned first, unsigned count)
+{
+    if (!tables || first >= SWEET_A618_IMPORT_PAGES || count > SWEET_A618_IMPORT_PAGES-first) return;
+    for (unsigned i = 0; i < count; ++i) {
+        const unsigned page = first+i;
+        if (tables[page/TABLE_ENTRIES].cpu)
+            tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] = 0;
+    }
 }

@@ -38,6 +38,7 @@ git -C "$stage" apply "$repo/userland/gpu/eagl-ca-uniforms.patch"
 git -C "$stage" apply "$repo/userland/gpu/eagl-readback-probe.patch"
 git -C "$stage" apply "$repo/userland/gpu/eagl-texture-budget.patch"
 git -C "$stage" apply "$repo/userland/gpu/eagl-bgra-display.patch"
+git -C "$stage" apply "$repo/userland/gpu/eagl-share-textures.patch"
 git -C "$stage" apply --include=iokit/Kernel/arm/sweet_b3a8.h \
     "$repo/xnu/patches/0177-sweet-b3a8-framebuffer.patch"
 cp "$stage/iokit/Kernel/arm/sweet_b3a8.h" "$stage/userland/gpu/"
@@ -58,8 +59,6 @@ import sys
 
 for path, before, after in (
     (sys.argv[1], '"RedwoodGPU"', '"SweetAdreno"'),
-    (sys.argv[2], 'share_surfaces = strstr(arguments, "glcopy=1") == NULL;', 'share_surfaces = 0;'),
-    (sys.argv[2], 'static int share_surfaces = 1;', 'static int share_surfaces = 0;'),
 ):
     source = Path(path)
     data = source.read_text()

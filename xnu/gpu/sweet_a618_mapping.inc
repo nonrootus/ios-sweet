@@ -12,6 +12,9 @@ static struct {
     sweet_gpu_memory *panel_tables_memory;
     sweet_gpu_table_page panel_tables[SWEET_A618_PANEL_TABLES];
     bool panel_ready;
+    sweet_gpu_memory *import_tables_memory;
+    sweet_gpu_table_page import_tables[SWEET_A618_IMPORT_TABLES];
+    bool import_ready;
     sweet_smmu_context context;
     bool published, pinned, render_ready;
     unsigned observations;
@@ -22,6 +25,7 @@ static int a618_tree_check(void)
     auto &m=a618_mapping;auto &a=a618_preparation;
     const uint64_t fill_pa=a.physical[SWEET_A618_DATA_PAGES];
 #ifdef KERNEL
+    if(m.import_ready && sweet_a618_import_check(m.tables,m.import_tables))return -1;
     return m.render_ready ?
         sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
             m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)) :
@@ -103,6 +107,23 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
             }else{
                 IOLog("SWEET CA: panel memory not mapped: console %llx %lux%lu stride %lu\n",
                     static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
+            }
+            /* IOSurfaces read in place: empty leaf tables now, leaves at run time. Optional. */
+            m.import_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_IMPORT_TABLES);
+            bool imports=m.import_tables_memory!=nullptr;
+            for(unsigned i=0;imports && i<SWEET_A618_IMPORT_TABLES;i++){
+                void *cpu=nullptr;uint64_t pa=0;
+                if(sweet_gpu_memory_page(m.import_tables_memory,i,&cpu,&pa))imports=false;
+                else m.import_tables[i]={static_cast<uint64_t *>(cpu),pa};
+            }
+            if(imports && !sweet_a618_import_attach(m.tables,m.import_tables)){
+                for(unsigned i=0;i<SWEET_A618_IMPORT_TABLES;i++)
+                    if(sweet_gpu_memory_clean(m.import_tables_memory,i))return -5;
+                m.import_ready=true;
+                IOLog("SWEET CA: IOSurface import window at GPU VA %x, %u MiB\n",
+                    SWEET_A618_IMPORT_IOVA,SWEET_A618_IMPORT_PAGES>>8);
+            }else{
+                IOLog("SWEET CA: IOSurface import window unavailable; surfaces stay copied\n");
             }
             m.render_ready=true;
             IOLog("SWEET CA: pinned %u MiB private GPU BO pool before SID0 install\n",

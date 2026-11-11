@@ -61,6 +61,10 @@ int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *,
  * cache operation, mutation, fault acknowledgement or DMA test. */
 int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
     const struct sweet_smmu_context *gmu);
+/* TLBIASID and sync of an ACTIVE context, for leaves cleared while it is live. The
+ * caller serializes with every other user of this context's registers. A failure
+ * leaves the TLB state unknown: stop using the context's address space. */
+int sweet_smmu_context_invalidate(struct sweet_smmu_context *);
 int sweet_smmu_context_remove(struct sweet_smmu_context *);
 /* Separate inactive-only teardown for this controller when FAULT writes are
  * ignored. Only for the early-boot register test: no producer may have run

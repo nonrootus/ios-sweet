@@ -1,0 +1,549 @@
+--- a/bsd/dev/sweet_a618_address_space.c
++++ b/bsd/dev/sweet_a618_address_space.c
+@@ -97,6 +97,8 @@ int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page t[3]
+     for(unsigned level=0;level<3;level++)for(unsigned i=0;i<ENTRIES;i++){
+         if(level==1 && i>=64 && i<64+SWEET_A618_RENDER_TABLES)continue;
+         if(level==1 && i>=SWEET_A618_PANEL_L2 && i<SWEET_A618_PANEL_L2+SWEET_A618_PANEL_TABLES)continue;
++        /* (the import window: sweet_a618_import_check, when it is attached) */
++        if(level==1 && i>=SWEET_A618_IMPORT_L2 && i<SWEET_A618_IMPORT_L2+SWEET_A618_IMPORT_TABLES)continue;
+         if(t[level].cpu[i]!=expected(t,leaves,level,i))return -1;
+     }
+     return 0;
+--- a/bsd/dev/sweet_a618_render_pool.c
++++ b/bsd/dev/sweet_a618_render_pool.c
+@@ -10,6 +10,10 @@ _Static_assert((SWEET_A618_PANEL_IOVA >> 30)==1u, "panel must share SID0 L1");
+ _Static_assert(((SWEET_A618_PANEL_IOVA >> 21)&511u)==SWEET_A618_PANEL_L2, "panel L2 start");
+ _Static_assert(SWEET_A618_PANEL_L2 >= 64u+SWEET_A618_RENDER_TABLES, "panel after the pool");
+ _Static_assert(SWEET_A618_PANEL_PAGES <= SWEET_A618_PANEL_TABLES*TABLE_ENTRIES, "panel tables");
++_Static_assert((SWEET_A618_IMPORT_IOVA >> 30)==1u, "imports must share SID0 L1");
++_Static_assert(((SWEET_A618_IMPORT_IOVA >> 21)&511u)==SWEET_A618_IMPORT_L2, "import L2 start");
++_Static_assert(SWEET_A618_IMPORT_L2 >= SWEET_A618_PANEL_L2+SWEET_A618_PANEL_TABLES, "imports after the panel");
++_Static_assert(SWEET_A618_IMPORT_L2+SWEET_A618_IMPORT_TABLES <= TABLE_ENTRIES, "imports inside one L2 table");
+ 
+ static int overlap(uintptr_t a, size_t as, uintptr_t b, size_t bs)
+ {
+@@ -111,3 +115,64 @@ int sweet_a618_render_pool_check(const struct sweet_gpu_table_page base[3],
+ {
+     return valid(base,extra,physical,1);
+ }
++
++int sweet_a618_import_attach(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES])
++{
++    if (!base || !tables || !base[1].cpu) return -1;
++    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t) {
++        uint64_t descriptor;
++        if (!tables[t].cpu || ((uintptr_t)tables[t].cpu & (PAGE_BYTES-1)) ||
++            sweet_gpu_pte_table(tables[t].pa,&descriptor) ||
++            base[1].cpu[SWEET_A618_IMPORT_L2+t]) return -1;
++        for (unsigned j = 0; j < 3; ++j)
++            if (tables[t].pa == base[j].pa) return -1;
++        for (unsigned leaf = 0; leaf < TABLE_ENTRIES; ++leaf)
++            if (tables[t].cpu[leaf]) return -1;
++    }
++    /* Empty children before the L2 descriptors; the caller cleans them all. */
++    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t)
++        base[1].cpu[SWEET_A618_IMPORT_L2+t] = tables[t].pa | 3u;
++    return 0;
++}
++
++int sweet_a618_import_check(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES])
++{
++    if (!base || !tables || !base[1].cpu) return -1;
++    for (unsigned t = 0; t < SWEET_A618_IMPORT_TABLES; ++t)
++        if (base[1].cpu[SWEET_A618_IMPORT_L2+t] != (tables[t].pa | 3u)) return -1;
++    return 0;
++}
++
++int sweet_a618_import_set(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
++    unsigned first, const uint64_t *physical, unsigned count)
++{
++    if (!tables || !physical || !count || first >= SWEET_A618_IMPORT_PAGES ||
++        count > SWEET_A618_IMPORT_PAGES-first) return -1;
++    for (unsigned i = 0; i < count; ++i) {
++        const unsigned page = first+i;
++        uint64_t pte;
++        if (!tables[page/TABLE_ENTRIES].cpu || tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] ||
++            sweet_gpu_pte_page_access(physical[i],0,0,&pte)) return -1;
++    }
++    /* No fallible step after the first store. Same attributes as the pool: never execute. */
++    for (unsigned i = 0; i < count; ++i) {
++        const unsigned page = first+i;
++        uint64_t pte;
++        (void)sweet_gpu_pte_page_access(physical[i],0,0,&pte);
++        tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] = pte | (UINT64_C(3)<<53);
++    }
++    return 0;
++}
++
++void sweet_a618_import_clear(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
++    unsigned first, unsigned count)
++{
++    if (!tables || first >= SWEET_A618_IMPORT_PAGES || count > SWEET_A618_IMPORT_PAGES-first) return;
++    for (unsigned i = 0; i < count; ++i) {
++        const unsigned page = first+i;
++        if (tables[page/TABLE_ENTRIES].cpu)
++            tables[page/TABLE_ENTRIES].cpu[page%TABLE_ENTRIES] = 0;
++    }
++}
+--- a/bsd/dev/sweet_a618_render_pool.h
++++ b/bsd/dev/sweet_a618_render_pool.h
+@@ -23,6 +23,14 @@ extern "C" {
+ #define SWEET_A618_PANEL_TABLES 5u
+ #define SWEET_A618_PANEL_L2 192u
+ 
++/* IOSurfaces the GPU reads in place: 512 MiB of GPU VA whose L3 tables are attached
++ * empty before the context is installed. Leaves are entered and cleared at run time
++ * (sweet_a618_renderer.inc); a cleared leaf needs a TLB invalidation before reuse. */
++#define SWEET_A618_IMPORT_IOVA UINT32_C(0x60000000)
++#define SWEET_A618_IMPORT_L2 256u
++#define SWEET_A618_IMPORT_TABLES 256u
++#define SWEET_A618_IMPORT_PAGES (SWEET_A618_IMPORT_TABLES * 512u)
++
+ /* The base tree has already been built and verified. Every new table must be
+  * zero and privately owned. On preflight failure no table is modified. */
+ int sweet_a618_render_pool_attach(const struct sweet_gpu_table_page base[3],
+@@ -33,6 +41,17 @@ int sweet_a618_render_pool_check(const struct sweet_gpu_table_page base[3],
+     const uint64_t physical[SWEET_A618_RENDER_PAGES]);
+ int sweet_a618_panel_attach(const struct sweet_gpu_table_page base[3],
+     const struct sweet_gpu_table_page tables[SWEET_A618_PANEL_TABLES]);
++/* Empty, zeroed, owned tables only; nothing is changed on failure. */
++int sweet_a618_import_attach(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES]);
++int sweet_a618_import_check(const struct sweet_gpu_table_page base[3],
++    const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES]);
++/* Leaves for pages first.. of the window: only empty ones, all or none. The caller
++ * completes the stores (dsb) before the GPU may use them. */
++int sweet_a618_import_set(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
++    unsigned first, const uint64_t *physical, unsigned count);
++void sweet_a618_import_clear(const struct sweet_gpu_table_page tables[SWEET_A618_IMPORT_TABLES],
++    unsigned first, unsigned count);
+ int sweet_a618_address_space_check_render(const struct sweet_gpu_table_page base[3],
+     const uint64_t data_pa[SWEET_A618_DATA_PAGES], uint64_t fill_pa,
+     const struct sweet_gpu_table_page extra[SWEET_A618_RENDER_TABLES],
+--- a/bsd/dev/sweet_smmu_context.c
++++ b/bsd/dev/sweet_smmu_context.c
+@@ -336,3 +336,9 @@ int sweet_smmu_context_remove_unmatched(struct sweet_smmu_context *c)
+     c->ops.unpin(c->ops.ctx);
+     return 0;
+ }
++
++int sweet_smmu_context_invalidate(struct sweet_smmu_context *c)
++{
++    if (!c || c->state != SWEET_SMMU_CONTEXT_ACTIVE) return SWEET_SMMU_CONTEXT_INVALID;
++    return invalidate(c);
++}
+--- a/bsd/dev/sweet_smmu_context.h
++++ b/bsd/dev/sweet_smmu_context.h
+@@ -61,6 +61,10 @@ int sweet_smmu_gpu_cold_install(struct sweet_smmu_context *,
+  * cache operation, mutation, fault acknowledgement or DMA test. */
+ int sweet_smmu_gpu_context_check(const struct sweet_smmu_context *gpu,
+     const struct sweet_smmu_context *gmu);
++/* TLBIASID and sync of an ACTIVE context, for leaves cleared while it is live. The
++ * caller serializes with every other user of this context's registers. A failure
++ * leaves the TLB state unknown: stop using the context's address space. */
++int sweet_smmu_context_invalidate(struct sweet_smmu_context *);
+ int sweet_smmu_context_remove(struct sweet_smmu_context *);
+ /* Separate inactive-only teardown for this controller when FAULT writes are
+  * ignored. Only for the early-boot register test: no producer may have run
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -1,6 +1,6 @@
+ /* Mesa's msm DRM 1.7 calls, restricted to the signed iOS 20H392 backboardd.
+- * GPU memory is a single pre-pinned Normal-NC pool. No live SMMU edits,
+- * external IOSurface import, DMA teardown or GPU reset is provided here. */
++ * GPU memory is a single pre-pinned Normal-NC pool; BGRA IOSurfaces are read in place
++ * through the import window (importSurface). No DMA teardown or GPU reset here. */
+ #include "sweet_a618_render_bridge.h"
+ #include "../../../bsd/dev/sweet_a618_render_pool.h"
+ #include <IOKit/IOLib.h>
+@@ -15,7 +15,10 @@
+ #include <sys/systm.h>
+ extern "C" {
+ #include <arm/machine_routines.h>
++#include <arm/caches_internal.h>
+ }
++#include <mach/mach_time.h>
++#include "SweetSurface.h"
+ 
+ enum : uint32_t {
+     kGemClose=0x09,kGetParam=0x40,kSetParam=0x41,kGemNew=0x42,
+@@ -188,7 +191,104 @@ public:
+ };
+ OSDefineMetaClassAndStructors(SweetAdrenoBO,IOGeneralMemoryDescriptor);
+ 
+-struct sweet_bo { IOMemoryDescriptor *memory;uint64_t size,iova;uint32_t flags; };
++struct sweet_bo {
++    IOMemoryDescriptor *memory;uint64_t size,iova;uint32_t flags;
++    /* An imported IOSurface: its pages in the import window, and when the CPU cache was last cleaned. */
++    SweetSurface *surface;unsigned import_first,import_pages;uint32_t seed;uint64_t flushed;
++};
++
++/*
++ * IOSurfaces the GPU reads in place. A cleared range may still be in the SMMU's TLB, so it is
++ * not used again before one invalidation of the context, done only when the window has no
++ * other room. Shared by all clients under pool_lock; lock order: client lock, pool_lock,
++ * the renderer's submit lock.
++ */
++static constexpr unsigned kImportPages=SWEET_A618_IMPORT_PAGES;
++static uint64_t import_used[kImportPages/64],import_stale[kImportPages/64];
++static unsigned import_count,import_logs,import_flushes;
++static uint64_t import_flushed_bytes,import_flush_ticks;
++
++static bool import_taken(unsigned page)
++{
++    return ((import_used[page/64]|import_stale[page/64])>>(page%64))&1u;
++}
++
++/* Caller holds pool_lock. */
++static int import_reserve(unsigned pages)
++{
++    for(unsigned pass=0;pass<2;pass++){
++        for(unsigned first=0;first+pages<=kImportPages;){
++            unsigned run=0;
++            while(run<pages && !import_taken(first+run))run++;
++            if(run==pages){
++                for(unsigned i=0;i<pages;i++)
++                    import_used[(first+i)/64]|=UINT64_C(1)<<((first+i)%64);
++                import_count++;
++                return static_cast<int>(first);
++            }
++            first+=run+1;
++        }
++        bool stale=false;
++        for(unsigned i=0;i<kImportPages/64;i++)stale|=import_stale[i]!=0;
++        if(pass || !stale || sweet_a618_import_invalidate())break;
++        bzero(import_stale,sizeof(import_stale));
++    }
++    return -1;
++}
++
++static void import_forget(unsigned first,unsigned pages,bool stale)
++{
++    IOLockLock(pool_lock);
++    for(unsigned i=0;i<pages;i++){
++        const unsigned page=first+i;
++        import_used[page/64]&=~(UINT64_C(1)<<(page%64));
++        if(stale)import_stale[page/64]|=UINT64_C(1)<<(page%64);
++    }
++    import_count--;
++    IOLockUnlock(pool_lock);
++}
++
++static uint32_t import_seed(SweetSurface *surface)
++{
++    return *reinterpret_cast<volatile uint32_t *>(static_cast<uint8_t *>(surface->state->getBytesNoCopy())+0xc);
++}
++
++/* With the client lock held, so no submission is running: the GPU no longer reads it. */
++static void import_release(sweet_bo &bo)
++{
++    sweet_a618_import_unmap(bo.import_first,bo.import_pages);
++    import_forget(bo.import_first,bo.import_pages,true);
++    bo.memory->complete();
++    bo.surface->release();
++    bo.surface=nullptr;
++}
++
++/*
++ * The GPU reads an imported surface from memory; what the CPU wrote may still be in its
++ * cache. Cleaned when the surface's seed has moved (a writer locks it), and otherwise at
++ * most once a frame, since not every writer says so (Topaz does the same).
++ */
++static void import_flush(sweet_bo *bo)
++{
++    static uint64_t again;
++    if(!again)nanoseconds_to_absolutetime(16*NSEC_PER_MSEC,&again);
++    const uint32_t seed=import_seed(bo->surface);
++    const uint64_t began=mach_absolute_time();
++    if(seed==bo->seed && began-bo->flushed<again)return;
++    auto *buffer=static_cast<IOBufferMemoryDescriptor *>(bo->memory);
++    flush_dcache(reinterpret_cast<vm_offset_t>(buffer->getBytesNoCopy()),static_cast<unsigned>(bo->size),FALSE);
++    bo->seed=seed;
++    bo->flushed=mach_absolute_time();
++    import_flushed_bytes+=bo->size;
++    import_flush_ticks+=bo->flushed-began;
++    if(++import_flushes%1024==0){
++        uint64_t ns=0;
++        absolutetime_to_nanoseconds(import_flush_ticks/1024,&ns);
++        IOLog("SWEET CA: imported surfaces cleaned %u times, %llu MB in the last 1024, %llu us each, %u imported now\n",
++            import_flushes,import_flushed_bytes>>20,ns/1000,import_count);
++        import_flushed_bytes=import_flush_ticks=0;
++    }
++}
+ 
+ /*
+  * Once the GPU writes frames to the panel, the b3a8 surfaces stop being updated and hold
+@@ -252,6 +352,8 @@ class SweetAdrenoUserClient : public IOUserClient {
+     bool reserveShadow();
+     unsigned installBO(IOMemoryDescriptor *memory,uint64_t bytes,uint64_t iova,uint32_t flags);
+     IOReturn surfaceBuffer(redwood_surface *request);
++    IOReturn importSurface(redwood_surface *request);
++    void dropBO(sweet_bo *bo);
+     IOReturn direct(sweet_direct_request *request);
+     void releaseBOs();
+ public:
+@@ -293,9 +395,7 @@ void SweetAdrenoUserClient::releaseBOs()
+     if(!lock || !bos)return;
+     IOLockLock(lock);
+     for(unsigned i=0;i<kHandles;i++){
+-        auto *memory=bos[i].memory;
+-        bos[i].memory=nullptr;
+-        if(memory)memory->release();
++        if(bos[i].memory)dropBO(&bos[i]);
+     }
+     IOLockUnlock(lock);
+ }
+@@ -362,6 +462,7 @@ IOReturn SweetAdrenoUserClient::submit(msm_gem_submit *request)
+     for(unsigned i=0;i<request->nr_bos;i++){
+         sweet_bo *bo=lookup(sb[i].handle);
+         if(!bo){result=kIOReturnBadArgument;goto unlock;}
++        if(bo->surface)import_flush(bo);
+     }
+     for(unsigned i=0;i<request->nr_cmds;i++){
+         const auto &cmd=sc[i];
+@@ -433,7 +534,7 @@ unsigned SweetAdrenoUserClient::installBO(IOMemoryDescriptor *memory,uint64_t by
+ IOReturn SweetAdrenoUserClient::surfaceBuffer(redwood_surface *request)
+ {
+     const uint32_t id=request->surface;
+-    if(id<kDirectShadowEven || id>kDirectPanelOdd)return kIOReturnUnsupported;
++    if(id<kDirectShadowEven || id>kDirectPanelOdd)return importSurface(request);
+     const bool panel=id>=kDirectPanelEven;
+     if(panel ? !sweet_a618_panel_ready():!reserveShadow())return kIOReturnUnsupported;
+     const uint64_t bytes=panel ? static_cast<uint64_t>(SWEET_A618_PANEL_PAGES)*4096u:
+@@ -472,6 +573,118 @@ IOReturn SweetAdrenoUserClient::surfaceBuffer(redwood_surface *request)
+     return kIOReturnSuccess;
+ }
+ 
++/* With the client lock held. */
++void SweetAdrenoUserClient::dropBO(sweet_bo *bo)
++{
++    auto *memory=bo->memory;
++    if(bo->surface)import_release(*bo);
++    bo->memory=nullptr;
++    memory->release();
++}
++
++/*
++ * An IOSurface as a buffer the GPU reads in place: what Mesa's freedreno-darwin.patch asks
++ * for. One plane of BGRA in wired kernel memory (IOBufferMemoryDescriptor), rows a multiple
++ * of the GPU's 64-byte pitch; anything else stays a copy (kIOReturnUnsupported).
++ */
++IOReturn SweetAdrenoUserClient::importSurface(redwood_surface *request)
++{
++    SweetSurface *s=sweet_surface_copy(request->surface);
++    if(!s)return kIOReturnNotFound;
++    auto *buffer=OSDynamicCast(IOBufferMemoryDescriptor,s->memory);
++    const uint64_t bytes=buffer ? buffer->getLength()&~UINT64_C(4095):0;
++    const uint64_t used=static_cast<uint64_t>(s->offset)+static_cast<uint64_t>(s->bytesPerRow)*s->height;
++    if(!buffer || !s->state || s->pixelFormat!=0x42475241u || s->planeCount || s->bytesPerElement!=4 ||
++        s->elementWidth!=1 || s->elementHeight!=1 || !s->width || !s->height || (s->bytesPerRow&63u) ||
++        s->bytesPerRow<s->width*4u || !bytes || used>bytes || bytes>static_cast<uint64_t>(kImportPages)*4096u){
++        s->release();
++        return kIOReturnUnsupported;
++    }
++    request->size=bytes;
++    request->offset=s->offset;
++    request->row_bytes=s->bytesPerRow;
++    request->width=s->width;
++    request->height=s->height;
++    request->pixel_format=s->pixelFormat;
++    request->planes=0;
++    if(request->handle==kDirectDescribe){
++        request->handle=0;
++        s->release();
++        return kIOReturnSuccess;
++    }
++    if(!sweet_a618_import_ready()){
++        s->release();
++        return kIOReturnUnsupported;
++    }
++    /* A surface this client has already is the same buffer again, as Mesa's handle table expects. */
++    IOLockLock(lock);
++    for(unsigned i=0;i<kHandles;i++){
++        if(bos[i].memory && bos[i].surface==s){
++            request->handle=i+1;
++            IOLockUnlock(lock);
++            s->release();
++            return kIOReturnSuccess;
++        }
++    }
++    IOLockUnlock(lock);
++
++    const unsigned pages=static_cast<unsigned>(bytes/4096u);
++    const size_t list_bytes=pages*sizeof(uint64_t);
++    auto *physical=static_cast<uint64_t *>(IOMallocData(list_bytes));
++    if(!physical || buffer->prepare()!=kIOReturnSuccess){
++        if(physical)IOFreeData(physical,list_bytes);
++        s->release();
++        return kIOReturnNoMemory;
++    }
++    bool ok=true;
++    for(unsigned i=0;ok && i<pages;i++){
++        IOByteCount length=0;
++        const addr64_t page=buffer->getPhysicalSegment(static_cast<IOByteCount>(i)*4096u,&length,kIOMemoryMapperNone);
++        ok=page && !(page&4095u) && length>=4096u;
++        physical[i]=page;
++    }
++    IOLockLock(pool_lock);
++    const int first=ok ? import_reserve(pages):-1;
++    IOLockUnlock(pool_lock);
++    const bool mapped=first>=0 && !sweet_a618_import_map(static_cast<unsigned>(first),physical,pages);
++    IOFreeData(physical,list_bytes);
++    if(!mapped){
++        if(first>=0)import_forget(static_cast<unsigned>(first),pages,false);
++        buffer->complete();
++        static unsigned refused;
++        if(refused++<8)IOLog("SWEET CA: IOSurface %u (%u pages) not imported: %s\n",request->surface,pages,
++            !ok ? "no physical pages" : first<0 ? "no room in the window" : "leaves refused");
++        s->release();
++        return kIOReturnNoMemory;
++    }
++    /* What the CPU wrote is in memory before the GPU first reads it. */
++    flush_dcache(reinterpret_cast<vm_offset_t>(buffer->getBytesNoCopy()),static_cast<unsigned>(bytes),FALSE);
++    buffer->retain();
++    sweet_bo bo={buffer,bytes,SWEET_A618_IMPORT_IOVA+static_cast<uint64_t>(first)*4096u,0,
++        s,static_cast<unsigned>(first),pages,import_seed(s),mach_absolute_time()};
++    unsigned handle=0;
++    IOLockLock(lock);
++    for(unsigned i=0;i<kHandles;i++){
++        unsigned candidate=(next_handle+i)%kHandles;
++        if(!bos[candidate].memory){handle=candidate+1;break;}
++    }
++    if(handle){
++        bos[handle-1]=bo;
++        next_handle=handle%kHandles;
++    }else{
++        dropBO(&bo);
++    }
++    IOLockUnlock(lock);
++    if(!handle)return kIOReturnNoMemory;
++    request->handle=handle;
++    if(import_logs<8){
++        import_logs++;
++        IOLog("SWEET CA: IOSurface %u %ux%u read in place at GPU VA %llx, %u pages, %u imported\n",
++            request->surface,s->width,s->height,static_cast<unsigned long long>(bo.iova),pages,import_count);
++    }
++    return kIOReturnSuccess;
++}
++
+ IOReturn SweetAdrenoUserClient::direct(sweet_direct_request *request)
+ {
+     request->result=0;
+@@ -623,11 +836,8 @@ IOReturn SweetAdrenoUserClient::externalMethod(uint32_t selector,
+     case kGemClose:{
+         if(size<sizeof(r.close))return kIOReturnBadArgument;
+         IOLockLock(lock);sweet_bo *bo=lookup(r.close.handle);
+-        if(bo){
+-            auto *memory=bo->memory;
+-            bo->memory=nullptr;
+-            memory->release();
+-        }else result=kIOReturnBadArgument;
++        if(bo)dropBO(bo);
++        else result=kIOReturnBadArgument;
+         IOLockUnlock(lock);break;
+     }
+     default:result=kIOReturnUnsupported;break;
+--- a/iokit/Kernel/arm/sweet_a618_mapping.inc
++++ b/iokit/Kernel/arm/sweet_a618_mapping.inc
+@@ -12,6 +12,9 @@ static struct {
+     sweet_gpu_memory *panel_tables_memory;
+     sweet_gpu_table_page panel_tables[SWEET_A618_PANEL_TABLES];
+     bool panel_ready;
++    sweet_gpu_memory *import_tables_memory;
++    sweet_gpu_table_page import_tables[SWEET_A618_IMPORT_TABLES];
++    bool import_ready;
+     sweet_smmu_context context;
+     bool published, pinned, render_ready;
+     unsigned observations;
+@@ -22,6 +25,7 @@ static int a618_tree_check(void)
+     auto &m=a618_mapping;auto &a=a618_preparation;
+     const uint64_t fill_pa=a.physical[SWEET_A618_DATA_PAGES];
+ #ifdef KERNEL
++    if(m.import_ready && sweet_a618_import_check(m.tables,m.import_tables))return -1;
+     return m.render_ready ?
+         sweet_a618_address_space_check_render(m.tables,a.physical,fill_pa,
+             m.render_tables,sweet_gpu_render_memory_physical(m.render_pool)) :
+@@ -104,6 +108,23 @@ static int a618_cold_prepare_and_attach(persistent_gmu *s, bool fill)
+                 IOLog("SWEET CA: panel memory not mapped: console %llx %lux%lu stride %lu\n",
+                     static_cast<unsigned long long>(video.v_baseAddr),video.v_width,video.v_height,video.v_rowBytes);
+             }
++            /* IOSurfaces read in place: empty leaf tables now, leaves at run time. Optional. */
++            m.import_tables_memory=sweet_gpu_memory_create_nc(SWEET_A618_IMPORT_TABLES);
++            bool imports=m.import_tables_memory!=nullptr;
++            for(unsigned i=0;imports && i<SWEET_A618_IMPORT_TABLES;i++){
++                void *cpu=nullptr;uint64_t pa=0;
++                if(sweet_gpu_memory_page(m.import_tables_memory,i,&cpu,&pa))imports=false;
++                else m.import_tables[i]={static_cast<uint64_t *>(cpu),pa};
++            }
++            if(imports && !sweet_a618_import_attach(m.tables,m.import_tables)){
++                for(unsigned i=0;i<SWEET_A618_IMPORT_TABLES;i++)
++                    if(sweet_gpu_memory_clean(m.import_tables_memory,i))return -5;
++                m.import_ready=true;
++                IOLog("SWEET CA: IOSurface import window at GPU VA %x, %u MiB\n",
++                    SWEET_A618_IMPORT_IOVA,SWEET_A618_IMPORT_PAGES>>8);
++            }else{
++                IOLog("SWEET CA: IOSurface import window unavailable; surfaces stay copied\n");
++            }
+             m.render_ready=true;
+             IOLog("SWEET CA: pinned %u MiB private GPU BO pool before SID0 install\n",
+                 SWEET_A618_RENDER_BYTES >> 20);
+--- a/iokit/Kernel/arm/sweet_a618_render_bridge.h
++++ b/iokit/Kernel/arm/sweet_a618_render_bridge.h
+@@ -18,5 +18,10 @@ extern "C" bool sweet_a618_panel_ready(void);
+  * GPU has already put this one there. */
+ extern "C" void sweet_a618_note_display(uint32_t surface);
+ extern "C" bool sweet_a618_direct_take(uint32_t surface);
++/* IOSurfaces read by the GPU in place: pages of the import window (render_pool.h). */
++extern "C" bool sweet_a618_import_ready(void);
++extern "C" int sweet_a618_import_map(unsigned first, const uint64_t *physical, unsigned count);
++extern "C" void sweet_a618_import_unmap(unsigned first, unsigned count);
++extern "C" int sweet_a618_import_invalidate(void);
+ 
+ #endif
+--- a/iokit/Kernel/arm/sweet_a618_renderer.inc
++++ b/iokit/Kernel/arm/sweet_a618_renderer.inc
+@@ -115,3 +115,42 @@ extern "C" int sweet_a618_render_submit(const uint64_t *iova,
+     IOLockUnlock(a618_renderer.lock);
+     return rc;
+ }
++
++/*
++ * The import window (SweetAdreno.cpp). Leaves only go from invalid to valid without TLB
++ * work; a cleared range stays out of use until sweet_a618_import_invalidate.
++ */
++extern "C" bool sweet_a618_import_ready(void)
++{
++    return sweet_a618_render_ready() && a618_mapping.import_ready;
++}
++
++extern "C" int sweet_a618_import_map(unsigned first,const uint64_t *physical,unsigned count)
++{
++    if(!sweet_a618_import_ready() ||
++        sweet_a618_import_set(a618_mapping.import_tables,first,physical,count))return -1;
++    __asm__ volatile("dsb sy" ::: "memory"); // Normal-NC tables: the walker sees them after this.
++    return 0;
++}
++
++extern "C" void sweet_a618_import_unmap(unsigned first,unsigned count)
++{
++    if(!a618_mapping.import_ready)return;
++    sweet_a618_import_clear(a618_mapping.import_tables,first,count);
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
++extern "C" int sweet_a618_import_invalidate(void)
++{
++    if(!sweet_a618_import_ready())return -1;
++    IOLockLock(a618_renderer.lock); // No submission is running while the TLB is emptied.
++    const int rc=sweet_smmu_context_invalidate(&a618_mapping.context);
++    if(rc){
++        __atomic_store_n(&a618_renderer.poisoned,true,__ATOMIC_RELEASE);
++        IOLog("SWEET CA: SMMU invalidation failed rc=%d; GPU submissions stopped\n",rc);
++    }
++    IOLockUnlock(a618_renderer.lock);
++    static unsigned logs;
++    if(!rc && logs++<8)IOLog("SWEET CA: SMMU TLB invalidated before import space is reused\n");
++    return rc;
++}

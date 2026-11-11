@@ -148,6 +148,7 @@ PATCHES += (('xnu/patches/0190-sweet-gpu-level-request.patch', {
 PATCHES += (('xnu/patches/0195-sweet-a618-render-pool-256m.patch', {'bsd/dev/sweet_a618_render_pool.h'}),)
 PATCHES += (('xnu/patches/0202-sweet-a618-fast-gpu-wait.patch', {'iokit/Kernel/arm/sweet_a618_render_ring.inc'}),)
 PATCHES += (('xnu/patches/0203-sweet-a618-gpu-thread-on-a76.patch', {'iokit/Kernel/arm/SweetAdreno.cpp'}),)
+PATCHES += (('xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch', {'bsd/dev/sweet_a618_render_pool.h', 'bsd/dev/sweet_a618_render_pool.c', 'bsd/dev/sweet_a618_address_space.c', 'bsd/dev/sweet_smmu_context.c', 'bsd/dev/sweet_smmu_context.h', 'iokit/Kernel/arm/sweet_a618_mapping.inc', 'iokit/Kernel/arm/sweet_a618_renderer.inc', 'iokit/Kernel/arm/sweet_a618_render_bridge.h', 'iokit/Kernel/arm/SweetAdreno.cpp'}),)
 
 # The IOSurface hunk is checked against the actual builder tree by the shell gate.
 SURFACE = 'iokit/Kernel/arm/SweetSurface.cpp'

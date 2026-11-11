@@ -115,3 +115,42 @@ extern "C" int sweet_a618_render_submit(const uint64_t *iova,
     IOLockUnlock(a618_renderer.lock);
     return rc;
 }
+
+/*
+ * The import window (SweetAdreno.cpp). Leaves only go from invalid to valid without TLB
+ * work; a cleared range stays out of use until sweet_a618_import_invalidate.
+ */
+extern "C" bool sweet_a618_import_ready(void)
+{
+    return sweet_a618_render_ready() && a618_mapping.import_ready;
+}
+
+extern "C" int sweet_a618_import_map(unsigned first,const uint64_t *physical,unsigned count)
+{
+    if(!sweet_a618_import_ready() ||
+        sweet_a618_import_set(a618_mapping.import_tables,first,physical,count))return -1;
+    __asm__ volatile("dsb sy" ::: "memory"); // Normal-NC tables: the walker sees them after this.
+    return 0;
+}
+
+extern "C" void sweet_a618_import_unmap(unsigned first,unsigned count)
+{
+    if(!a618_mapping.import_ready)return;
+    sweet_a618_import_clear(a618_mapping.import_tables,first,count);
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+extern "C" int sweet_a618_import_invalidate(void)
+{
+    if(!sweet_a618_import_ready())return -1;
+    IOLockLock(a618_renderer.lock); // No submission is running while the TLB is emptied.
+    const int rc=sweet_smmu_context_invalidate(&a618_mapping.context);
+    if(rc){
+        __atomic_store_n(&a618_renderer.poisoned,true,__ATOMIC_RELEASE);
+        IOLog("SWEET CA: SMMU invalidation failed rc=%d; GPU submissions stopped\n",rc);
+    }
+    IOLockUnlock(a618_renderer.lock);
+    static unsigned logs;
+    if(!rc && logs++<8)IOLog("SWEET CA: SMMU TLB invalidated before import space is reused\n");
+    return rc;
+}

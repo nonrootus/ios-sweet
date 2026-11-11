@@ -158,6 +158,7 @@ PATCHES += (('xnu/patches/0206-sweet-a618-iosurface-zero-copy.patch', {'bsd/dev/
 PATCHES += (('xnu/patches/0207-sweet-a618-import-tables-in-halves.patch', {'iokit/Kernel/arm/sweet_a618_mapping.inc'}),)
 PATCHES += (('xnu/patches/0208-sweet-a618-system-memory-buffers.patch', {'iokit/Kernel/arm/SweetAdreno.cpp', 'iokit/Kernel/arm/sweet_a618_renderer.inc'}),)
 PATCHES += (('xnu/patches/0212-sweet-gpu-bringup-accepts-wfi.patch', {'bsd/dev/sweet_gpu_probe.c'}),)
+PATCHES += (('xnu/patches/0214-sweet-gpu-runtime-allows-cpu-idle.patch', {'iokit/Kernel/arm/sweet_gpu_gmu_start.cpp'}),)
 
 
 def main():

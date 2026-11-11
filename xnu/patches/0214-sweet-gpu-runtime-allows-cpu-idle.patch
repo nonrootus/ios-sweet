@@ -1,0 +1,12 @@
+--- a/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
++++ b/iokit/Kernel/arm/sweet_gpu_gmu_start.cpp
+@@ -196,7 +196,8 @@ static int stopped(void *opaque) { return power_check(opaque,0); }
+ static int boot_check(void *opaque, unsigned phase)
+ {
+     auto *s=static_cast<persistent_gmu *>(opaque);
+-    if (phase>3 || idle_enable || power_check(s,phase) ||
++    /* CPU idle off during bring-up (phases 0..2); at run time (3) WFI idle is clock gating only. */
++    if (phase>3 || (idle_enable && phase<3) || power_check(s,phase) ||
+         s->context.state!=SWEET_SMMU_CONTEXT_ACTIVE || !s->context.retained) return -1;
+     uint32_t global,fsr,smr;
+     if (read32(s,0x48,&global) || read32(s,0x8058,&fsr) ||

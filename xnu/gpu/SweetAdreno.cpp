@@ -13,6 +13,9 @@
 #include <kern/task.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
+extern "C" {
+#include <arm/machine_routines.h>
+}
 
 enum : uint32_t {
     kGemClose=0x09,kGetParam=0x40,kSetParam=0x41,kGemNew=0x42,
@@ -209,8 +212,33 @@ extern "C" bool sweet_a618_direct_take(uint32_t surface)
     return surface && __atomic_load_n(&direct_active,__ATOMIC_ACQUIRE);
 }
 
+/*
+ * The thread that submits GPU work does the CPU half of every frame. Keep it on an A76:
+ * core 7 is MPIDR Aff1 = 7 (sweet_cpufreq.c). The scheduler knows nothing of big and little
+ * here. These are the kernel's own functions; their headers are not visible to IOKit.
+ */
+extern "C" void *sweet_thread_bind(void *processor) __asm("_thread_bind");
+extern "C" void *sweet_cpu_to_processor(int cpu) __asm("_cpu_to_processor");
+extern "C" int sweet_thread_block(void *continuation) __asm("_thread_block");
+
+static void bind_thread_to_fast_core(void)
+{
+    const ml_topology_info_t *topology=ml_get_topology_info();
+    for(unsigned i=0;i<topology->num_cpus;i++){
+        if(((topology->cpus[i].phys_id>>8)&0xffu)!=7u)continue;
+        void *processor=sweet_cpu_to_processor(topology->cpus[i].cpu_id);
+        if(!processor)return;
+        sweet_thread_bind(processor);
+        sweet_thread_block(nullptr);
+        IOLog("SWEET CA: GPU thread bound to A76 core 7 (cpu %d)\n",topology->cpus[i].cpu_id);
+        return;
+    }
+}
+
 class SweetAdrenoUserClient : public IOUserClient {
     OSDeclareDefaultStructors(SweetAdrenoUserClient);
+    IOThread bound_threads[4];
+    unsigned bound_count;
     task_t owner;
     IOLock *lock;
     sweet_bo *bos;
@@ -303,6 +331,14 @@ IOReturn SweetAdrenoUserClient::clientMemoryForType(UInt32 type,
 
 IOReturn SweetAdrenoUserClient::submit(msm_gem_submit *request)
 {
+    /* Outside the lock: this may switch processors. A rare race only binds a thread twice. */
+    const IOThread self=IOThreadSelf();
+    bool seen=false;
+    for(unsigned i=0;i<bound_count;i++)seen|=bound_threads[i]==self;
+    if(!seen && bound_count<4){
+        bound_threads[bound_count++]=self;
+        bind_thread_to_fast_core();
+    }
     if(!request->nr_cmds || request->nr_cmds>kMaxCMDs ||
         !request->nr_bos || request->nr_bos>kMaxBOs ||
         !request->bos || !request->cmds || request->nr_in_syncobjs ||

@@ -61,7 +61,7 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cp
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0180-sweet-usb-console-and-b3a8-evidence.patch"
 git -C dxb/xnu apply --reverse --check --exclude=bsd/kern/bsd_init.c --exclude=bsd/vfs/vfs_syscalls.c "$GITHUB_WORKSPACE/xnu/patches/0181-sweet-renderer-ramdisk.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/sweet_a618_renderer.inc --exclude=iokit/Kernel/arm/sweet_a618_render_bridge.h --exclude=bsd/dev/sweet_a618_render_pool.c --exclude=bsd/dev/sweet_a618_address_space.c --exclude=bsd/dev/sweet_a618_render_pool.h --exclude=iokit/Kernel/arm/SweetAdreno.cpp --exclude=iokit/Kernel/arm/sweet_a618_mapping.inc "$GITHUB_WORKSPACE/xnu/patches/0182-sweet-a618-direct-panel.patch"
-git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0183-sweet-framebuffer-direct-frame.patch"
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0183-sweet-framebuffer-direct-frame.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetAdreno.cpp "$GITHUB_WORKSPACE/xnu/patches/0184-sweet-direct-frames-stay-on-panel.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0185-sweet-iosurface-wrap-client.patch"
 git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetSurface.cpp "$GITHUB_WORKSPACE/xnu/patches/0186-sweet-iosurface-empty-picture-evidence.patch"
@@ -141,5 +141,3 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"
 # 0219: the USB device survives a bus reset; RNDIS notifications and answers queued.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"
-# 0220: panel brightness (DCS 0x51 over DSI0) and AppleARMBacklight for CoreBrightness.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0220-sweet-panel-brightness.patch"

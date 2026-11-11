@@ -121,3 +121,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0207-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0208-sweet-a618-system-memory-buffers.patch"
 # 0209: CPU idle (WFI) after the GPU is up when wfi != 0.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0209-sweet-cpu-idle-after-gpu.patch"
+# 0210: no L1 clean+invalidate before every idle WFI.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0210-sweet-idle-without-l1-flush.patch"

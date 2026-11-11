@@ -1,0 +1,27 @@
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -569,8 +569,24 @@ cpu_idle(void)
+ 
+ 	if (wfi) {
+ #if !defined(APPLE_ARM64_ARCH_FAMILY)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/*
++		 * WFI here is clock gating only (no PSCI suspend, the core keeps power), so its caches
++		 * stay coherent: cleaning L1 by set/way before every WFI is only cost. sweetidleflush=1
++		 * restores it.
++		 */
++		static int sweet_idle_flush = -1;
++		if (__improbable(sweet_idle_flush < 0)) {
++			int value = 0;
++			sweet_idle_flush = PE_parse_boot_argn("sweetidleflush", &value, sizeof(value)) && value != 0;
++		}
++		if (sweet_idle_flush) {
++			platform_cache_idle_enter();
++		}
++#else
+ 		platform_cache_idle_enter();
+ #endif
++#endif
+ 
+ #if DEVELOPMENT || DEBUG
+ 		// When simulating wfi overhead,

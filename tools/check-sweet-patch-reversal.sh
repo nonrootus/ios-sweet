@@ -124,7 +124,7 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0209-sweet
 # 0210: no L1 clean+invalidate before every idle WFI.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0210-sweet-idle-without-l1-flush.patch"
 # 0211: sweetusb=4, the USB console beside an RNDIS network function.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0211-sweet-usb-console-and-rndis.patch"
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0211-sweet-usb-console-and-rndis.patch"
 # 0212: the GPU bring-up accepts wfi=1 too (jtag=1 still keeps CPU idle off until bsd_init).
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0212-sweet-gpu-bringup-accepts-wfi.patch"
 # 0213: no kernel loader in SpringBoard; DYLD variables for every launchd child (tweaks).
@@ -133,3 +133,5 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0213-sweet
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0214-sweet-gpu-runtime-allows-cpu-idle.patch"
 # 0215: asynchronous GPU submission with fences and deferred buffer release.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0215-sweet-a618-async-submit.patch"
+# 0216: RNDIS first in the sweetusb=4 composite device (Windows RNDIS starts).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0216-sweet-usb-rndis-first.patch"

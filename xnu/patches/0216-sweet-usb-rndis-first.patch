@@ -1,0 +1,83 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -391,33 +391,39 @@ static const uint8_t ud_serial_cfg_desc[] = {
+ 	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
+ };
+ _Static_assert(sizeof(ud_serial_cfg_desc) == 67, "ACM configuration length");
+-/* sweetusb=4: console (ACM, interfaces 0/1) and RNDIS (interfaces 2/3), each behind an IAD. */
++/*
++ * sweetusb=4: RNDIS (interfaces 0/1) and the ACM console (interfaces 2/3), each behind an IAD.
++ * RNDIS comes first: Windows' RNDIS driver (usbrndis6) failed to start (Code 10, no class request
++ * sent) while it sat at interfaces 2/3. Product 1209:0004 for this layout.
++ */
++#define UD_RNDIS_IF     0
++#define UD_COMBO_ACM_IF 2
+ static const uint8_t ud_combo_dev_desc[18] = {
+ 	18, 1, 0x00, 0x02, 0xef, 0x02, 0x01, 64,
+-	0x09, 0x12, 0x03, 0x00, 0x00, 0x01, 1, 2, 3, 1,
++	0x09, 0x12, 0x04, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+ };
+ static const uint8_t ud_combo_cfg_desc[] = {
+ 	9, 2, 141, 0, 4, 1, 0, 0x80, 250,
+-	8, 0x0b, 0, 2, 0x02, 0x02, 0x01, 0,       /* IAD: ACM console */
+-	9, 4, 0, 0, 1, 0x02, 0x02, 0x01, 0,
++	8, 0x0b, 0, 2, 0xe0, 0x01, 0x03, 0,       /* IAD: RNDIS (wireless controller / RNDIS) */
++	9, 4, 0, 0, 1, 0xe0, 0x01, 0x03, 0,
+ 	5, 0x24, 0x00, 0x10, 0x01,
+ 	5, 0x24, 0x01, 0, 1,
+-	4, 0x24, 0x02, 2,
++	4, 0x24, 0x02, 0,
+ 	5, 0x24, 0x06, 0, 1,
+-	7, 5, 0x82, 0x03, 16, 0, 9,
++	7, 5, 0x84, 0x03, 8, 0, 9,
+ 	9, 4, 1, 0, 2, 0x0a, 0, 0, 0,
+-	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
+-	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
+-	8, 0x0b, 2, 2, 0xe0, 0x01, 0x03, 0,       /* IAD: RNDIS (wireless controller / RNDIS) */
+-	9, 4, 2, 0, 1, 0xe0, 0x01, 0x03, 0,
++	7, 5, 0x83, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x03, 0x02, 0x00, 0x02, 0,
++	8, 0x0b, 2, 2, 0x02, 0x02, 0x01, 0,       /* IAD: ACM console */
++	9, 4, 2, 0, 1, 0x02, 0x02, 0x01, 0,
+ 	5, 0x24, 0x00, 0x10, 0x01,
+ 	5, 0x24, 0x01, 0, 3,
+-	4, 0x24, 0x02, 0,
++	4, 0x24, 0x02, 2,
+ 	5, 0x24, 0x06, 2, 3,
+-	7, 5, 0x84, 0x03, 8, 0, 9,
++	7, 5, 0x82, 0x03, 16, 0, 9,
+ 	9, 4, 3, 0, 2, 0x0a, 0, 0, 0,
+-	7, 5, 0x83, 0x02, 0x00, 0x02, 0,
+-	7, 5, 0x03, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
+ };
+ _Static_assert(sizeof(ud_combo_cfg_desc) == 141, "console + RNDIS configuration length");
+ extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+@@ -711,7 +717,9 @@ ud_setup(void)
+ 	ud.data_in = (type & 0x80) != 0;
+ 	ud.serial_line_out = false;
+ 	ud.rndis_cmd_out = false;
+-	if (ud.rndis && (type & 0x60) == 0x20 && (index & 0xff) == 2) {
++	/* The console's control interface: 0 alone, UD_COMBO_ACM_IF beside RNDIS. */
++	const uint16_t acm_if = ud.rndis ? UD_COMBO_ACM_IF : 0;
++	if (ud.rndis && (type & 0x60) == 0x20 && (index & 0xff) == UD_RNDIS_IF) {
+ 		if (type == 0x21 && req == 0x00 && length > 0 && length <= 512) {
+ 			ud.rndis_cmd_out = true;        /* SEND_ENCAPSULATED_COMMAND */
+ 			ud.ep0_out_len = length;
+@@ -728,12 +736,12 @@ ud_setup(void)
+ 			ok = false;
+ 		}
+ 	} else if (ud.serial && (type & 0x60) == 0x20) {
+-		if (type == 0x21 && req == 0x20 && index == 0 && length == sizeof(ud.serial_line)) {
++		if (type == 0x21 && req == 0x20 && index == acm_if && length == sizeof(ud.serial_line)) {
+ 			ud.serial_line_out = true; /* SET_LINE_CODING */
+-		} else if (type == 0xa1 && req == 0x21 && index == 0) {
++		} else if (type == 0xa1 && req == 0x21 && index == acm_if) {
+ 			memcpy(data, ud.serial_line, sizeof(ud.serial_line));
+ 			n = sizeof(ud.serial_line);
+-		} else if (type == 0x21 && req == 0x22 && index == 0 && length == 0) {
++		} else if (type == 0x21 && req == 0x22 && index == acm_if && length == 0) {
+ 			bool dtr = (value & 1) != 0;
+ 			if (dtr && !ud.serial_dtr) {
+ 				uint64_t tail = sweet_log_position();

@@ -1,0 +1,741 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 3b1743a..29d3b2b 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -10,15 +10,23 @@
+  * (29), slave and register come from a fixed list (rodin_pmic_readable), and
+  * VLD_CLR only acknowledges the read data. Nothing in either PMIC is written.
+  * Bits (vendor mtk-pmic-keys.c: power 1, home 3, home2 4; charger 2): power,
+- * volume down ("home"), volume up ("home2"). Every change of TOPSTATUS is
+- * logged, so the mapping can be checked. Boot-arg rodinhome=1 (default)
+- * makes volume down the Home button, to unlock without touch.
++ * volume down ("home"), volume up ("home2"); checked on the phone (xnu8).
++ * Every change of TOPSTATUS is logged. Boot-arg rodinhome=1 makes volume
++ * down the Home button instead (default 0: volume down).
+  *
+- * Touch (Goodix on spi1@11011800): only reads for now, logged once: the SPI1
+- * clock gate and mux, the modes and levels of the touch pins (IRQ 9, SPI
+- * 50-53, AVDD enable 73, reset 134) and the touch I/O supply (MT6368 VTP).
+- * The SPI controller itself is not touched: with its clock off, a read could
+- * hang the bus.
++ * Touch (boot-arg rodintouch=1; Goodix Berlin on spi1@11011800, polled):
++ *  - power (owner's OK, 2026-11-20): the ONE PMIC write of this file sets the
++ *    enable bit of MT6368 VTP (0x1c87 bit 0, the touch I/O 1.8 V LDO), and only
++ *    if its voltage select (0x1da5) already reads 1.8 V; then AVDD (GPIO 73),
++ *    reset (GPIO 134) high, IRQ (GPIO 9) as input, SPI1 pins 50-53 in mode 1;
++ *  - SPI1 (MediaTek IPM SPI, FIFO mode, software chip select, 208 MHz source,
++ *    5 MHz default: boot-arg rodintouchmhz) after the SiP infra request;
++ *  - Goodix: read F1 + address + dummy bytes, write F0 + address. Writes go
++ *    only to the boot-option RAM (device confirm, 8 x 0xAA) and the touch
++ *    data sync byte (0 = event read), as the Linux driver does; never flash,
++ *    config or firmware. IC info gives the touch data address; points are
++ *    read every 8 ms and reported in fractions of the display.
++ * Before that, the state of SPI1 clock, touch pins and VTP is logged.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -32,10 +40,12 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
++extern void sweet_hid_touch_norm(int finger, int down, int32_t nx, int32_t ny, int edge);
+ void rodin_input_init(void);
+ 
+ #define PMIF_PA                 0x1cc04000u
+ #define PMIF_SWINF2_ACC         0x880u
++#define PMIF_SWINF2_WDATA       0x884u
+ #define PMIF_SWINF2_RDATA       0x894u
+ #define PMIF_SWINF2_VLD_CLR     0x8a4u
+ #define PMIF_SWINF2_STA         0x8a8u
+@@ -50,6 +60,8 @@ void rodin_input_init(void);
+ #define MT6363_TOPSTATUS        0x1e
+ #define MT6368_SID              5
+ #define MT6368_LDO_VTP_EN       0x1c87  /* bit 0 */
++#define MT6368_VTP_VOSEL        0x1da5  /* bits 3:0, 4 = 1.8 V (ldo_volt_table1) */
++#define MT6368_VTP_VOSEL_1V8    4u
+ 
+ #define GPIO_PA                 0x10005000u
+ #define TOPCKGEN_PA             0x10000000u
+@@ -85,12 +97,19 @@ rodin_pmic_readable(uint8_t sid, uint16_t addr)
+ 	case MT6363_SID:
+ 		return addr == MT6363_TOPSTATUS || addr == 0x08 || addr == 0x09;  /* + chip id */
+ 	case MT6368_SID:
+-		return addr == MT6368_LDO_VTP_EN || addr == 0x08 || addr == 0x09;
++		return addr == MT6368_LDO_VTP_EN || addr == MT6368_VTP_VOSEL || addr == 0x08 || addr == 0x09;
+ 	default:
+ 		return false;
+ 	}
+ }
+ 
++/* The only PMIC register this file may write: the VTP enable (its other bits are kept). */
++static bool
++rodin_pmic_writable(uint8_t sid, uint16_t addr)
++{
++	return sid == MT6368_SID && addr == MT6368_LDO_VTP_EN;
++}
++
+ static uint32_t pmif_last_sta;
+ 
+ static int
+@@ -141,6 +160,43 @@ rodin_pmic_read(uint8_t sid, uint16_t addr, uint8_t *out)
+ 	return 0;
+ }
+ 
++/* One byte, as Linux pmif_spmi_write_cmd: IDLE, WDATA, ACC with the write bit, IDLE. */
++static int
++rodin_pmic_write(uint8_t sid, uint16_t addr, uint8_t val)
++{
++	uint32_t sta = 0;
++	unsigned i;
++
++	if (!pmif || !rodin_pmic_writable(sid, addr)) {
++		return EPERM;
++	}
++	for (i = 0; i < 1000; i++) {
++		sta = rd32(pmif, PMIF_SWINF2_STA);
++		if (PMIF_FSM(sta) == PMIF_FSM_IDLE) {
++			break;
++		}
++		delay(10);
++	}
++	pmif_last_sta = sta;
++	if (PMIF_FSM(sta) != PMIF_FSM_IDLE) {
++		return EBUSY;
++	}
++	wr32(pmif, PMIF_SWINF2_WDATA, val);
++	wr32(pmif, PMIF_SWINF2_ACC, (PMIF_CMD_EXT_REG_LONG << 30) | PMIF_CMD_WRITE | ((uint32_t)sid << 24) | addr);
++	for (i = 0; i < 1000; i++) {
++		sta = rd32(pmif, PMIF_SWINF2_STA);
++		if (PMIF_FSM(sta) == PMIF_FSM_IDLE) {
++			break;
++		}
++		delay(10);
++	}
++	pmif_last_sta = sta;
++	if (PMIF_FSM(sta) != PMIF_FSM_IDLE) {
++		return ETIMEDOUT;
++	}
++	return (sta & PMIF_STA_ERR) ? EIO : 0;
++}
++
+ static void
+ rodin_wait_ms(uint32_t ms)
+ {
+@@ -189,7 +245,7 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ 	static const struct { uint8_t bit; const char *name; } keys[3] = {
+ 		{ 1, "power" }, { 3, "volume down" }, { 4, "volume up" },
+ 	};
+-	int home = 1, hid[3];
++	int home = 0, hid[3];
+ 	bool down[3] = { false, false, false };
+ 	uint8_t last = 0;
+ 	unsigned errors = 0, changes = 0;
+@@ -240,6 +296,411 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ 	}
+ }
+ 
++/* ---- Touch ------------------------------------------------------------------------------- */
++
++#define TP_PIN_IRQ              9u
++#define TP_PIN_SPI_CLK          50u
++#define TP_PIN_SPI_CS           51u
++#define TP_PIN_SPI_MISO         52u
++#define TP_PIN_SPI_MOSI         53u
++#define TP_PIN_AVDD             73u
++#define TP_PIN_RESET            134u
++
++#define SPI1_PA                 0x11011800u
++#define SPI_CFG0                0x00u   /* [31:16] CS setup, [15:0] CS hold (ticks - 1) */
++#define SPI_CFG1                0x04u   /* [31:16] packet length - 1, [15:8] loop, [7:0] CS idle */
++#define SPI_TX_DATA             0x10u
++#define SPI_RX_DATA             0x14u
++#define SPI_CMD                 0x18u
++#define SPI_STATUS0             0x1cu
++#define SPI_STATUS1             0x20u
++#define SPI_PAD_SEL             0x24u
++#define SPI_CFG2                0x28u   /* [31:16] SCK low, [15:0] SCK high (ticks - 1) */
++#define SPI_SLICE_EN            0x5cu
++#define SPI_CFG5                0x68u   /* packet length - 1, high 16 bits */
++#define SPI_CMD_ACT             (1u << 0)
++#define SPI_CMD_RST             (1u << 2)
++#define SPI_CMD_CS_POL          (1u << 7)   /* software CS: 1 = released (high) */
++#define SPI_CMD_TXMSBF          (1u << 12)
++#define SPI_CMD_RXMSBF          (1u << 13)
++#define SPI_CMD_CS_PIN_SEL      (1u << 18)
++#define SPI_CMD_NONIDLE         (1u << 19)
++#define SPI_CMD_TICKDLY_SHIFT   22u     /* 7 bits with slice_en */
++#define SPI_FIFO                32u
++#define SPI_SRC_HZ              208000000u      /* spi1_b_sel 7 = univpll_d6_d2 (xnu8 log) */
++#define SPI_TICKDLY             0x14u           /* DT mediatek,tickdly */
++#define SIP_SPI_CONTROL         0xC2000542ull   /* MTK_SIP_KERNEL_SPI_CONTROL */
++
++#define GDX_BOOTOPTION          0x10000u
++#define GDX_IC_INFO             0x10070u
++#define GDX_IC_INFO_BRA         0x10068u
++#define GDX_MAX_LEN             1024u
++#define GDX_HEAD                8u
++#define GDX_POINT               8u
++#define GDX_FINGERS             10u
++
++static vm_offset_t spi;
++static uint32_t gdx_dummy = 3;          /* dummy bytes after a read address: 3, or 4 on Berlin-A */
++static uint32_t gdx_touch_addr;
++static uint8_t gdx_tx[8 + GDX_MAX_LEN], gdx_rx[8 + GDX_MAX_LEN];
++
++static void
++pin_field(uint32_t base, unsigned pin, unsigned per, unsigned bits, uint32_t val)
++{
++	uint32_t off = base + (pin / per) * 0x10u, sh = (pin % per) * bits, mask = ((1u << bits) - 1u) << sh;
++	wr32(gpio, off, (rd32(gpio, off) & ~mask) | ((val << sh) & mask));
++}
++
++static void
++pin_mode(unsigned pin, unsigned mode)
++{
++	pin_field(0x300u, pin, 8u, 4u, mode);
++}
++
++static void
++pin_out(unsigned pin, bool high)        /* level first, then direction: no glitch */
++{
++	pin_field(0x100u, pin, 32u, 1u, high);
++	pin_field(0x000u, pin, 32u, 1u, 1u);
++}
++
++static void
++pin_in(unsigned pin)
++{
++	pin_field(0x000u, pin, 32u, 1u, 0u);
++}
++
++static uint64_t
++rodin_smc3(uint64_t fid, uint64_t a1, uint64_t a2)
++{
++	register uint64_t x0 __asm__("x0") = fid;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = 0;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17",
++	    "memory");
++	return x0;
++}
++
++/* One full-duplex transfer with chip select held: FIFO chunks of 32 bytes, polled. */
++static int
++spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
++{
++	int error = 0;
++
++	wr32(spi, SPI_CMD, rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL);
++	for (uint32_t done = 0; done < len && !error;) {
++		uint32_t n = MIN(len - done, SPI_FIFO), w;
++		wr32(spi, SPI_CFG1, (rd32(spi, SPI_CFG1) & 0x000000ffu) | ((n - 1u) << 16));
++		wr32(spi, SPI_CFG5, 0);
++		for (uint32_t i = 0; i < n; i += 4) {
++			w = 0;
++			if (tx) {
++				memcpy(&w, tx + done + i, MIN(4u, n - i));
++			}
++			wr32(spi, SPI_TX_DATA, w);
++		}
++		wr32(spi, SPI_CMD, rd32(spi, SPI_CMD) | SPI_CMD_ACT);
++		unsigned t;
++		for (t = 0; t < 20000 && rd32(spi, SPI_STATUS1) == 0; t++) {
++			delay(1);
++		}
++		if (t == 20000) {
++			error = ETIMEDOUT;
++		}
++		(void)rd32(spi, SPI_STATUS0);
++		for (uint32_t i = 0; i < n; i += 4) {
++			w = rd32(spi, SPI_RX_DATA);
++			if (rx) {
++				memcpy(rx + done + i, &w, MIN(4u, n - i));
++			}
++		}
++		done += n;
++	}
++	wr32(spi, SPI_CMD, rd32(spi, SPI_CMD) | SPI_CMD_CS_POL);
++	return error;
++}
++
++static int
++gdx_read(uint32_t addr, uint8_t *data, uint32_t len)
++{
++	uint32_t pre = 5 + gdx_dummy;
++	if (len == 0 || len > GDX_MAX_LEN) {
++		return EINVAL;
++	}
++	bzero(gdx_tx, pre + len);
++	gdx_tx[0] = 0xf1;
++	gdx_tx[1] = (uint8_t)(addr >> 24);
++	gdx_tx[2] = (uint8_t)(addr >> 16);
++	gdx_tx[3] = (uint8_t)(addr >> 8);
++	gdx_tx[4] = (uint8_t)addr;
++	memset(gdx_tx + 5, 0xff, gdx_dummy);
++	int error = spi_xfer(gdx_tx, gdx_rx, pre + len);
++	memcpy(data, gdx_rx + pre, len);
++	return error;
++}
++
++/* Writes only to the boot option (device confirm) and the touch data sync byte. */
++static int
++gdx_write(uint32_t addr, const uint8_t *data, uint32_t len)
++{
++	if (!((addr == GDX_BOOTOPTION && len == 8) || (gdx_touch_addr && addr == gdx_touch_addr && len == 1))) {
++		printf("RODIN TOUCH: refusing a write of %u bytes to 0x%x\n", len, addr);
++		return EPERM;
++	}
++	gdx_tx[0] = 0xf0;
++	gdx_tx[1] = (uint8_t)(addr >> 24);
++	gdx_tx[2] = (uint8_t)(addr >> 16);
++	gdx_tx[3] = (uint8_t)(addr >> 8);
++	gdx_tx[4] = (uint8_t)addr;
++	memcpy(gdx_tx + 5, data, len);
++	return spi_xfer(gdx_tx, NULL, 5 + len);
++}
++
++static bool
++gdx_checksum_ok(const uint8_t *d, uint32_t size)    /* u8 sum, little-endian u16 at the end */
++{
++	uint32_t sum = 0;
++	if (size < 2) {
++		return false;
++	}
++	for (uint32_t i = 0; i < size - 2; i++) {
++		sum += d[i];
++	}
++	return (sum & 0xffffu) == (uint32_t)(d[size - 2] | (d[size - 1] << 8));
++}
++
++static uint32_t
++le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++/* VTP (1.8 V I/O) on: the one PMIC write. Called before any other thread uses the PMIF. */
++static int
++rodin_touch_vtp_on(void)
++{
++	uint8_t vosel = 0, en = 0;
++	int e = rodin_pmic_read(MT6368_SID, MT6368_VTP_VOSEL, &vosel);
++	if (!e) {
++		e = rodin_pmic_read(MT6368_SID, MT6368_LDO_VTP_EN, &en);
++	}
++	if (e || (vosel & 0xfu) != MT6368_VTP_VOSEL_1V8) {
++		printf("RODIN TOUCH: VTP voltage select 0x%02x (err %d) is not 1.8 V: VTP left off\n", vosel, e);
++		return e ? e : EINVAL;
++	}
++	if (!(en & 1u)) {
++		e = rodin_pmic_write(MT6368_SID, MT6368_LDO_VTP_EN, (uint8_t)(en | 1u));
++		uint8_t now = 0;
++		int r = rodin_pmic_read(MT6368_SID, MT6368_LDO_VTP_EN, &now);
++		printf("RODIN TOUCH: VTP enable 0x%02x -> 0x%02x (write err %d, read err %d)\n", en, now, e, r);
++		if (e || r || !(now & 1u)) {
++			return e ? e : EIO;
++		}
++	}
++	return 0;
++}
++
++static int
++rodin_touch_spi_init(uint32_t hz)
++{
++	uint64_t r = rodin_smc3(SIP_SPI_CONTROL, 0 /* request infra */, 0 /* bus 0: the only SPI */);
++	uint32_t cmd = rd32(spi, SPI_CMD);
++	printf("RODIN TOUCH: SPI infra request -> %lld, SPI1 CMD 0x%08x CFG0 0x%08x CFG1 0x%08x\n",
++	    (long long)r, cmd, rd32(spi, SPI_CFG0), rd32(spi, SPI_CFG1));
++	wr32(spi, SPI_CMD, cmd | SPI_CMD_RST);
++	wr32(spi, SPI_CMD, cmd & ~SPI_CMD_RST);
++	/* Mode 0, MSB first, little-endian FIFO words, no DMA or IRQ, software CS released. */
++	wr32(spi, SPI_CMD, SPI_CMD_NONIDLE | SPI_CMD_CS_PIN_SEL | SPI_CMD_TXMSBF | SPI_CMD_RXMSBF |
++	    SPI_CMD_CS_POL | ((SPI_TICKDLY & 0x7fu) << SPI_CMD_TICKDLY_SHIFT));
++	wr32(spi, SPI_PAD_SEL, 0);
++	wr32(spi, SPI_SLICE_EN, (rd32(spi, SPI_SLICE_EN) & ~0x3fu) | (1u << 0) | (1u << 3));
++	uint32_t div = (SPI_SRC_HZ + hz - 1) / hz, sck = (div + 1) / 2;
++	wr32(spi, SPI_CFG2, ((sck - 1) << 16) | (sck - 1));
++	wr32(spi, SPI_CFG0, ((2 * sck - 1) << 16) | (2 * sck - 1));
++	wr32(spi, SPI_CFG1, (2 * sck - 1) & 0xffu);
++	printf("RODIN TOUCH: SPI1 at %u Hz (SCK %u+%u ticks of 208 MHz), CMD 0x%08x\n",
++	    SPI_SRC_HZ / (2 * sck), sck, sck, rd32(spi, SPI_CMD));
++	return 0;
++}
++
++/* Device confirm (Linux brl_dev_confirm): 8 x 0xAA to the boot option, read back. */
++static bool
++gdx_confirm(void)
++{
++	static const uint8_t aa[8] = { 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa };
++	uint8_t back[8];
++	for (int i = 0; i < 3; i++) {
++		int e = gdx_write(GDX_BOOTOPTION, aa, 8);
++		if (!e) {
++			e = gdx_read(GDX_BOOTOPTION, back, 8);
++		}
++		printf("RODIN TOUCH: confirm (%u dummy) err %d read %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		    gdx_dummy, e, back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7]);
++		if (!e && memcmp(aa, back, 8) == 0) {
++			return true;
++		}
++		rodin_wait_ms(5);
++	}
++	return false;
++}
++
++static uint8_t gdx_info[GDX_MAX_LEN];
++
++static int
++gdx_read_info(void)
++{
++	uint32_t at = gdx_dummy == 4 ? GDX_IC_INFO_BRA : GDX_IC_INFO;
++	uint8_t l[2];
++	int e = gdx_read(at, l, 2);
++	uint32_t len = (uint32_t)(l[0] | (l[1] << 8));
++	if (e || len < 64 || len >= GDX_MAX_LEN) {
++		printf("RODIN TOUCH: IC info length %u at 0x%x (err %d)\n", len, at, e);
++		return e ? e : EINVAL;
++	}
++	e = gdx_read(at, gdx_info, len);
++	if (e || !gdx_checksum_ok(gdx_info, len)) {
++		printf("RODIN TOUCH: IC info read err %d or bad checksum (%u bytes)\n", e, len);
++		return e ? e : EIO;
++	}
++	const uint8_t *v = gdx_info + 2, *p = gdx_info + 2 + 16 + 10;
++	unsigned drv = p[0], sen = p[1];
++	p += 4;
++	for (int k = 0; k < 5; k++) {   /* scan rates, mutual, self tx, self rx, stylus freqs */
++		unsigned n = *p++;
++		if (n > 8) {
++			printf("RODIN TOUCH: IC info list %d has %u entries\n", k, n);
++			return EINVAL;
++		}
++		p += 2 * n;
++	}
++	if (p + 52 > gdx_info + len) {
++		return EINVAL;
++	}
++	gdx_touch_addr = le32(p + 44);
++	printf("RODIN TOUCH: IC info %u bytes: customer %02x version %02x die %02x ic %02x config %08x, "
++	    "%ux%u channels, touch data at 0x%x (head %u, point %u bytes)\n", len, v[0], v[1], v[2], v[3],
++	    le32(v + 4), drv, sen, gdx_touch_addr, p[48] | (p[49] << 8), p[50] | (p[51] << 8));
++	return gdx_touch_addr ? 0 : EINVAL;
++}
++
++static void
++rodin_touch_thread(void *arg, wait_result_t result)
++{
++	static const uint8_t zero = 0;
++	uint8_t buf[GDX_HEAD + GDX_POINT * GDX_FINGERS + 2];
++	bool down[GDX_FINGERS] = { false }, edge[GDX_FINGERS] = { false };
++	int32_t lx[GDX_FINGERS] = { 0 }, ly[GDX_FINGERS] = { 0 };
++	uint32_t mhz = 5, scale_x = 1220, scale_y = 2712, logged = 0, errors = 0;
++	int scale = 0;
++
++	(void)arg;
++	(void)result;
++	PE_parse_boot_argn("rodintouchmhz", &mhz, sizeof(mhz));
++	PE_parse_boot_argn("rodintouchscale", &scale, sizeof(scale));
++	if (scale > 0) {
++		scale_x = 1220u * (uint32_t)scale;
++		scale_y = 2712u * (uint32_t)scale;
++	}
++	mhz = mhz < 1 ? 1 : (mhz > 15 ? 15 : mhz);
++	/* Pins: SPI1 to the AP (mode 1), IRQ input, AVDD on after VTP, then reset released. */
++	pin_in(TP_PIN_IRQ);
++	pin_mode(TP_PIN_IRQ, 0);
++	pin_mode(TP_PIN_SPI_CLK, 1);
++	pin_mode(TP_PIN_SPI_CS, 1);
++	pin_mode(TP_PIN_SPI_MISO, 1);
++	pin_mode(TP_PIN_SPI_MOSI, 1);
++	rodin_wait_ms(3);
++	pin_mode(TP_PIN_AVDD, 0);
++	pin_out(TP_PIN_AVDD, true);
++	rodin_wait_ms(15);
++	pin_mode(TP_PIN_RESET, 0);
++	pin_out(TP_PIN_RESET, true);
++	rodin_wait_ms(4);
++	rodin_touch_spi_init(mhz * 1000000u);
++	if (!gdx_confirm()) {
++		gdx_dummy = 4;          /* Berlin-A reads have one more dummy byte */
++		if (!gdx_confirm()) {
++			printf("RODIN TOUCH: no Goodix answer; touch off\n");
++			rodin_log_pin("touch IRQ", TP_PIN_IRQ);
++			return;
++		}
++	}
++	rodin_wait_ms(100);
++	if (gdx_read_info()) {
++		printf("RODIN TOUCH: no usable IC info; touch off\n");
++		return;
++	}
++	printf("RODIN TOUCH: polling every 8 ms; coordinates %s\n",
++	    scale > 0 ? "scaled by rodintouchscale" : "auto-scaled (x1 or x10 of 1220x2712)");
++	for (;;) {
++		rodin_wait_ms(8);
++		if (gdx_read(gdx_touch_addr, buf, GDX_HEAD + 2 * GDX_POINT + 2)) {
++			if (errors++ % 1000 == 0) {
++				printf("RODIN TOUCH: read error\n");
++			}
++			continue;
++		}
++		if (buf[0] == 0) {
++			continue;
++		}
++		if (!gdx_checksum_ok(buf, GDX_HEAD)) {
++			if (errors++ % 1000 == 0) {
++				printf("RODIN TOUCH: head checksum error %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);
++			}
++			continue;
++		}
++		uint32_t n = (buf[0] & 0x80) ? (buf[2] & 0x0fu) : 0;
++		bool seen[GDX_FINGERS] = { false };
++		bool ok = n <= GDX_FINGERS;
++		if (ok && n > 2) {
++			ok = gdx_read(gdx_touch_addr + GDX_HEAD + 2 * GDX_POINT + 2,
++			    buf + GDX_HEAD + 2 * GDX_POINT + 2, (n - 2) * GDX_POINT) == 0;
++		}
++		if (ok && n > 0) {
++			ok = gdx_checksum_ok(buf + GDX_HEAD, n * GDX_POINT + 2);
++		}
++		(void)gdx_write(gdx_touch_addr, &zero, 1);     /* event read */
++		if (!ok || !(buf[0] & 0x80)) {
++			continue;
++		}
++		for (uint32_t i = 0; i < n; i++) {
++			const uint8_t *pt = buf + GDX_HEAD + i * GDX_POINT;
++			uint32_t id = pt[0] >> 4, x = (uint32_t)(pt[2] | (pt[3] << 8)), y = (uint32_t)(pt[4] | (pt[5] << 8));
++			if (id >= GDX_FINGERS || (pt[0] & 0x0f) == 0x01 || (pt[0] & 0x0f) == 0x03) {
++				continue;       /* stylus */
++			}
++			if (scale <= 0) {   /* the first value past 1220/2712 shows x10 units */
++				scale_x = x >= scale_x ? 12200u : scale_x;
++				scale_y = y >= scale_y ? 27120u : scale_y;
++			}
++			if (logged < 40) {
++				logged++;
++				printf("RODIN TOUCH: raw id %u type %u x %u y %u w %u -> /%u /%u\n", id, pt[0] & 0x0f,
++				    x, y, pt[6] | (pt[7] << 8), scale_x, scale_y);
++			}
++			int32_t nx = (int32_t)(((uint64_t)MIN(x, scale_x - 1) << 16) / scale_x);
++			int32_t ny = (int32_t)(((uint64_t)MIN(y, scale_y - 1) << 16) / scale_y);
++			if (!down[id]) {
++				/* 48 px of the 1080 px sweet panel, as SweetHID.cpp: 4.4% wide, 2% tall */
++				edge[id] = nx < 2900 || nx > 65536 - 2900 || ny < 1310 || ny > 65536 - 1310;
++			}
++			seen[id] = true;
++			down[id] = true;
++			lx[id] = nx;
++			ly[id] = ny;
++			sweet_hid_touch_norm((int)id, 1, nx, ny, edge[id]);
++		}
++		for (uint32_t id = 0; id < GDX_FINGERS; id++) {
++			if (down[id] && !seen[id]) {
++				down[id] = false;
++				sweet_hid_touch_norm((int)id, 0, lx[id], ly[id], edge[id]);
++			}
++		}
++	}
++}
++
+ void
+ rodin_input_init(void)
+ {
+@@ -268,6 +729,17 @@ rodin_input_init(void)
+ 	printf("RODIN INPUT: PMIF SWINF2 sta 0x%08x, MT6363 id %02x%02x (err %d)\n",
+ 	    pmif_last_sta, idh, idl, e);
+ 	rodin_touch_diag();
++	int touch = 0;
++	PE_parse_boot_argn("rodintouch", &touch, sizeof(touch));
++	/* VTP first, here: the keys thread below shares the PMIF channel. */
++	if (touch && rodin_touch_vtp_on() == 0) {
++		spi = ml_io_map(SPI1_PA, 0x1000);
++		if (spi && kernel_thread_start(rodin_touch_thread, NULL, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		} else {
++			printf("RODIN TOUCH: no SPI1 mapping or thread\n");
++		}
++	}
+ 	kern_return_t kr = kernel_thread_start(rodin_keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index ffea638..53731ee 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -751,6 +751,39 @@ struct sweet_log_header {
+ 	uint64_t total, seq;
+ };
+ 
++/*
++ * Before this boot's first flush: copy the previous boot's log area (if it
++ * holds a SWEETLOG header) to the same-sized area right before it, so a
++ * boot that ended in a spontaneous reboot can still be read afterwards
++ * (Poco X7 Pro). Both areas are far behind the HFS image.
++ */
++static void
++sweet_log_keep_previous(uint64_t base)
++{
++	uint64_t prev = base - SWEET_LOG_BLOCKS;
++	const void *bounce = (const void *)(su.dma + DMA_BOUNCE);
++	int error;
++	bool valid;
++
++	lck_mtx_lock(&sweet_ufs_lock);
++	error = ufs_read_blocks(base, 1);
++	valid = !error && memcmp(bounce, "SWEETLOG", 8) == 0;
++	for (uint32_t done = 0; valid && !error && done < SWEET_LOG_BLOCKS;) {
++		uint32_t n = MIN(SWEET_LOG_BLOCKS - done, BOUNCE_SIZE / UFS_BLOCK);
++		error = ufs_read_blocks(base + done, n);
++		if (!error) {
++			error = ufs_write_blocks(prev + done, n);
++		}
++		done += n;
++	}
++	if (valid && !error) {
++		error = ufs_sync_cache();
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	printf("SWEET LOG: previous boot's log %s (block 0x%llx, error %d)\n",
++	    !valid ? "not found" : error ? "copy FAILED" : "kept", prev, error);
++}
++
+ static void
+ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+@@ -758,6 +791,8 @@ sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 	uint64_t flushed = 0, seq = 0;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ 
++	sweet_log_keep_previous(base);
++
+ 	printf("SWEET LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+ 	    SWEET_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+ 	for (;;) {
+@@ -808,7 +843,7 @@ sweet_log_start(void)
+ 	thread_t thread;
+ 
+ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
+-	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
++	if (!on || !su.writable || su.nblocks < 3 * SWEET_LOG_BLOCKS) {
+ 		return;
+ 	}
+ 	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..799b849 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -361,6 +361,7 @@ class SweetHIDTouch : public IOHIDEventService {
+ public:
+ 	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void touch(int finger, bool down, int x, int y);
++	void touchAt(int finger, bool down, IOFixed nx, IOFixed ny, bool edge);
+ protected:
+ 	virtual UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_Digitizer; }
+ 	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_Dig_TouchScreen; }
+@@ -450,6 +451,22 @@ SweetHIDTouch::start(IOService *provider)
+ 
+ void
+ SweetHIDTouch::touch(int finger, bool down, int x, int y)
++{
++	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
++		return;
++	}
++	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
++	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
++	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
++	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	touchAt(finger, down, nx, ny, x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
++	    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX);
++}
++
++/* nx, ny: 16.16 fractions of the presented display; edge: the touch began at its border. */
++void
++SweetHIDTouch::touchAt(int finger, bool down, IOFixed nx, IOFixed ny, bool edge)
+ {
+ 	uint64_t now = mach_absolute_time();
+ 	IOHIDEvent *collection;
+@@ -458,22 +475,18 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
+ 		return;
+ 	}
+-	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	nx = nx < 0 ? 0 : (nx > 0xffff ? 0xffff : nx);
++	ny = ny < 0 ? 0 : (ny > 0xffff ? 0xffff : ny);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = edge;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+@@ -531,7 +544,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 	IOLockUnlock(fLock);
+ 
+ 	if (was != down) {
+-		IOLog("SWEET HID: touch %d %s at %d,%d%s\n", finger, down ? "down" : "up", x, y,
++		IOLog("SWEET HID: touch %d %s at %d,%d/65536%s\n", finger, down ? "down" : "up", nx, ny,
+ 		    fEdge[finger] ? " edge" : "");
+ 	}
+ 	dispatchEvent(collection);
+@@ -559,3 +572,12 @@ sweet_hid_touch(int finger, int down, int x, int y)
+ 		gSweetTouch->touch(finger, down != 0, x, y);
+ 	}
+ }
++
++/* Touch in 16.16 fractions of the presented display (rodin: stretched over the whole panel). */
++extern "C" void
++sweet_hid_touch_norm(int finger, int down, int32_t nx, int32_t ny, int edge)
++{
++	if (gSweetTouch) {
++		gSweetTouch->touchAt(finger, down != 0, (IOFixed)nx, (IOFixed)ny, edge != 0);
++	}
++}
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 04dda53..71c310d 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -173,6 +173,29 @@ check_for_panic_log(void)
+ 	 */
+ 	if (panic_info->eph_magic == EMBEDDED_PANIC_MAGIC) {
+ 		printf("iBoot didn't extract panic log from previous session crash, this is bad\n");
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/* No iBoot here: show the previous boot's panic log on the console (persistent log). */
++		uint32_t off = panic_info->eph_panic_log_offset, len = panic_info->eph_panic_log_len;
++		if (off >= sizeof(*panic_info) && off < gPanicSize && len <= gPanicSize - off) {
++			const char *text = (const char *)gPanicBase + off;
++			char line[200];
++			if (len > 16384u) {
++				len = 16384u;
++			}
++			printf("SWEET PANIC: previous boot's panic log, %u bytes:\n", len);
++			for (uint32_t i = 0; i < len;) {
++				uint32_t n = 0;
++				while (n < sizeof(line) - 1 && i < len) {
++					line[n++] = text[i++];
++				}
++				line[n] = 0;
++				printf("%s", line);
++			}
++			printf("\nSWEET PANIC: end of the previous boot's panic log\n");
++		} else {
++			printf("SWEET PANIC: previous panic header without a usable log (offset %u length %u)\n", off, len);
++		}
++#endif
+ 	}
+ 
+ 	/* Clear panic region */

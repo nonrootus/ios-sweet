@@ -147,7 +147,14 @@ git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuff
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET FB: display off ignored (sweetfb_keepon=1)' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET UFS: ufslun=%u refused (LUNs 0-7 only)' > /dev/null
 # 0301 (rodin): the frame stretched over the whole panel, MT6363 keys over SPMI (read only), touch diagnostics.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0301-rodin-fill-screen-pmic-keys-touch-diag.patch"
+# 0302 rewrote 0301's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0301-rodin-fill-screen-pmic-keys-touch-diag.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET FB: panel larger than the frame: %ux%u stretched to %ux%u' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN KEYS: TOPSTATUS %02x -> %02x' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: pin %u (%s) mode %u dir %s out %u in %u' > /dev/null
+# 0302 (rodin): Goodix touch over SPI1 (VTP on), volume keys as volume, previous boot's log kept, previous panic printed.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0302-rodin-touch-keys-previous-log-panic.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: IC info %u bytes' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: VTP enable 0x%02x -> 0x%02x' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET LOG: previous boot's log %s" > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET PANIC: previous boot's panic log, %u bytes:" > /dev/null

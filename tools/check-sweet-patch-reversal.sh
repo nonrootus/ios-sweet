@@ -160,5 +160,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET LOG: previous boot's log %s" > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET PANIC: previous boot's panic log, %u bytes:" > /dev/null
 # 0303 (rodin): touch chip select polarity as Linux (CS_POL set selects), both polarities and read prefixes tried.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0303-rodin-touch-cs-polarity.patch"
+# 0304 changed 0303's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0303-rodin-touch-cs-polarity.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: confirm (CS_POL %u selects' > /dev/null
+# 0304 (rodin): touch diagnostics (firmware version, fw state, IRQ level, event heads).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0304-rodin-touch-diagnostics.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: IC info misc: cmd 0x%x' > /dev/null

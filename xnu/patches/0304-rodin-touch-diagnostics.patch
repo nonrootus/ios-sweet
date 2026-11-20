@@ -1,0 +1,71 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 553b93c..0bbb03c 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -344,6 +344,7 @@ static vm_offset_t spi;
+ static uint32_t spi_cs_on = SPI_CMD_CS_POL;
+ static uint32_t gdx_dummy = 3;          /* dummy bytes after a read address: 3, or 4 on Berlin-A */
+ static uint32_t gdx_touch_addr;
++static uint32_t gdx_state_addr, gdx_state_len, gdx_esd_addr, gdx_cmd_addr;  /* IC info misc, logged only */
+ static uint8_t gdx_tx[8 + GDX_MAX_LEN], gdx_rx[8 + GDX_MAX_LEN];
+ 
+ static void
+@@ -584,6 +585,12 @@ gdx_read_info(void)
+ 		return EINVAL;
+ 	}
+ 	gdx_touch_addr = le32(p + 44);
++	gdx_cmd_addr = le32(p);
++	gdx_state_addr = le32(p + 12);
++	gdx_state_len = (uint32_t)(p[16] | (p[17] << 8));
++	gdx_esd_addr = p + 114 <= gdx_info + len ? le32(p + 110) : 0;
++	printf("RODIN TOUCH: IC info misc: cmd 0x%x, fw state 0x%x (%u bytes), esd 0x%x, frame data 0x%x\n",
++	    gdx_cmd_addr, gdx_state_addr, gdx_state_len, gdx_esd_addr, le32(p + 24));
+ 	printf("RODIN TOUCH: IC info %u bytes: customer %02x version %02x die %02x ic %02x config %08x, "
+ 	    "%ux%u channels, touch data at 0x%x (head %u, point %u bytes)\n", len, v[0], v[1], v[2], v[3],
+ 	    le32(v + 4), drv, sen, gdx_touch_addr, p[48] | (p[49] << 8), p[50] | (p[51] << 8));
+@@ -646,10 +653,34 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 		printf("RODIN TOUCH: no usable IC info; touch off\n");
+ 		return;
+ 	}
++	uint8_t fwv[24];
++	if (gdx_read(0x10014, fwv, sizeof(fwv)) == 0) {      /* FW_VERSION_INFO_ADDR: rom pid/vid, patch pid/vid */
++		printf("RODIN TOUCH: firmware rom %c%c%c%c%c%c %02x%02x%02x patch %c%c%c%c%c%c%c%c %02x%02x%02x%02x sensor %u\n",
++		    fwv[0], fwv[1], fwv[2], fwv[3], fwv[4], fwv[5], fwv[6], fwv[7], fwv[8],
++		    fwv[10], fwv[11], fwv[12], fwv[13], fwv[14], fwv[15], fwv[16], fwv[17],
++		    fwv[18], fwv[19], fwv[20], fwv[21], fwv[23]);
++	}
+ 	printf("RODIN TOUCH: polling every 8 ms; coordinates %s\n",
+ 	    scale > 0 ? "scaled by rodintouchscale" : "auto-scaled (x1 or x10 of 1220x2712)");
++	/* Diagnostics (xnu10 saw no event at all): every 250 polls, for the first 60 reports. */
++	uint32_t polls = 0, heads = 0, irq_low = 0, reports = 0;
+ 	for (;;) {
+ 		rodin_wait_ms(8);
++		polls++;
++		if (!(rd32(gpio, 0x200u + (TP_PIN_IRQ / 32u) * 0x10u) & (1u << (TP_PIN_IRQ % 32u)))) {
++			irq_low++;
++		}
++		if (polls % 250 == 0 && reports < 60) {
++			uint8_t st[16] = { 0 };
++			uint8_t hd[8] = { 0 };
++			int e1 = gdx_state_addr ? gdx_read(gdx_state_addr, st, MIN(16u, MAX(1u, gdx_state_len))) : -1;
++			int e2 = gdx_read(gdx_touch_addr, hd, 8);
++			reports++;
++			printf("RODIN TOUCH: %u polls, %u events, IRQ low in %u; head %02x %02x %02x %02x %02x %02x %02x %02x (%d); "
++			    "fw state %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (%d)\n",
++			    polls, heads, irq_low, hd[0], hd[1], hd[2], hd[3], hd[4], hd[5], hd[6], hd[7], e2,
++			    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], e1);
++		}
+ 		if (gdx_read(gdx_touch_addr, buf, GDX_HEAD + 2 * GDX_POINT + 2)) {
+ 			if (errors++ % 1000 == 0) {
+ 				printf("RODIN TOUCH: read error\n");
+@@ -659,6 +690,10 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 		if (buf[0] == 0) {
+ 			continue;
+ 		}
++		if (heads++ < 20) {
++			printf("RODIN TOUCH: event head %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
++		}
+ 		if (!gdx_checksum_ok(buf, GDX_HEAD)) {
+ 			if (errors++ % 1000 == 0) {
+ 				printf("RODIN TOUCH: head checksum error %02x %02x %02x %02x\n", buf[0], buf[1], buf[2], buf[3]);

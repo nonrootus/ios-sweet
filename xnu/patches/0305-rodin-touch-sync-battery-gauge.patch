@@ -1,0 +1,325 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 0bbb03c..64c8b1d 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -662,12 +662,19 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 	}
+ 	printf("RODIN TOUCH: polling every 8 ms; coordinates %s\n",
+ 	    scale > 0 ? "scaled by rodintouchscale" : "auto-scaled (x1 or x10 of 1220x2712)");
+-	/* Diagnostics (xnu10 saw no event at all): every 250 polls, for the first 60 reports. */
+-	uint32_t polls = 0, heads = 0, irq_low = 0, reports = 0;
++	/*
++	 * The IRQ line is level-low (DT interrupt type 8): low = an event waits. xnu11 saw it low all the
++	 * time with an all-zero head: the chip waits for the sync byte to be cleared after every IRQ, even
++	 * for an empty (checksum-valid) head, as Xiaomi's goodix_9916r IRQ thread does. So: read while the
++	 * line is low and always clear after a valid head; every 25th poll also look while it is high.
++	 * Diagnostics: every 250 polls, for the first 60 reports.
++	 */
++	uint32_t polls = 0, heads = 0, irq_low = 0, reports = 0, clears = 0;
+ 	for (;;) {
+ 		rodin_wait_ms(8);
+ 		polls++;
+-		if (!(rd32(gpio, 0x200u + (TP_PIN_IRQ / 32u) * 0x10u) & (1u << (TP_PIN_IRQ % 32u)))) {
++		bool irq = !(rd32(gpio, 0x200u + (TP_PIN_IRQ / 32u) * 0x10u) & (1u << (TP_PIN_IRQ % 32u)));
++		if (irq) {
+ 			irq_low++;
+ 		}
+ 		if (polls % 250 == 0 && reports < 60) {
+@@ -676,21 +683,24 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 			int e1 = gdx_state_addr ? gdx_read(gdx_state_addr, st, MIN(16u, MAX(1u, gdx_state_len))) : -1;
+ 			int e2 = gdx_read(gdx_touch_addr, hd, 8);
+ 			reports++;
+-			printf("RODIN TOUCH: %u polls, %u events, IRQ low in %u; head %02x %02x %02x %02x %02x %02x %02x %02x (%d); "
++			printf("RODIN TOUCH: %u polls, %u events, %u clears, IRQ low in %u; head %02x %02x %02x %02x %02x %02x %02x %02x (%d); "
+ 			    "fw state %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (%d)\n",
+-			    polls, heads, irq_low, hd[0], hd[1], hd[2], hd[3], hd[4], hd[5], hd[6], hd[7], e2,
++			    polls, heads, clears, irq_low, hd[0], hd[1], hd[2], hd[3], hd[4], hd[5], hd[6], hd[7], e2,
+ 			    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], e1);
+ 		}
++		if (!irq && polls % 25 != 0) {
++			continue;
++		}
+ 		if (gdx_read(gdx_touch_addr, buf, GDX_HEAD + 2 * GDX_POINT + 2)) {
+ 			if (errors++ % 1000 == 0) {
+ 				printf("RODIN TOUCH: read error\n");
+ 			}
+ 			continue;
+ 		}
+-		if (buf[0] == 0) {
+-			continue;
++		if (buf[0] == 0 && !irq) {
++			continue;       /* line high and nothing there: no event */
+ 		}
+-		if (heads++ < 20) {
++		if (buf[0] != 0 && heads++ < 20) {
+ 			printf("RODIN TOUCH: event head %02x %02x %02x %02x %02x %02x %02x %02x\n",
+ 			    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+ 		}
+@@ -710,7 +720,8 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 		if (ok && n > 0) {
+ 			ok = gdx_checksum_ok(buf + GDX_HEAD, n * GDX_POINT + 2);
+ 		}
+-		(void)gdx_write(gdx_touch_addr, &zero, 1);     /* event read */
++		(void)gdx_write(gdx_touch_addr, &zero, 1);     /* event read: always, as Xiaomi's driver */
++		clears++;
+ 		if (!ok || !(buf[0] & 0x80)) {
+ 			continue;
+ 		}
+@@ -750,6 +761,183 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 	}
+ }
+ 
++/* ---- Battery: TI bq28z610 fuel gauge on I2C10, read only ------------------------------------ */
++/*
++ * rodin_battery_read() is called by SweetBattery (boot-arg rodinbattery=1) every 30 s. The gauge
++ * sits at 0x55 on i2c@11280000 (I2C10, MediaTek "mt6989-i2c" v2 registers). The bus is used as the
++ * bootloader left it: if its timing register is still 0 nothing is sent. Each read is one
++ * write-then-read transaction (command byte, repeated start, 2 bytes) in FIFO mode, polled, as
++ * Linux i2c-mt65xx.c with mediatek,fifo-use-polling. Only the gauge's standard read commands are
++ * used; nothing is written to the gauge or the charger.
++ */
++#define I2C10_PA                0x11280000u
++#define IMPC_PA                 0x11284000u     /* imp_iic_wrap_c: I2C10 gate, STA 0xE00 / CLR 0xE04 bit 0 */
++#define I2C_DATA_PORT           0x00u
++#define I2C_INTR_MASK           0x08u
++#define I2C_INTR_STAT           0x0cu
++#define I2C_CONTROL             0x10u
++#define I2C_TRANSFER_LEN        0x14u
++#define I2C_TRANSAC_LEN         0x18u
++#define I2C_TIMING              0x20u
++#define I2C_START               0x24u
++#define I2C_FIFO_ADDR_CLR       0x38u
++#define I2C_TRANSFER_LEN_AUX    0x44u
++#define I2C_SLAVE_ADDR1         0x94u
++#define I2C_CTL_RS              (1u << 1)
++#define I2C_CTL_DMA_EN          (1u << 2)
++#define I2C_CTL_CLK_EXT_EN      (1u << 3)
++#define I2C_CTL_DIR_CHANGE      (1u << 4)
++#define I2C_CTL_DMAACK_EN       (1u << 8)
++#define I2C_CTL_ASYNC           (1u << 9)
++#define I2C_ST_COMP             (1u << 0)
++#define I2C_ST_ACKERR           (1u << 1)
++#define I2C_ST_HS_NACKERR       (1u << 2)
++#define I2C_ST_ARB_LOST         (1u << 3)
++#define I2C_ST_RS_TRANSFER      (1u << 4)
++#define I2C_ST_CONFERR          (1u << 9)
++#define I2C_START_TRANSAC       (1u << 0)
++#define I2C_START_RS_MUL_TRIG   (1u << 14)
++#define BQ28Z610_ADDR           0x55u
++
++static vm_offset_t i2c10, impc;
++static bool batt_ready, batt_off;
++static unsigned batt_reads, batt_errors;
++
++static uint16_t
++rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++wr16(vm_offset_t base, uint32_t off, uint16_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint16_t *)(base + off) = v;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++/* Write one command byte, repeated start, read n (<= 16) bytes. */
++static int
++i2c10_wrrd(uint8_t addr7, uint8_t cmd, uint8_t *out, uint32_t n)
++{
++	uint16_t st = 0;
++	unsigned i;
++
++	if (n == 0 || n > 16) {
++		return EINVAL;
++	}
++	uint16_t ctl = rd16(i2c10, I2C_CONTROL) &
++	    (uint16_t)~(I2C_CTL_DIR_CHANGE | I2C_CTL_RS | I2C_CTL_DMA_EN | I2C_CTL_DMAACK_EN | I2C_CTL_ASYNC);
++	wr16(i2c10, I2C_CONTROL, (uint16_t)(ctl | I2C_CTL_CLK_EXT_EN | I2C_CTL_DIR_CHANGE | I2C_CTL_RS));
++	wr16(i2c10, I2C_SLAVE_ADDR1, (uint16_t)(addr7 << 1));
++	wr16(i2c10, I2C_INTR_STAT, I2C_ST_RS_TRANSFER | I2C_ST_CONFERR | I2C_ST_HS_NACKERR | I2C_ST_ACKERR |
++	    I2C_ST_ARB_LOST | I2C_ST_COMP);
++	wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
++	wr16(i2c10, I2C_INTR_MASK, 0);
++	wr16(i2c10, I2C_TRANSFER_LEN, 1);
++	wr16(i2c10, I2C_TRANSFER_LEN_AUX, (uint16_t)n);
++	wr16(i2c10, I2C_TRANSAC_LEN, 2);
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint8_t *)(i2c10 + I2C_DATA_PORT) = cmd;
++	wr16(i2c10, I2C_START, I2C_START_TRANSAC | I2C_START_RS_MUL_TRIG);
++	for (i = 0; i < 4000; i++) {    /* 20 ms */
++		st = rd16(i2c10, I2C_INTR_STAT);
++		if (st & (I2C_ST_COMP | I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST)) {
++			break;
++		}
++		delay(5);
++	}
++	wr16(i2c10, I2C_INTR_STAT, st);
++	if (!(st & (I2C_ST_COMP | I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST))) {
++		wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
++		return ETIMEDOUT;
++	}
++	if (st & (I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST)) {
++		wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
++		return ENXIO;
++	}
++	for (i = 0; i < n; i++) {
++		out[i] = *(volatile uint8_t *)(i2c10 + I2C_DATA_PORT);
++	}
++	return 0;
++}
++
++static int
++bq_word(uint8_t cmd, uint16_t *v)
++{
++	uint8_t b[2];
++	int e = i2c10_wrrd(BQ28Z610_ADDR, cmd, b, 2);
++	*v = (uint16_t)(b[0] | (b[1] << 8));
++	return e;
++}
++
++int rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin);
++
++int
++rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin)
++{
++	if (batt_off) {
++		return ENODEV;
++	}
++	if (!batt_ready) {
++		i2c10 = ml_io_map(I2C10_PA, 0x1000);
++		impc = ml_io_map(IMPC_PA, 0x1000);
++		if (!i2c10 || !impc) {
++			batt_off = true;
++			return ENOMEM;
++		}
++		uint32_t cg = rd32(impc, 0xe00);
++		if (cg & 1u) {
++			wr32(impc, 0xe04, 1u);  /* ungate I2C10, as Linux clk_prepare_enable would */
++		}
++		uint16_t timing = rd16(i2c10, I2C_TIMING);
++		printf("RODIN BATTERY: I2C10 clock gate 0x%x%s, TIMING 0x%04x CONTROL 0x%04x LTIMING 0x%04x\n",
++		    cg, (cg & 1u) ? " (was gated: ungated)" : "", timing, rd16(i2c10, I2C_CONTROL), rd16(i2c10, 0x2c));
++		if (timing == 0) {
++			printf("RODIN BATTERY: I2C10 not set up by the bootloader; battery stays static\n");
++			batt_off = true;
++			return ENODEV;
++		}
++		batt_ready = true;
++	}
++	uint16_t soc = 0, volt = 0, curr = 0, temp = 0;
++	int e = bq_word(0x2c, &soc);            /* RelativeStateOfCharge, % */
++	if (!e) {
++		e = bq_word(0x08, &volt);       /* Voltage, mV */
++	}
++	if (!e) {
++		e = bq_word(0x0c, &curr);       /* Current, mA, > 0 charging */
++	}
++	if (!e) {
++		e = bq_word(0x06, &temp);       /* Temperature, 0.1 K */
++	}
++	soc &= 0xffu;
++	if (e || soc > 100 || volt < 2800 || volt > 4700 || temp < 2330 || temp > 3530) {
++		if (batt_errors++ < 10) {
++			printf("RODIN BATTERY: read err %d soc %u volt %u curr %d temp %u\n", e, soc, volt,
++			    (int)(int16_t)curr, temp);
++		}
++		if (batt_errors >= 10 && batt_reads == 0) {
++			printf("RODIN BATTERY: gauge not answering; battery stays static\n");
++			batt_off = true;
++		}
++		return e ? e : EINVAL;
++	}
++	*percent = soc;
++	*mv = volt;
++	*ma = (int)(int16_t)curr;
++	*decikelvin = temp;
++	if (batt_reads++ % 10 == 0) {
++		int c10 = (int)temp - 2731, a10 = c10 < 0 ? -c10 : c10;
++		printf("RODIN BATTERY: %u%%, %u mV, %d mA, %s%d.%d C\n", soc, volt, (int)(int16_t)curr,
++		    c10 < 0 ? "-" : "", a10 / 10, a10 % 10);
++	}
++	return 0;
++}
++
+ void
+ rodin_input_init(void)
+ {
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 9969739..37cf8a5 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -15,6 +15,8 @@
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++/* bsd/dev/rodin_input.c: Poco X7 Pro fuel gauge (bq28z610 over I2C10), read only */
++extern "C" int rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin);
+ 
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+@@ -26,7 +28,7 @@ public:
+ private:
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+-	bool fTimerAdded, fRunning, fReal;
++	bool fTimerAdded, fRunning, fReal, fRodin;
+ 	int fLastMode;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+@@ -51,7 +53,7 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	}
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+-	fTimerAdded = fRunning = fReal = false;
++	fTimerAdded = fRunning = fReal = fRodin = false;
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -208,6 +210,19 @@ SweetBattery::poll(void)
+ {
+ 	uint8_t type, present, usb, path, charger, error, temperature;
+ 	uint16_t rawVoltage;
++	if (fRodin) {
++		/* Poco X7 Pro: the gauge's own state of charge; TI Current() > 0 while charging. */
++		unsigned pct = 0, mv = 0, dk = 0;
++		int ma = 0;
++		if (rodin_battery_read(&pct, &mv, &ma, &dk) == 0) {
++			bool charging = ma > 20;
++			bool external = charging || (pct >= 100 && ma > -50);
++			publish(pct, mv, ma, external, external, charging, external && pct >= 100, true, true);
++		} else {
++			publish(100, 4200, 0, true, true, false, true, false, false);
++		}
++		return;
++	}
+ 	bool valid = fReal &&
+ 	    !sweet_spmi_read(0, 0x4804, &type) && type == 0x0d &&
+ 	    !sweet_spmi_read(0, 0x4808, &present) && (present & 1u) &&
+@@ -265,9 +280,12 @@ SweetBattery::start(IOService *provider)
+ 	int real = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++	int rodin = 0;
++	(void)PE_parse_boot_argn("rodinbattery", &rodin, sizeof(rodin));
++	fRodin = !fReal && rodin == 1;
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+-	if (fReal) {
++	if (fReal || fRodin) {
+ 		fLoop = IOWorkLoop::workLoop();
+ 		fTimer = IOTimerEventSource::timerEventSource(this, &SweetBattery::timerFired);
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+@@ -275,7 +293,7 @@ SweetBattery::start(IOService *provider)
+ 			fRunning = true;
+ 			fTimer->setTimeoutMS(30000);
+ 		} else {
+-			fReal = false;
++			fReal = fRodin = false;
+ 			poll();
+ 			IOLog("SWEET BATTERY: timer unavailable; static fallback\n");
+ 		}

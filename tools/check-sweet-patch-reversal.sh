@@ -164,5 +164,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0303-rodin-touch-cs-polarity.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: confirm (CS_POL %u selects' > /dev/null
 # 0304 (rodin): touch diagnostics (firmware version, fw state, IRQ level, event heads).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0304-rodin-touch-diagnostics.patch"
+# 0305 changed 0304's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0304-rodin-touch-diagnostics.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: IC info misc: cmd 0x%x' > /dev/null
+# 0305 (rodin): touch sync byte cleared after every IRQ (Xiaomi goodix_9916r); bq28z610 gauge over I2C10 for SweetBattery.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0305-rodin-touch-sync-battery-gauge.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN BATTERY: I2C10 clock gate' > /dev/null

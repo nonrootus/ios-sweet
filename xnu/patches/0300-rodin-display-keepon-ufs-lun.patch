@@ -1,0 +1,118 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index b53b3e1..58176d6 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -5,7 +5,8 @@
+  * bootloader, which loaded our boot image from it. This driver reuses that
+  * state: it points the transfer request list at its own memory (verifying the
+  * host took it before ringing any doorbell) and issues polled SCSI commands,
+- * one at a time, to LUN 0. It finds one GPT partition by name (boot-arg
++ * one at a time, to one LUN (boot-arg ufslun, default 0; the MediaTek host on
++ * the Poco X7 Pro is brought up by our shim). It finds one GPT partition by name (boot-arg
+  * ufsroot=, default "userdata") and exposes it as the BSD disk ufsroot0
+  * (rufsroot0), with 512-byte logical sectors over the device's 4 KiB blocks.
+  * Root on it with rd=ufsroot0.
+@@ -620,7 +621,15 @@ sweet_ufs_init(void)
+ 		return ENOMEM;
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+-	su.lun = 0;
++	/* Boot-arg ufslun: the LUN holding the GPT (2 on the Poco X7 Pro). Plain
++	 * LUNs 0-7 only, never a well-known LUN (boot 0xB0/0xB1, RPMB 0xC4). */
++	uint32_t lun = 0;
++	PE_parse_boot_argn("ufslun", &lun, sizeof(lun));
++	if (lun > 7) {
++		printf("SWEET UFS: ufslun=%u refused (LUNs 0-7 only)\n", lun);
++		return EINVAL;
++	}
++	su.lun = (uint8_t)lun;
+ 	su.secsize = DEV_BSIZE;
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 9cb2a7b..771ce05 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -81,7 +81,12 @@ enum {
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+  * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
++ * A larger panel (Poco X7 Pro, 1220x2712) shows the whole 1125x2436 frame
++ * centered, black around it: presenting the real size there made backboardd
++ * render at 1125x2436 anyway and ask for the M2 scaler, which does not exist.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
++ * Boot-arg sweetfb_keepon=1 ignores "display off" (no touch or buttons yet to
++ * wake the display again).
+  */
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+@@ -121,6 +126,7 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	bool          fKeepOn;        /* boot-arg sweetfb_keepon=1 */
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -175,12 +181,17 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (!native && ((fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) ||
++	    (fWidth >= SWEET_FB_LOGICAL_W && fHeight >= SWEET_FB_LOGICAL_H))) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	/* Negative on a larger panel: the frame lands at (-fOffX, -fOffY). */
++	fOffX = ((int32_t)fLogicalW - (int32_t)fWidth) / 2;
++	fOffY = ((int32_t)fLogicalH - (int32_t)fHeight) / 2;
++	int keepon = 0;
++	PE_parse_boot_argn("sweetfb_keepon", &keepon, sizeof(keepon));
++	fKeepOn = keepon != 0;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -208,6 +219,12 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	if (fOffX < 0 || fOffY < 0) {
++		IOLog("SWEET FB: panel larger than the frame: frame at %d,%d, black around it\n", -fOffX, -fOffY);
++	}
++	if (fKeepOn) {
++		IOLog("SWEET FB: sweetfb_keepon: display off requests are ignored\n");
++	}
+ 	return true;
+ }
+ 
+@@ -337,6 +354,16 @@ AppleCLCD::present(const uint8_t *rec)
+ 			 * writes the read-only-late cons_ops_index and panics. */
+ 			sweet_console_muted = 1;
+ 		}
++		if (fOffX < 0 || fOffY < 0) {
++			/* First frame on a larger panel: clear the boot text around it. */
++			/* 32-bit stores as in the fade-out: no DC ZVA on a possibly uncached mapping. */
++			for (uint32_t y = 0; y < fHeight; y++) {
++				volatile uint32_t *row = (volatile uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++				for (uint32_t x = 0; x < fWidth; x++) {
++					row[x] = 0;
++				}
++			}
++		}
+ 	}
+ 
+ 	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+@@ -633,6 +660,10 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			if (off && fFB->fKeepOn) {
++				IOLog("SWEET FB: display off ignored (sweetfb_keepon=1)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;

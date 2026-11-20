@@ -141,3 +141,7 @@ git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0217-sweet
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WORKSPACE/xnu/patches/0218-sweet-usb-rndis-no-zlp-answers.patch"
 # 0219: the USB device survives a bus reset; RNDIS notifications and answers queued.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"
+# 0300 (Poco X7 Pro rodin): whole 1125x2436 frame centered on a larger panel, sweetfb_keepon, ufslun.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0300-rodin-display-keepon-ufs-lun.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET FB: display off ignored (sweetfb_keepon=1)' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET UFS: ufslun=%u refused (LUNs 0-7 only)' > /dev/null

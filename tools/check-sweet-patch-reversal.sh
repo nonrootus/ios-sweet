@@ -142,6 +142,12 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/sweet_usb.c "$GITHUB_WO
 # 0219: the USB device survives a bus reset; RNDIS notifications and answers queued.
 git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0219-sweet-usb-reset-and-rndis-queue.patch"
 # 0300 (Poco X7 Pro rodin): whole 1125x2436 frame centered on a larger panel, sweetfb_keepon, ufslun.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0300-rodin-display-keepon-ufs-lun.patch"
+# 0301 rewrote 0300's framebuffer hunks.
+git -C dxb/xnu apply --reverse --check --exclude=iokit/Kernel/arm/SweetFramebuffer.cpp "$GITHUB_WORKSPACE/xnu/patches/0300-rodin-display-keepon-ufs-lun.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET FB: display off ignored (sweetfb_keepon=1)' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET UFS: ufslun=%u refused (LUNs 0-7 only)' > /dev/null
+# 0301 (rodin): the frame stretched over the whole panel, MT6363 keys over SPMI (read only), touch diagnostics.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0301-rodin-fill-screen-pmic-keys-touch-diag.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'SWEET FB: panel larger than the frame: %ux%u stretched to %ux%u' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN KEYS: TOPSTATUS %02x -> %02x' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: pin %u (%s) mode %u dir %s out %u in %u' > /dev/null

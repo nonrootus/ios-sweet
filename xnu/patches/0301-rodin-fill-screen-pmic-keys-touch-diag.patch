@@ -1,0 +1,488 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 649c515..969f48d 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/rodin_input.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+new file mode 100644
+index 0000000..3b1743a
+--- /dev/null
++++ b/bsd/dev/rodin_input.c
+@@ -0,0 +1,278 @@
++/*
++ * Poco X7 Pro (rodin, MediaTek MT6899): buttons, and touch diagnostics.
++ * Boot-arg rodininput=1 starts it (default off: these are MediaTek addresses).
++ *
++ * Buttons: the PMIC MT6363 (SPMI slave 4) keeps the debounced key states in
++ * TOPSTATUS (0x1e), active low. It is read through the AP's software channel
++ * (SWINF 2) of the PMIF at 0x1cc04000, the way Linux spmi-mtk-pmif.c reads:
++ * wait for IDLE, write the command to ACC, wait for WFVLDCLR, take RDATA,
++ * write 1 to VLD_CLR. READ ONLY: the command never carries the write bit
++ * (29), slave and register come from a fixed list (rodin_pmic_readable), and
++ * VLD_CLR only acknowledges the read data. Nothing in either PMIC is written.
++ * Bits (vendor mtk-pmic-keys.c: power 1, home 3, home2 4; charger 2): power,
++ * volume down ("home"), volume up ("home2"). Every change of TOPSTATUS is
++ * logged, so the mapping can be checked. Boot-arg rodinhome=1 (default)
++ * makes volume down the Home button, to unlock without touch.
++ *
++ * Touch (Goodix on spi1@11011800): only reads for now, logged once: the SPI1
++ * clock gate and mux, the modes and levels of the touch pins (IRQ 9, SPI
++ * 50-53, AVDD enable 73, reset 134) and the touch I/O supply (MT6368 VTP).
++ * The SPI controller itself is not touched: with its clock off, a read could
++ * hang the bus.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_hid_key(int key, int down);
++void rodin_input_init(void);
++
++#define PMIF_PA                 0x1cc04000u
++#define PMIF_SWINF2_ACC         0x880u
++#define PMIF_SWINF2_RDATA       0x894u
++#define PMIF_SWINF2_VLD_CLR     0x8a4u
++#define PMIF_SWINF2_STA         0x8a8u
++#define PMIF_FSM(sta)           (((sta) >> 1) & 7u)
++#define PMIF_FSM_IDLE           0u
++#define PMIF_FSM_WFVLDCLR       6u
++#define PMIF_STA_ERR            (1u << 18)
++#define PMIF_CMD_EXT_REG_LONG   3u
++#define PMIF_CMD_WRITE          (1u << 29)
++
++#define MT6363_SID              4
++#define MT6363_TOPSTATUS        0x1e
++#define MT6368_SID              5
++#define MT6368_LDO_VTP_EN       0x1c87  /* bit 0 */
++
++#define GPIO_PA                 0x10005000u
++#define TOPCKGEN_PA             0x10000000u
++#define TOP_CLK_CFG_7           0x080u  /* spi1_b_sel: bits 2:0 */
++#define PERICFG_AO_PA           0x11036000u
++#define PERAO_CG0_STA           0x010u  /* bit 13: spi1_b gated */
++
++static vm_offset_t pmif, gpio, topck, perao;
++static bool rodin_started;
++static int rodin_sleep_chan;
++
++static uint32_t
++rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile ("dsb osh" ::: "memory");
++}
++
++/* The only PMIC registers this file may read. */
++static bool
++rodin_pmic_readable(uint8_t sid, uint16_t addr)
++{
++	switch (sid) {
++	case MT6363_SID:
++		return addr == MT6363_TOPSTATUS || addr == 0x08 || addr == 0x09;  /* + chip id */
++	case MT6368_SID:
++		return addr == MT6368_LDO_VTP_EN || addr == 0x08 || addr == 0x09;
++	default:
++		return false;
++	}
++}
++
++static uint32_t pmif_last_sta;
++
++static int
++rodin_pmic_read(uint8_t sid, uint16_t addr, uint8_t *out)
++{
++	uint32_t sta = 0;
++	unsigned i;
++
++	if (!pmif || !rodin_pmic_readable(sid, addr)) {
++		return EPERM;
++	}
++	for (i = 0; i < 1000; i++) {
++		sta = rd32(pmif, PMIF_SWINF2_STA);
++		if (PMIF_FSM(sta) == PMIF_FSM_IDLE) {
++			break;
++		}
++		delay(10);
++	}
++	pmif_last_sta = sta;
++	if (PMIF_FSM(sta) != PMIF_FSM_IDLE) {
++		if (PMIF_FSM(sta) == PMIF_FSM_WFVLDCLR) {
++			wr32(pmif, PMIF_SWINF2_VLD_CLR, 1);     /* stale read data, as Linux does */
++		}
++		return EBUSY;
++	}
++	uint32_t cmd = (PMIF_CMD_EXT_REG_LONG << 30) | ((uint32_t)sid << 24) | addr;  /* one byte */
++	if (cmd & PMIF_CMD_WRITE) {
++		return EPERM;
++	}
++	wr32(pmif, PMIF_SWINF2_ACC, cmd);
++	for (i = 0; i < 1000; i++) {
++		sta = rd32(pmif, PMIF_SWINF2_STA);
++		if (PMIF_FSM(sta) == PMIF_FSM_WFVLDCLR) {
++			break;
++		}
++		delay(10);
++	}
++	pmif_last_sta = sta;
++	if (PMIF_FSM(sta) != PMIF_FSM_WFVLDCLR) {
++		return ETIMEDOUT;
++	}
++	uint32_t data = rd32(pmif, PMIF_SWINF2_RDATA);
++	wr32(pmif, PMIF_SWINF2_VLD_CLR, 1);
++	if (sta & PMIF_STA_ERR) {
++		return EIO;
++	}
++	*out = (uint8_t)data;
++	return 0;
++}
++
++static void
++rodin_wait_ms(uint32_t ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&rodin_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* GPIO n: mode (4 bits), direction, output and input levels. */
++static void
++rodin_log_pin(const char *name, unsigned pin)
++{
++	uint32_t mode = (rd32(gpio, 0x300u + (pin / 8u) * 0x10u) >> ((pin % 8u) * 4u)) & 0xfu;
++	uint32_t bit = 1u << (pin % 32u), word = (pin / 32u) * 0x10u;
++	printf("RODIN TOUCH: pin %u (%s) mode %u dir %s out %u in %u\n", pin, name, mode,
++	    (rd32(gpio, 0x000u + word) & bit) ? "out" : "in",
++	    !!(rd32(gpio, 0x100u + word) & bit), !!(rd32(gpio, 0x200u + word) & bit));
++}
++
++static void
++rodin_touch_diag(void)
++{
++	uint8_t vtp = 0, id5l = 0, id5h = 0;
++	int e = rodin_pmic_read(MT6368_SID, MT6368_LDO_VTP_EN, &vtp);
++	(void)rodin_pmic_read(MT6368_SID, 0x08, &id5l);
++	(void)rodin_pmic_read(MT6368_SID, 0x09, &id5h);
++	printf("RODIN TOUCH: MT6368 id %02x%02x, VTP (touch I/O 1.8 V) enable reg 0x%02x err %d -> %s\n",
++	    id5h, id5l, vtp, e, e ? "unknown" : ((vtp & 1) ? "on" : "OFF"));
++	uint32_t cg = rd32(perao, PERAO_CG0_STA), mux = rd32(topck, TOP_CLK_CFG_7);
++	printf("RODIN TOUCH: pericfg_ao CG0 0x%08x (spi1_b %s), CLK_CFG_7 0x%08x (spi1_b_sel %u%s)\n",
++	    cg, (cg & (1u << 13)) ? "gated" : "running", mux, mux & 7u, (mux & 0x80u) ? ", pdn" : "");
++	rodin_log_pin("touch IRQ", 9);
++	rodin_log_pin("SPI1 CLK?", 50);
++	rodin_log_pin("SPI1", 51);
++	rodin_log_pin("SPI1", 52);
++	rodin_log_pin("SPI1", 53);
++	rodin_log_pin("AVDD enable", 73);
++	rodin_log_pin("touch reset", 134);
++}
++
++static void
++rodin_keys_thread(void *arg, wait_result_t result)
++{
++	/* TOPSTATUS bits (active low) -> sweet_hid_key: 0 power, 1 volume up, 2 volume down, 3 home. */
++	static const struct { uint8_t bit; const char *name; } keys[3] = {
++		{ 1, "power" }, { 3, "volume down" }, { 4, "volume up" },
++	};
++	int home = 1, hid[3];
++	bool down[3] = { false, false, false };
++	uint8_t last = 0;
++	unsigned errors = 0, changes = 0;
++	bool have = false;
++
++	(void)arg;
++	(void)result;
++	PE_parse_boot_argn("rodinhome", &home, sizeof(home));
++	hid[0] = 0;
++	hid[1] = home ? 3 : 2;
++	hid[2] = 1;
++	for (;;) {
++		uint8_t v = 0;
++		int e = rodin_pmic_read(MT6363_SID, MT6363_TOPSTATUS, &v);
++		if (e) {
++			if ((errors++ % 500u) == 0) {
++				printf("RODIN KEYS: TOPSTATUS read error %d sta 0x%08x\n", e, pmif_last_sta);
++			}
++			rodin_wait_ms(20);
++			continue;
++		}
++		errors = 0;
++		if (!have || v != last) {
++			if (changes++ < 400) {
++				printf("RODIN KEYS: TOPSTATUS %02x -> %02x\n", have ? last : 0xff, v);
++			}
++			if (!have) {
++				printf("RODIN KEYS: polling every 20 ms; power, volume down (%s), volume up\n",
++				    home ? "as Home" : "volume");
++			}
++			last = v;
++			for (int k = 0; k < 3; k++) {
++				bool d = !(v & (1u << keys[k].bit));
++				if (!have && d) {
++					printf("RODIN KEYS: %s reads pressed at start: ignored until released\n", keys[k].name);
++					down[k] = true;
++					continue;
++				}
++				if (have && d != down[k]) {
++					down[k] = d;
++					printf("RODIN KEYS: %s %s\n", keys[k].name, d ? "down" : "up");
++					sweet_hid_key(hid[k], d);
++				}
++			}
++			have = true;
++		}
++		rodin_wait_ms(20);
++	}
++}
++
++void
++rodin_input_init(void)
++{
++	int enabled = 0;
++	thread_t thread;
++
++	if (rodin_started) {
++		return;
++	}
++	rodin_started = true;
++	PE_parse_boot_argn("rodininput", &enabled, sizeof(enabled));
++	if (!enabled) {
++		return;
++	}
++	pmif = ml_io_map(PMIF_PA, 0x1000);
++	gpio = ml_io_map(GPIO_PA, 0x1000);
++	topck = ml_io_map(TOPCKGEN_PA, 0x1000);
++	perao = ml_io_map(PERICFG_AO_PA, 0x1000);
++	if (!pmif || !gpio || !topck || !perao) {
++		printf("RODIN INPUT: MMIO mapping failed\n");
++		return;
++	}
++	uint8_t idl = 0, idh = 0;
++	int e = rodin_pmic_read(MT6363_SID, 0x08, &idl);
++	(void)rodin_pmic_read(MT6363_SID, 0x09, &idh);
++	printf("RODIN INPUT: PMIF SWINF2 sta 0x%08x, MT6363 id %02x%02x (err %d)\n",
++	    pmif_last_sta, idh, idl, e);
++	rodin_touch_diag();
++	kern_return_t kr = kernel_thread_start(rodin_keys_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("RODIN KEYS: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 58176d6..d1fc365 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
++extern void rodin_input_init(void);
+ extern void sweet_usb_probe(void);
+ extern void sweet_gpu_probe(void);
+ extern void sweet_gpu_memory_probe(void);
+@@ -670,6 +671,7 @@ sweet_ufs_init(void)
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
++	rodin_input_init();	/* Poco X7 Pro, boot-arg rodininput=1 */
+ 	sweet_usb_probe();
+ 	sweet_gpu_probe();
+ 	sweet_gpu_memory_probe();
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 771ce05..8cc2501 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -81,9 +81,11 @@ enum {
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+  * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
+- * A larger panel (Poco X7 Pro, 1220x2712) shows the whole 1125x2436 frame
+- * centered, black around it: presenting the real size there made backboardd
+- * render at 1125x2436 anyway and ask for the M2 scaler, which does not exist.
++ * A larger panel (Poco X7 Pro, 1220x2712) gets the whole 1125x2436 frame
++ * stretched over it (nearest pixel, +8.4% wide, +11.3% tall): presenting the
++ * real size there made backboardd render at 1125x2436 anyway and ask for the
++ * M2 scaler, which does not exist. Boot-arg sweetfb_center=1 shows the frame
++ * 1:1 in the middle instead, black around it.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  * Boot-arg sweetfb_keepon=1 ignores "display off" (no touch or buttons yet to
+  * wake the display again).
+@@ -127,8 +129,12 @@ public:
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+ 	bool          fKeepOn;        /* boot-arg sweetfb_keepon=1 */
++	bool          fFill;          /* frame stretched over a larger panel */
++	uint16_t     *fMapX, *fMapY;  /* fill: panel column/row -> frame column/row */
++	uint8_t      *fRow;           /* fill: one panel row, built in cached memory */
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void presentFill(SweetSurface *s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h);
+ 	void addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+@@ -192,6 +198,23 @@ AppleCLCD::start(IOService *provider)
+ 	int keepon = 0;
+ 	PE_parse_boot_argn("sweetfb_keepon", &keepon, sizeof(keepon));
+ 	fKeepOn = keepon != 0;
++	int center = 0;
++	PE_parse_boot_argn("sweetfb_center", &center, sizeof(center));
++	if (!center && fLogicalW == SWEET_FB_LOGICAL_W && (fOffX < 0 || fOffY < 0) &&
++	    fWidth <= 0xffff && fHeight <= 0xffff) {
++		fMapX = (uint16_t *)IOMallocData(fWidth * sizeof(uint16_t));
++		fMapY = (uint16_t *)IOMallocData(fHeight * sizeof(uint16_t));
++		fRow = (uint8_t *)IOMallocData((vm_size_t)fWidth * 4);
++		if (fMapX != NULL && fMapY != NULL && fRow != NULL) {
++			for (uint32_t x = 0; x < fWidth; x++) {
++				fMapX[x] = (uint16_t)((uint64_t)x * fLogicalW / fWidth);
++			}
++			for (uint32_t y = 0; y < fHeight; y++) {
++				fMapY[y] = (uint16_t)((uint64_t)y * fLogicalH / fHeight);
++			}
++			fFill = true;
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -219,7 +242,10 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+-	if (fOffX < 0 || fOffY < 0) {
++	if (fFill) {
++		IOLog("SWEET FB: panel larger than the frame: %ux%u stretched to %ux%u (sweetfb_center=1: 1:1)\n",
++		    fLogicalW, fLogicalH, fWidth, fHeight);
++	} else if (fOffX < 0 || fOffY < 0) {
+ 		IOLog("SWEET FB: panel larger than the frame: frame at %d,%d, black around it\n", -fOffX, -fOffY);
+ 	}
+ 	if (fKeepOn) {
+@@ -340,6 +366,91 @@ sweet_b3a8_display_plane(const sweet_surface_plane &plane, size_t bytes,
+ 	    sweet_b3a8_plane_fits(0, plane.bytesPerRow, right * bytes, bottom, plane.size);
+ }
+ 
++/*
++ * Fill mode: one layer's logical rect (dx,dy,w,h), read from (sx,sy) of its
++ * surface, onto every panel pixel whose frame pixel (fMapX/fMapY) lies in the
++ * rect. Each panel row is built in fRow (cached) and copied once; rows that
++ * map to the same frame row reuse it. Runs on the vsync work loop only.
++ */
++void
++AppleCLCD::presentFill(SweetSurface *s, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	if (w > (int32_t)fLogicalW - dx) {
++		w = (int32_t)fLogicalW - dx;
++	}
++	if (h > (int32_t)fLogicalH - dy) {
++		h = (int32_t)fLogicalH - dy;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	uintptr_t src = s->kernelAddress();
++	const size_t length = s->memory ? s->memory->getLength() : 0;
++	if (w <= 0 || h <= 0 || src == 0 || length == 0) {
++		return;
++	}
++	const bool b3a8 = s->pixelFormat == SWEET_B3A8_FORMAT;
++	if (b3a8) {
++		const auto &rgb = s->planes[0];
++		const auto &alpha = s->planes[1];
++		if (s->planeCount != 2 ||
++		    !sweet_b3a8_display_plane(rgb, 4, sx + w, sy + h, length) ||
++		    !sweet_b3a8_display_plane(alpha, 1, sx + w, sy + h, length) ||
++		    !((uint64_t)rgb.offset + rgb.size <= alpha.offset ||
++		    (uint64_t)alpha.offset + alpha.size <= rgb.offset)) {
++			return;
++		}
++	} else {
++		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
++		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
++		    (uint64_t)(sx + w) * 4;
++		if (bpe != 4 || s->elementWidth != 1 || s->elementHeight != 1 || last > length) {
++			return;
++		}
++	}
++	/* Panel columns/rows whose frame pixel lies in the rect: [p0, p1). */
++	uint32_t px0 = (uint32_t)(((uint64_t)dx * fWidth + fLogicalW - 1) / fLogicalW);
++	uint32_t px1 = (uint32_t)(((uint64_t)(dx + w) * fWidth + fLogicalW - 1) / fLogicalW);
++	uint32_t py0 = (uint32_t)(((uint64_t)dy * fHeight + fLogicalH - 1) / fLogicalH);
++	uint32_t py1 = (uint32_t)(((uint64_t)(dy + h) * fHeight + fLogicalH - 1) / fLogicalH);
++	px1 = px1 > fWidth ? fWidth : px1;
++	py1 = py1 > fHeight ? fHeight : py1;
++	if (px0 >= px1 || py0 >= py1) {
++		return;
++	}
++	int32_t built = -1;
++	for (uint32_t py = py0; py < py1; py++) {
++		int32_t fy = fMapY[py];
++		if (fy != built) {
++			built = fy;
++			uint64_t srow = (uint64_t)(sy + fy - dy);
++			if (b3a8) {
++				const auto &rgb = s->planes[0];
++				const auto &alpha = s->planes[1];
++				const uint8_t *colors = (const uint8_t *)(src + rgb.offset + srow * rgb.bytesPerRow);
++				const uint8_t *opacities = (const uint8_t *)(src + alpha.offset + srow * alpha.bytesPerRow);
++				for (uint32_t px = px0; px < px1; px++) {
++					uint32_t scol = (uint32_t)(sx + fMapX[px] - dx);
++					uint32_t word;
++					memcpy(&word, colors + (uint64_t)scol * 4, sizeof(word));
++					sweet_b3a8_unpack(word, opacities[scol], fRow + (px - px0) * 4, 1);
++				}
++			} else {
++				const uint8_t *row = (const uint8_t *)(src + s->offset + srow * s->bytesPerRow);
++				for (uint32_t px = px0; px < px1; px++) {
++					uint32_t scol = (uint32_t)(sx + fMapX[px] - dx);
++					memcpy(fRow + (px - px0) * 4, row + (uint64_t)scol * 4, 4);
++				}
++			}
++		}
++		memcpy((void *)(fPixels + (uint64_t)py * fRowBytes + (uint64_t)px0 * 4), fRow,
++		    (size_t)(px1 - px0) * 4);
++	}
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -401,6 +512,11 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		if (fFill) {
++			presentFill(s, sx, sy, dx, dy, w, h);
++			s->release();
++			continue;
++		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;

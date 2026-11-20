@@ -1,0 +1,93 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 29d3b2b..553b93c 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -320,7 +320,7 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ #define SPI_CFG5                0x68u   /* packet length - 1, high 16 bits */
+ #define SPI_CMD_ACT             (1u << 0)
+ #define SPI_CMD_RST             (1u << 2)
+-#define SPI_CMD_CS_POL          (1u << 7)   /* software CS: 1 = released (high) */
++#define SPI_CMD_CS_POL          (1u << 7)   /* software CS level: Linux mtk_spi_set_cs sets it for CS low */
+ #define SPI_CMD_TXMSBF          (1u << 12)
+ #define SPI_CMD_RXMSBF          (1u << 13)
+ #define SPI_CMD_CS_PIN_SEL      (1u << 18)
+@@ -340,6 +340,8 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ #define GDX_FINGERS             10u
+ 
+ static vm_offset_t spi;
++/* CS_POL value that selects the chip (xnu9: 0 got only zeros back; Linux sets it to select). */
++static uint32_t spi_cs_on = SPI_CMD_CS_POL;
+ static uint32_t gdx_dummy = 3;          /* dummy bytes after a read address: 3, or 4 on Berlin-A */
+ static uint32_t gdx_touch_addr;
+ static uint8_t gdx_tx[8 + GDX_MAX_LEN], gdx_rx[8 + GDX_MAX_LEN];
+@@ -389,7 +391,7 @@ spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
+ {
+ 	int error = 0;
+ 
+-	wr32(spi, SPI_CMD, rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL);
++	wr32(spi, SPI_CMD, (rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL) | spi_cs_on);
+ 	for (uint32_t done = 0; done < len && !error;) {
+ 		uint32_t n = MIN(len - done, SPI_FIFO), w;
+ 		wr32(spi, SPI_CFG1, (rd32(spi, SPI_CFG1) & 0x000000ffu) | ((n - 1u) << 16));
+@@ -418,7 +420,7 @@ spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
+ 		}
+ 		done += n;
+ 	}
+-	wr32(spi, SPI_CMD, rd32(spi, SPI_CMD) | SPI_CMD_CS_POL);
++	wr32(spi, SPI_CMD, (rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL) | (spi_cs_on ^ SPI_CMD_CS_POL));
+ 	return error;
+ }
+ 
+@@ -513,7 +515,7 @@ rodin_touch_spi_init(uint32_t hz)
+ 	wr32(spi, SPI_CMD, cmd & ~SPI_CMD_RST);
+ 	/* Mode 0, MSB first, little-endian FIFO words, no DMA or IRQ, software CS released. */
+ 	wr32(spi, SPI_CMD, SPI_CMD_NONIDLE | SPI_CMD_CS_PIN_SEL | SPI_CMD_TXMSBF | SPI_CMD_RXMSBF |
+-	    SPI_CMD_CS_POL | ((SPI_TICKDLY & 0x7fu) << SPI_CMD_TICKDLY_SHIFT));
++	    (spi_cs_on ^ SPI_CMD_CS_POL) | ((SPI_TICKDLY & 0x7fu) << SPI_CMD_TICKDLY_SHIFT));
+ 	wr32(spi, SPI_PAD_SEL, 0);
+ 	wr32(spi, SPI_SLICE_EN, (rd32(spi, SPI_SLICE_EN) & ~0x3fu) | (1u << 0) | (1u << 3));
+ 	uint32_t div = (SPI_SRC_HZ + hz - 1) / hz, sck = (div + 1) / 2;
+@@ -536,8 +538,11 @@ gdx_confirm(void)
+ 		if (!e) {
+ 			e = gdx_read(GDX_BOOTOPTION, back, 8);
+ 		}
+-		printf("RODIN TOUCH: confirm (%u dummy) err %d read %02x %02x %02x %02x %02x %02x %02x %02x\n",
+-		    gdx_dummy, e, back[0], back[1], back[2], back[3], back[4], back[5], back[6], back[7]);
++		const uint8_t *r = gdx_rx;      /* the whole reply, prefix included: does MISO move at all? */
++		printf("RODIN TOUCH: confirm (CS_POL %u selects, %u dummy) err %d reply %02x %02x %02x %02x %02x %02x %02x %02x"
++		    " %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n", spi_cs_on ? 1u : 0u, gdx_dummy, e,
++		    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], back[0], back[1], back[2], back[3],
++		    back[4], back[5], back[6], back[7]);
+ 		if (!e && memcmp(aa, back, 8) == 0) {
+ 			return true;
+ 		}
+@@ -619,14 +624,23 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 	pin_out(TP_PIN_RESET, true);
+ 	rodin_wait_ms(4);
+ 	rodin_touch_spi_init(mhz * 1000000u);
+-	if (!gdx_confirm()) {
+-		gdx_dummy = 4;          /* Berlin-A reads have one more dummy byte */
+-		if (!gdx_confirm()) {
+-			printf("RODIN TOUCH: no Goodix answer; touch off\n");
+-			rodin_log_pin("touch IRQ", TP_PIN_IRQ);
+-			return;
++	rodin_wait_ms(20);
++	/* CS polarity as Linux first, then the other; 3 dummy bytes (Berlin-B/D), then 4 (Berlin-A). */
++	bool found = false;
++	for (int c = 0; c < 2 && !found; c++) {
++		spi_cs_on = c ? 0 : SPI_CMD_CS_POL;
++		wr32(spi, SPI_CMD, (rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL) | (spi_cs_on ^ SPI_CMD_CS_POL));
++		for (gdx_dummy = 3; gdx_dummy <= 4 && !found; gdx_dummy++) {
++			found = gdx_confirm();
+ 		}
+ 	}
++	if (!found) {
++		printf("RODIN TOUCH: no Goodix answer; touch off\n");
++		rodin_log_pin("touch IRQ", TP_PIN_IRQ);
++		rodin_log_pin("SPI1 CS", TP_PIN_SPI_CS);
++		return;
++	}
++	gdx_dummy--;            /* the loop stepped past the one that answered */
+ 	rodin_wait_ms(100);
+ 	if (gdx_read_info()) {
+ 		printf("RODIN TOUCH: no usable IC info; touch off\n");

@@ -153,8 +153,12 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN KEYS: TOPSTATUS %02x -> %02x' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: pin %u (%s) mode %u dir %s out %u in %u' > /dev/null
 # 0302 (rodin): Goodix touch over SPI1 (VTP on), volume keys as volume, previous boot's log kept, previous panic printed.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0302-rodin-touch-keys-previous-log-panic.patch"
+# 0303 changed 0302's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0302-rodin-touch-keys-previous-log-panic.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: IC info %u bytes' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: VTP enable 0x%02x -> 0x%02x' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET LOG: previous boot's log %s" > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F "SWEET PANIC: previous boot's panic log, %u bytes:" > /dev/null
+# 0303 (rodin): touch chip select polarity as Linux (CS_POL set selects), both polarities and read prefixes tried.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0303-rodin-touch-cs-polarity.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: confirm (CS_POL %u selects' > /dev/null

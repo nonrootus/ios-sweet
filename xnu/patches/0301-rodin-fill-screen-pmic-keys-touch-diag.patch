@@ -295,25 +295,25 @@ index 0000000..3b1743a
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 58176d6..d1fc365 100644
+index 58176d6..ffea638 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -53,6 +53,7 @@ static void sweet_log_start(void);
+@@ -51,6 +51,7 @@ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void sweet_log_start(void);
  extern void sweet_sample_start(void);
++extern void rodin_input_init(void);
  extern void sweet_keys_init(void);
  extern void sweet_touch_init(void);
-+extern void rodin_input_init(void);
  extern void sweet_usb_probe(void);
- extern void sweet_gpu_probe(void);
- extern void sweet_gpu_memory_probe(void);
-@@ -670,6 +671,7 @@ sweet_ufs_init(void)
+@@ -667,6 +668,7 @@ sweet_ufs_init(void)
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_sample_start();
++	rodin_input_init();	/* Poco X7 Pro, boot-arg rodininput=1 */
  	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
  	sweet_keys_init();
  	sweet_touch_init();
-+	rodin_input_init();	/* Poco X7 Pro, boot-arg rodininput=1 */
- 	sweet_usb_probe();
- 	sweet_gpu_probe();
- 	sweet_gpu_memory_probe();
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 index 771ce05..8cc2501 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp

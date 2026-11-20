@@ -1,0 +1,276 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 64c8b1d..66dccf7 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -631,14 +631,31 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 	pin_out(TP_PIN_RESET, true);
+ 	rodin_wait_ms(4);
+ 	rodin_touch_spi_init(mhz * 1000000u);
+-	rodin_wait_ms(20);
+-	/* CS polarity as Linux first, then the other; 3 dummy bytes (Berlin-B/D), then 4 (Berlin-A). */
++	rodin_wait_ms(100);     /* Xiaomi brl_power_on: reset high, then 100 ms before any access */
++	/*
++	 * CS polarity (as Linux first) and read prefix (3 dummy bytes, Berlin-B/D; then 4, Berlin-A),
++	 * found by READING the firmware version ("BERLIN" ROM id). xnu10-12 first wrote 8 x 0xAA to the
++	 * boot option (Linux brl_dev_confirm) and the chip never reported a touch; Xiaomi's
++	 * goodix_9916r power-on writes nothing. rodintouchconfirm=1 brings the old confirm back.
++	 */
++	int confirm = 0;
++	PE_parse_boot_argn("rodintouchconfirm", &confirm, sizeof(confirm));
++	uint8_t fwv[24];
+ 	bool found = false;
+ 	for (int c = 0; c < 2 && !found; c++) {
+ 		spi_cs_on = c ? 0 : SPI_CMD_CS_POL;
+ 		wr32(spi, SPI_CMD, (rd32(spi, SPI_CMD) & ~SPI_CMD_CS_POL) | (spi_cs_on ^ SPI_CMD_CS_POL));
+ 		for (gdx_dummy = 3; gdx_dummy <= 4 && !found; gdx_dummy++) {
+-			found = gdx_confirm();
++			if (confirm) {
++				found = gdx_confirm();
++				continue;
++			}
++			bzero(fwv, sizeof(fwv));
++			int e = gdx_read(0x10014, fwv, sizeof(fwv));
++			found = e == 0 && memcmp(fwv, "BERLIN", 6) == 0;
++			printf("RODIN TOUCH: version read (CS_POL %u selects, %u dummy) err %d: %02x %02x %02x %02x %02x %02x%s\n",
++			    spi_cs_on ? 1u : 0u, gdx_dummy, e, fwv[0], fwv[1], fwv[2], fwv[3], fwv[4], fwv[5],
++			    found ? " = BERLIN" : "");
+ 		}
+ 	}
+ 	if (!found) {
+@@ -648,12 +665,15 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 		return;
+ 	}
+ 	gdx_dummy--;            /* the loop stepped past the one that answered */
++	/* As Android when the panel turns on (brl_resume -> brl_reset): reset low 2 ms, high, 100 ms. */
++	pin_out(TP_PIN_RESET, false);
++	rodin_wait_ms(2);
++	pin_out(TP_PIN_RESET, true);
+ 	rodin_wait_ms(100);
+ 	if (gdx_read_info()) {
+ 		printf("RODIN TOUCH: no usable IC info; touch off\n");
+ 		return;
+ 	}
+-	uint8_t fwv[24];
+ 	if (gdx_read(0x10014, fwv, sizeof(fwv)) == 0) {      /* FW_VERSION_INFO_ADDR: rom pid/vid, patch pid/vid */
+ 		printf("RODIN TOUCH: firmware rom %c%c%c%c%c%c %02x%02x%02x patch %c%c%c%c%c%c%c%c %02x%02x%02x%02x sensor %u\n",
+ 		    fwv[0], fwv[1], fwv[2], fwv[3], fwv[4], fwv[5], fwv[6], fwv[7], fwv[8],
+@@ -688,9 +708,6 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 			    polls, heads, clears, irq_low, hd[0], hd[1], hd[2], hd[3], hd[4], hd[5], hd[6], hd[7], e2,
+ 			    st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11], e1);
+ 		}
+-		if (!irq && polls % 25 != 0) {
+-			continue;
+-		}
+ 		if (gdx_read(gdx_touch_addr, buf, GDX_HEAD + 2 * GDX_POINT + 2)) {
+ 			if (errors++ % 1000 == 0) {
+ 				printf("RODIN TOUCH: read error\n");
+@@ -799,8 +816,14 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ #define I2C_START_RS_MUL_TRIG   (1u << 14)
+ #define BQ28Z610_ADDR           0x55u
+ 
+-static vm_offset_t i2c10, impc;
+-static bool batt_ready, batt_off;
++struct rodin_i2c {
++	const char *name;
++	uint32_t pa, gate_pa, gate_bit;         /* controller; imp_iic_wrap clock gate (STA +0xE00, CLR +0xE04) */
++	vm_offset_t base, gate;
++	int state;                              /* 0 untried, 1 ready, -1 unusable */
++};
++static struct rodin_i2c i2c_gauge = { "I2C10", 0x11280000u, 0x11284000u, 0, 0, 0, 0 };    /* bq28z610 */
++static struct rodin_i2c i2c_chg = { "I2C5", 0x11f01000u, 0x11f02000u, 1, 0, 0, 0 };       /* MT6375 */
+ static unsigned batt_reads, batt_errors;
+ 
+ static uint16_t
+@@ -819,48 +842,77 @@ wr16(vm_offset_t base, uint32_t off, uint16_t v)
+ 	__asm__ volatile ("dsb osh" ::: "memory");
+ }
+ 
++/* Map the bus, ungate its clock if needed (as Linux clk_prepare_enable), and use it only if the
++ * bootloader left its timing set up. */
++static bool
++i2c_bus_ready(struct rodin_i2c *b)
++{
++	if (b->state) {
++		return b->state > 0;
++	}
++	b->base = ml_io_map(b->pa, 0x1000);
++	b->gate = ml_io_map(b->gate_pa, 0x1000);
++	if (!b->base || !b->gate) {
++		b->state = -1;
++		return false;
++	}
++	uint32_t cg = rd32(b->gate, 0xe00), bit = 1u << b->gate_bit;
++	if (cg & bit) {
++		wr32(b->gate, 0xe04, bit);
++	}
++	uint16_t timing = rd16(b->base, I2C_TIMING);
++	printf("RODIN BATTERY: %s clock gate 0x%x%s, TIMING 0x%04x CONTROL 0x%04x LTIMING 0x%04x\n", b->name,
++	    cg, (cg & bit) ? " (was gated: ungated)" : "", timing, rd16(b->base, I2C_CONTROL), rd16(b->base, 0x2c));
++	b->state = timing ? 1 : -1;
++	if (!timing) {
++		printf("RODIN BATTERY: %s not set up by the bootloader: not used\n", b->name);
++	}
++	return timing != 0;
++}
++
+ /* Write one command byte, repeated start, read n (<= 16) bytes. */
+ static int
+-i2c10_wrrd(uint8_t addr7, uint8_t cmd, uint8_t *out, uint32_t n)
++i2c_wrrd(struct rodin_i2c *b, uint8_t addr7, uint8_t cmd, uint8_t *out, uint32_t n)
+ {
++	vm_offset_t r = b->base;
+ 	uint16_t st = 0;
+ 	unsigned i;
+ 
+-	if (n == 0 || n > 16) {
++	if (n == 0 || n > 16 || b->state <= 0) {
+ 		return EINVAL;
+ 	}
+-	uint16_t ctl = rd16(i2c10, I2C_CONTROL) &
++	uint16_t ctl = rd16(r, I2C_CONTROL) &
+ 	    (uint16_t)~(I2C_CTL_DIR_CHANGE | I2C_CTL_RS | I2C_CTL_DMA_EN | I2C_CTL_DMAACK_EN | I2C_CTL_ASYNC);
+-	wr16(i2c10, I2C_CONTROL, (uint16_t)(ctl | I2C_CTL_CLK_EXT_EN | I2C_CTL_DIR_CHANGE | I2C_CTL_RS));
+-	wr16(i2c10, I2C_SLAVE_ADDR1, (uint16_t)(addr7 << 1));
+-	wr16(i2c10, I2C_INTR_STAT, I2C_ST_RS_TRANSFER | I2C_ST_CONFERR | I2C_ST_HS_NACKERR | I2C_ST_ACKERR |
++	wr16(r, I2C_CONTROL, (uint16_t)(ctl | I2C_CTL_CLK_EXT_EN | I2C_CTL_DIR_CHANGE | I2C_CTL_RS));
++	wr16(r, I2C_SLAVE_ADDR1, (uint16_t)(addr7 << 1));
++	wr16(r, I2C_INTR_STAT, I2C_ST_RS_TRANSFER | I2C_ST_CONFERR | I2C_ST_HS_NACKERR | I2C_ST_ACKERR |
+ 	    I2C_ST_ARB_LOST | I2C_ST_COMP);
+-	wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
+-	wr16(i2c10, I2C_INTR_MASK, 0);
+-	wr16(i2c10, I2C_TRANSFER_LEN, 1);
+-	wr16(i2c10, I2C_TRANSFER_LEN_AUX, (uint16_t)n);
+-	wr16(i2c10, I2C_TRANSAC_LEN, 2);
++	wr16(r, I2C_FIFO_ADDR_CLR, 1);
++	wr16(r, I2C_INTR_MASK, 0);
++	wr16(r, I2C_TRANSFER_LEN, 1);
++	wr16(r, I2C_TRANSFER_LEN_AUX, (uint16_t)n);
++	wr16(r, I2C_TRANSAC_LEN, 2);
+ 	__asm__ volatile ("dmb oshst" ::: "memory");
+-	*(volatile uint8_t *)(i2c10 + I2C_DATA_PORT) = cmd;
+-	wr16(i2c10, I2C_START, I2C_START_TRANSAC | I2C_START_RS_MUL_TRIG);
++	*(volatile uint8_t *)(r + I2C_DATA_PORT) = cmd;
++	wr16(r, I2C_START, I2C_START_TRANSAC | I2C_START_RS_MUL_TRIG);
+ 	for (i = 0; i < 4000; i++) {    /* 20 ms */
+-		st = rd16(i2c10, I2C_INTR_STAT);
++		st = rd16(r, I2C_INTR_STAT);
+ 		if (st & (I2C_ST_COMP | I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST)) {
+ 			break;
+ 		}
+ 		delay(5);
+ 	}
+-	wr16(i2c10, I2C_INTR_STAT, st);
++	wr16(r, I2C_INTR_STAT, st);
+ 	if (!(st & (I2C_ST_COMP | I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST))) {
+-		wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
++		wr16(r, I2C_FIFO_ADDR_CLR, 1);
+ 		return ETIMEDOUT;
+ 	}
+ 	if (st & (I2C_ST_ACKERR | I2C_ST_HS_NACKERR | I2C_ST_ARB_LOST)) {
+-		wr16(i2c10, I2C_FIFO_ADDR_CLR, 1);
++		wr16(r, I2C_FIFO_ADDR_CLR, 1);
+ 		return ENXIO;
+ 	}
+ 	for (i = 0; i < n; i++) {
+-		out[i] = *(volatile uint8_t *)(i2c10 + I2C_DATA_PORT);
++		out[i] = *(volatile uint8_t *)(r + I2C_DATA_PORT);
+ 	}
+ 	return 0;
+ }
+@@ -868,41 +920,55 @@ i2c10_wrrd(uint8_t addr7, uint8_t cmd, uint8_t *out, uint32_t n)
+ static int
+ bq_word(uint8_t cmd, uint16_t *v)
+ {
+-	uint8_t b[2];
+-	int e = i2c10_wrrd(BQ28Z610_ADDR, cmd, b, 2);
++	uint8_t b[2] = { 0, 0 };
++	int e = i2c_wrrd(&i2c_gauge, BQ28Z610_ADDR, cmd, b, 2);
+ 	*v = (uint16_t)(b[0] | (b[1] << 8));
+ 	return e;
+ }
+ 
++/*
++ * Charger state for the log (MT6375 at 0x34 on I2C5; registers 0x1xx of mt6375-charger.c are bank 1,
++ * i.e. command byte = low byte): read only. Logged with the first battery read and every 5 min.
++ */
++static void
++rodin_charger_log(void)
++{
++	static const char *const stat_names[16] = {
++		"sleep", "vbus ready", "trickle", "pre-charge", "fast charge", "end of charge", "background",
++		"done", "fault", "?9", "?10", "?11", "?12", "?13", "?14", "otg",
++	};
++	uint8_t vid = 0, top1 = 0, aicr = 0, mivr = 0, vchg = 0, ichg = 0, wdt = 0, stat = 0;
++	if (!i2c_bus_ready(&i2c_chg)) {
++		return;
++	}
++	int e = i2c_wrrd(&i2c_chg, 0x34, 0x00, &vid, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x20, &top1, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x22, &aicr, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x23, &mivr, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x25, &vchg, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x26, &ichg, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x2a, &wdt, 1);
++	e = e ? e : i2c_wrrd(&i2c_chg, 0x34, 0x34, &stat, 1);
++	if (e) {
++		printf("RODIN CHARGER: MT6375 read error %d\n", e);
++		return;
++	}
++	unsigned a = aicr & 0x7fu, c = ichg & 0x3fu;
++	printf("RODIN CHARGER: MT6375 vid 0x%02x, %s, CHG_EN %u BUCK %u HZ %u power-good %u, input limit %u mA%s, "
++	    "charge %u mA, CV %u mV, MIVR %u mV, charger WDT %s\n", vid, stat_names[stat & 15u], top1 & 1u,
++	    (top1 >> 1) & 1u, (top1 >> 3) & 1u, (top1 >> 7) & 1u, a >= 2 ? 100 + (a - 2) * 25 : 100,
++	    (aicr & 0x80u) ? " (ILIM pin)" : "", c >= 6 ? 300 + (c - 6) * 50 : 300, 3900 + (vchg & 0x7fu) * 10,
++	    3900 + (mivr & 0x7fu) * 100, (wdt & 8u) ? "on" : "off");
++}
++
+ int rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin);
+ 
+ int
+ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin)
+ {
+-	if (batt_off) {
++	if (!i2c_bus_ready(&i2c_gauge)) {
+ 		return ENODEV;
+ 	}
+-	if (!batt_ready) {
+-		i2c10 = ml_io_map(I2C10_PA, 0x1000);
+-		impc = ml_io_map(IMPC_PA, 0x1000);
+-		if (!i2c10 || !impc) {
+-			batt_off = true;
+-			return ENOMEM;
+-		}
+-		uint32_t cg = rd32(impc, 0xe00);
+-		if (cg & 1u) {
+-			wr32(impc, 0xe04, 1u);  /* ungate I2C10, as Linux clk_prepare_enable would */
+-		}
+-		uint16_t timing = rd16(i2c10, I2C_TIMING);
+-		printf("RODIN BATTERY: I2C10 clock gate 0x%x%s, TIMING 0x%04x CONTROL 0x%04x LTIMING 0x%04x\n",
+-		    cg, (cg & 1u) ? " (was gated: ungated)" : "", timing, rd16(i2c10, I2C_CONTROL), rd16(i2c10, 0x2c));
+-		if (timing == 0) {
+-			printf("RODIN BATTERY: I2C10 not set up by the bootloader; battery stays static\n");
+-			batt_off = true;
+-			return ENODEV;
+-		}
+-		batt_ready = true;
+-	}
+ 	uint16_t soc = 0, volt = 0, curr = 0, temp = 0;
+ 	int e = bq_word(0x2c, &soc);            /* RelativeStateOfCharge, % */
+ 	if (!e) {
+@@ -922,7 +988,7 @@ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvi
+ 		}
+ 		if (batt_errors >= 10 && batt_reads == 0) {
+ 			printf("RODIN BATTERY: gauge not answering; battery stays static\n");
+-			batt_off = true;
++			i2c_gauge.state = -1;
+ 		}
+ 		return e ? e : EINVAL;
+ 	}
+@@ -934,6 +1000,7 @@ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvi
+ 		int c10 = (int)temp - 2731, a10 = c10 < 0 ? -c10 : c10;
+ 		printf("RODIN BATTERY: %u%%, %u mV, %d mA, %s%d.%d C\n", soc, volt, (int)(int16_t)curr,
+ 		    c10 < 0 ? "-" : "", a10 / 10, a10 % 10);
++		rodin_charger_log();
+ 	}
+ 	return 0;
+ }

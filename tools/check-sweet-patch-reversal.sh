@@ -168,5 +168,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0304-rodin-touch-diagnostics.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: IC info misc: cmd 0x%x' > /dev/null
 # 0305 (rodin): touch sync byte cleared after every IRQ (Xiaomi goodix_9916r); bq28z610 gauge over I2C10 for SweetBattery.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0305-rodin-touch-sync-battery-gauge.patch"
+# 0306 changed 0305's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0305-rodin-touch-sync-battery-gauge.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN BATTERY: I2C10 clock gate' > /dev/null
+# 0306 (rodin): touch probed by reading the version (no boot-option write), Android-style reset; MT6375 charger state logged.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0306-rodin-touch-no-confirm-reset-charger-log.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CHARGER: MT6375 vid' > /dev/null

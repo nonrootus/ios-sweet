@@ -1,0 +1,220 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index c216c93..35118c8 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -128,10 +128,27 @@ rodin_pmic_readable(uint8_t sid, uint16_t addr)
+ 	}
+ }
+ 
+-/* The only PMIC register this file may write: the VTP enable (its other bits are kept). */
++/*
++ * The only PMIC registers this file may write: the VTP enable (its other bits are kept) and, for
++ * Wi-Fi step 2 (rodinwifion=1, owner's yes 2026-11-21), the connectivity block's common supplies on
++ * MT6363 as conninfra's mt6899_pmic.c switches them on: VRFIO18 voltage, op-enable and enable,
++ * VCN13 op-enable and enable, the VS2 buck voltage (VBOCK0) and its voter set register.
++ */
++#define MT6363_VRFIO18_EN       0x1bcd  /* bit 0 enable, bit 1 low power */
++#define MT6363_VRFIO18_OPEN     0x1bd4  /* bit 7 SW_OP_EN */
++#define MT6363_VRFIO18_VOSEL    0x1f2c  /* bits 3:0, ldo_volt_table3: 11 = 1.7 V */
++#define MT6363_VCN13_EN         0x1d07
++#define MT6363_VCN13_OPEN       0x1d16
++#define MT6363_VBOCK0           0x024c  /* VS2 buck voltage: 0x74 = 1.45 V */
++#define MT6363_VS2_VOTER_SET    0x149b  /* bit 4 = connsys' vote */
+ static bool
+ rodin_pmic_writable(uint8_t sid, uint16_t addr)
+ {
++	if (sid == MT6363_SID) {
++		return addr == MT6363_VRFIO18_EN || addr == MT6363_VRFIO18_OPEN || addr == MT6363_VRFIO18_VOSEL ||
++		       addr == MT6363_VCN13_EN || addr == MT6363_VCN13_OPEN || addr == MT6363_VBOCK0 ||
++		       addr == MT6363_VS2_VOTER_SET;
++	}
+ 	return sid == MT6368_SID && addr == MT6368_LDO_VTP_EN;
+ }
+ 
+@@ -263,6 +280,8 @@ rodin_touch_diag(void)
+ 	rodin_log_pin("touch reset", 134);
+ }
+ 
++static volatile bool rodin_pmif_hold;      /* set by the Wi-Fi thread while it uses the PMIF channel */
++
+ static void
+ rodin_keys_thread(void *arg, wait_result_t result)
+ {
+@@ -284,6 +303,10 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ 	hid[2] = 1;
+ 	for (;;) {
+ 		uint8_t v = 0;
++		if (rodin_pmif_hold) {
++			rodin_wait_ms(20);
++			continue;
++		}
+ 		int e = rodin_pmic_read(MT6363_SID, MT6363_TOPSTATUS, &v);
+ 		if (e) {
+ 			if ((errors++ % 500u) == 0) {
+@@ -1597,12 +1620,147 @@ rodin_wifi_diag(void)
+ 	}
+ }
+ 
++/*
++ * ---- Wi-Fi step 2: the connectivity block on, up to its chip id (rodinwifion=1) ----
++ * Our own code after the sequence of conninfra platform/mt6899 (consys_hw_pwr_on: clock buffer,
++ * PMIC common supplies, D-die <-> A-die pinmux, "conn_infra_on" power domain and bus protection,
++ * chip id polling); the A-die, PLL and low-power steps come later. Register facts from Xiaomi's
++ * bsp-rodin-v-oss (mt6899_pos_gen.c, mt6899_pmic.c, mt6899_soc.c), DT /consys@18000000.
++ */
++#define CONN_CKSYS_PA           0x10000000u     /* +0x1f8 bit 16: conn_von_top_host_ck_req_en off */
++#define CONN_INFRACFG_AO_PA     0x10001000u
++#define CONN_IOCFG_RT_PA        0x11b50000u
++#define CONN_SPM_PA             0x1c001000u
++#define CONN_INFRA_CFG_PA       0x18011000u     /* +0: IP version */
++#define CONN_HW_VER             0x02050403u
++
++static int
++rodin_pmic_update(uint8_t sid, uint16_t addr, uint8_t mask, uint8_t val, const char *what)
++{
++	uint8_t old = 0, now = 0;
++	int e = rodin_pmic_read(sid, addr, &old);
++	if (e == 0 && (old & mask) != val) {
++		e = rodin_pmic_write(sid, addr, (uint8_t)((old & ~mask) | val));
++	}
++	(void)rodin_pmic_read(sid, addr, &now);
++	printf("RODIN WIFI: PMIC %s 0x%04x: 0x%02x -> 0x%02x (err %d)\n", what, addr, old, now, e);
++	return e;
++}
++
++static bool
++rodin_poll_bit(vm_offset_t base, uint32_t off, uint32_t bit, uint32_t want, uint32_t tries, uint32_t us)
++{
++	for (uint32_t i = 0; i < tries; i++) {
++		if (((rd32(base, off) >> bit) & 1u) == want) {
++			return true;
++		}
++		delay(us);
++	}
++	return ((rd32(base, off) >> bit) & 1u) == want;
++}
++
+ static void
+-rodin_wifi_scan_thread(void *arg, wait_result_t result)
++rodin_wifi_power_on(void)
+ {
+-	(void)arg;
++	vm_offset_t ck = ml_io_map(CONN_CKSYS_PA, 0x1000), ifr = ml_io_map(CONN_INFRACFG_AO_PA, 0x1000);
++	vm_offset_t iocfg = ml_io_map(CONN_IOCFG_RT_PA, 0x1000), spm = ml_io_map(CONN_SPM_PA, 0x1000);
++	if (!ck || !ifr || !iocfg || !spm || !gpio) {
++		printf("RODIN WIFI: power on: no mapping\n");
++		return;
++	}
++	uint32_t pwr = rd32(spm, 0xe04);
++	printf("RODIN WIFI: power on: CONN_PWR_CON 0x%08x before\n", pwr);
++	if ((pwr >> 30) == 3 && (pwr & 1u)) {
++		printf("RODIN WIFI: power on: conn_infra_on already powered\n");
++	} else {
++		/* clock buffer: conn_von_top_host_ck_req_en off */
++		wr32(ck, 0x1f8, rd32(ck, 0x1f8) | (1u << 16));
++		/* PMIC common supplies, as consys_plt_pmic_common_power_ctrl_mt6899 */
++		(void)rodin_pmic_update(MT6363_SID, MT6363_VRFIO18_VOSEL, 0x0f, 11, "VRFIO18 vosel 1.7 V");
++		(void)rodin_pmic_write(MT6363_SID, MT6363_VBOCK0, 0x74);
++		delay(15);
++		(void)rodin_pmic_write(MT6363_SID, MT6363_VS2_VOTER_SET, 0x10);
++		(void)rodin_pmic_update(MT6363_SID, MT6363_VRFIO18_OPEN, 0x80, 0x80, "VRFIO18 sw_op_en");
++		(void)rodin_pmic_update(MT6363_SID, MT6363_VRFIO18_EN, 0x03, 0x01, "VRFIO18 on");
++		(void)rodin_pmic_update(MT6363_SID, MT6363_VCN13_OPEN, 0x80, 0x80, "VCN13 sw_op_en");
++		(void)rodin_pmic_update(MT6363_SID, MT6363_VCN13_EN, 0x03, 0x01, "VCN13 on");
++		uint8_t vs2 = 0, vbock = 0;
++		(void)rodin_pmic_read(MT6363_SID, 0x149a, &vs2);
++		(void)rodin_pmic_read(MT6363_SID, MT6363_VBOCK0, &vbock);
++		printf("RODIN WIFI: PMIC VS2 voter 0x%02x, VBOCK0 0x%02x\n", vs2, vbock);
++		delay(1000);
++		/* D-die <-> A-die interface pins (GPIO 192..202 mode 1), driving 001, no pull */
++		wr32(gpio, 0x480, (rd32(gpio, 0x480) & ~0x77777777u) | 0x11111111u);
++		wr32(gpio, 0x490, (rd32(gpio, 0x490) & ~0x777u) | 0x111u);
++		wr32(iocfg, 0x000, (rd32(iocfg, 0x000) & ~0x3fff8fffu) | 0x09248249u);
++		wr32(iocfg, 0x070, rd32(iocfg, 0x070) & ~0xau);
++		/* "conn_infra_on" power domain (SPM), as consys_conninfra_on_power_ctrl_mt6899_gen */
++		wr32(spm, 0x000, (rd32(spm, 0x000) & ~0xffff0001u) | 0x0b160001u);
++		wr32(spm, 0xe04, rd32(spm, 0xe04) | (1u << 2));
++		bool ack1 = rodin_poll_bit(spm, 0xe04, 30, 1, 10, 500);
++		wr32(spm, 0xe04, rd32(spm, 0xe04) | (1u << 3));
++		bool ack2 = rodin_poll_bit(spm, 0xe04, 31, 1, 10, 500);
++		wr32(spm, 0xe04, rd32(spm, 0xe04) & ~(1u << 4));         /* conn_clk_dis = 0 */
++		delay(1);
++		wr32(spm, 0xe04, rd32(spm, 0xe04) & ~(1u << 1));         /* isolation off */
++		wr32(spm, 0xe04, rd32(spm, 0xe04) | (1u << 0));          /* ap_sw_rst_b = 1 */
++		delay(500);
++		printf("RODIN WIFI: power on: CONN_PWR_CON 0x%08x, ack %d/%d\n", rd32(spm, 0xe04), ack1, ack2);
++		if (!ack1 || !ack2) {
++			printf("RODIN WIFI: power on: no power ack, stopping before the bus\n");
++			return;
++		}
++	}
++	printf("RODIN WIFI: power on: releasing the bus protection in 2.5 s\n");
++	rodin_wait_ms(2500);
++	/* bus sleep protection off: AP2CONN AHB RX, AP2CONN AHB TX, CONN2AP AXI RX, CONN2AP AXI TX.
++	 * The _CLR registers take a 1 for the bit to clear; nothing else is written to them. */
++	wr32(ifr, 0xc98, 1u << 0);
++	bool rx = rodin_poll_bit(ifr, 0xc9c, 0, 0, 100, 500);
++	wr32(ifr, 0xc48, 1u << 25);
++	bool tx = rodin_poll_bit(ifr, 0xc4c, 25, 0, 100, 500);
++	wr32(ifr, 0xc48, 1u << 26);
++	wr32(ifr, 0xc98, 1u << 1);
++	delay(5000);
++	printf("RODIN WIFI: bus protection off: AP2CONN rx %d tx %d; INFRASYS sta 0x%08x, MCU_CONNSYS sta 0x%08x\n",
++	    rx, tx, rd32(ifr, 0xc4c), rd32(ifr, 0xc9c));
++	if (!rx || !tx) {
++		printf("RODIN WIFI: bus protection still on: the block's registers are not read\n");
++		return;
++	}
++	printf("RODIN WIFI: power on: reading the chip id in 2.5 s\n");
++	rodin_wait_ms(2500);
++	vm_offset_t cfg = ml_io_map(CONN_INFRA_CFG_PA, 0x1000);
++	if (!cfg) {
++		return;
++	}
++	uint32_t id = 0;
++	for (int i = 0; i < 11; i++) {
++		id = rd32(cfg, 0x000);
++		if (id == CONN_HW_VER) {
++			break;
++		}
++		delay(1000);
++	}
++	printf("RODIN WIFI: CONN_INFRA IP version 0x%08x (expected 0x%08x): %s\n", id, CONN_HW_VER,
++	    id == CONN_HW_VER ? "THE CONNECTIVITY BLOCK ANSWERS" : "no answer");
++}
++
++static void
++rodin_wifi_thread(void *arg, wait_result_t result)
++{
++	uintptr_t what = (uintptr_t)arg;     /* 1: power on, 2: RAM scan */
+ 	(void)result;
+ 	rodin_wait_ms(15000);
++	if (what & 1) {
++		rodin_pmif_hold = true;
++		rodin_wait_ms(60);              /* a keys read in flight ends */
++		rodin_wifi_power_on();
++		rodin_pmif_hold = false;
++	}
++	if (!(what & 2)) {
++		return;
++	}
+ 	printf("RODIN WIFI: scanning the connsys EMI and the Wi-Fi DMA pool\n");
+ 	rodin_wifi_scan_ram("connsys EMI", 0x8de00000ull, 0xc00000);
+ 	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);
+@@ -1638,9 +1796,14 @@ rodin_input_init(void)
+ 	rodin_touch_diag();
+ 	int wifidiag = 0;
+ 	PE_parse_boot_argn("rodinwifidiag", &wifidiag, sizeof(wifidiag));
++	int wifion = 0;
++	PE_parse_boot_argn("rodinwifion", &wifion, sizeof(wifion));
+ 	if (wifidiag) {
+-		rodin_wifi_diag();     /* before the keys thread: it shares the PMIF channel */
+-		if (kernel_thread_start(rodin_wifi_scan_thread, NULL, &thread) == KERN_SUCCESS) {
++		rodin_wifi_diag();     /* the state before; before the keys thread (shared PMIF channel) */
++	}
++	if (wifion || wifidiag) {
++		void *what = (void *)(uintptr_t)((wifion ? 1 : 0) | (wifidiag ? 2 : 0));
++		if (kernel_thread_start(rodin_wifi_thread, what, &thread) == KERN_SUCCESS) {
+ 			thread_deallocate(thread);
+ 		}
+ 	}

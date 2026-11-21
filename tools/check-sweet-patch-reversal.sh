@@ -199,5 +199,9 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v19: nodes %s %u, row stride %u' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: SPM CONN_PWR_CON 0x%08x' > /dev/null
 # 0313 (rodin): Wi-Fi RAM scan in 64 KiB windows, in a thread 15 s after boot (xnu19 panicked mapping 12 MiB).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0313-rodin-wifi-scan-windows.patch"
+# 0314 changed 0313's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0313-rodin-wifi-scan-windows.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: scanning the connsys EMI and the Wi-Fi DMA pool' > /dev/null
+# 0314 (rodin): Wi-Fi step 2 (rodinwifion=1): PMIC common supplies, pinmux, conn_infra_on domain, bus protection, chip id.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0314-rodin-wifi-power-on.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: CONN_INFRA IP version 0x%08x (expected 0x%08x): %s' > /dev/null

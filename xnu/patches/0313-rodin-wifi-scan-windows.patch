@@ -1,0 +1,68 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index c7271fc..c216c93 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -39,6 +39,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+ extern void sweet_hid_touch_norm(int finger, int down, int32_t nx, int32_t ny, int edge);
+ void rodin_input_init(void);
+@@ -1552,20 +1553,22 @@ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvi
+ static void
+ rodin_wifi_scan_ram(const char *what, uint64_t pa, uint32_t size)
+ {
+-	vm_offset_t va = ml_io_map((vm_offset_t)pa, size);
+-	if (!va) {
+-		printf("RODIN WIFI: %s: no mapping\n", what);
+-		return;
+-	}
+ 	uint32_t used = 0, shown = 0;
++	/* One 64 KiB window at a time (xnu19: ml_io_map of 12 MiB at once panicked in kmem_alloc). */
+ 	for (uint32_t o = 0; o < size; o += 0x10000) {
+-		const volatile uint32_t *w = (const volatile uint32_t *)(va + o);
++		vm_offset_t va = ml_io_map((vm_offset_t)(pa + o), 0x10000);
++		if (!va) {
++			printf("RODIN WIFI: %s +0x%06x: no mapping\n", what, o);
++			return;
++		}
++		const volatile uint32_t *w = (const volatile uint32_t *)va;
+ 		uint32_t a = w[0], b = w[1], c = w[2], d = w[3];
+ 		bool any = (a | b | c | d) != 0;
+ 		for (uint32_t k = 0x1000; k < 0x10000 && !any; k += 0x1000) {
+-			const volatile uint32_t *q = (const volatile uint32_t *)(va + o + k);
++			const volatile uint32_t *q = (const volatile uint32_t *)(va + k);
+ 			any = (q[0] | q[1] | q[2] | q[3]) != 0;
+ 		}
++		ml_io_unmap(va, 0x10000);
+ 		if (any) {
+ 			used++;
+ 			if (shown++ < 48) {
+@@ -1592,6 +1595,15 @@ rodin_wifi_diag(void)
+ 		    "CONNSYS0 en 0x%08x sta 0x%08x\n", rd32(spm, 0xe04), rd32(ifr, 0x000), rd32(ifr, 0x00c),
+ 		    rd32(ifr, 0x1c0), rd32(ifr, 0x1cc));
+ 	}
++}
++
++static void
++rodin_wifi_scan_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	rodin_wait_ms(15000);
++	printf("RODIN WIFI: scanning the connsys EMI and the Wi-Fi DMA pool\n");
+ 	rodin_wifi_scan_ram("connsys EMI", 0x8de00000ull, 0xc00000);
+ 	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);
+ }
+@@ -1628,6 +1640,9 @@ rodin_input_init(void)
+ 	PE_parse_boot_argn("rodinwifidiag", &wifidiag, sizeof(wifidiag));
+ 	if (wifidiag) {
+ 		rodin_wifi_diag();     /* before the keys thread: it shares the PMIF channel */
++		if (kernel_thread_start(rodin_wifi_scan_thread, NULL, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		}
+ 	}
+ 	int touch = 0;
+ 	PE_parse_boot_argn("rodintouch", &touch, sizeof(touch));

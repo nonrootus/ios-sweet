@@ -194,6 +194,10 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 # 0312 changed 0311's rodin_input.c (and its version line).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0311-rodin-thp-noise-hysteresis.patch"
 # 0312 (rodin): Wi-Fi step 1, read-only (rodinwifidiag=1); THP v19: new touches debounced.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0312-rodin-wifi-diag-touch-debounce.patch"
+# 0313 changed 0312's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0312-rodin-wifi-diag-touch-debounce.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v19: nodes %s %u, row stride %u' > /dev/null
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: SPM CONN_PWR_CON 0x%08x' > /dev/null
+# 0313 (rodin): Wi-Fi RAM scan in 64 KiB windows, in a thread 15 s after boot (xnu19 panicked mapping 12 MiB).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0313-rodin-wifi-scan-windows.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: scanning the connsys EMI and the Wi-Fi DMA pool' > /dev/null

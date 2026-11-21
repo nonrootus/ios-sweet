@@ -1,0 +1,112 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 495452e..b88a53e 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -661,23 +661,36 @@ static void
+ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ {
+ 	const uint32_t R = gdx_drv, C = gdx_sen, N = R * C;
+-	const uint32_t moff = gdx_frame_head_len + gdx_attr_len + gdx_log_len + 8;
+-	const uint32_t need = moff + N * 2;
++	/* xnu16: where the nodes sit in a streamed frame is set by boot-args, so a new layout needs no new
++	 * kernel: rodinthpoff = byte offset of node (0,0) from the frame start, rodinthprs = nodes per stored
++	 * row (0: C, or R with rodintouchlayout=1), rodinthpbe=1 big-endian values, rodinthpdump = dumps. */
++	uint32_t moff = gdx_frame_head_len + gdx_attr_len + gdx_log_len + 8, rs = 0;
++	int be = 0, ndump = 26, report = 0;
++	/* xnu14: the mutual block is not where the debug frame mode puts it (phantom touches): until the
++	 * streamed layout is known, touches go to iOS only with rodinthpreport=1, and frames are dumped. */
++	PE_parse_boot_argn("rodinthpreport", &report, sizeof(report));
++	PE_parse_boot_argn("rodinthpoff", &moff, sizeof(moff));
++	PE_parse_boot_argn("rodinthprs", &rs, sizeof(rs));
++	PE_parse_boot_argn("rodinthpbe", &be, sizeof(be));
++	PE_parse_boot_argn("rodinthpdump", &ndump, sizeof(ndump));
++	const uint32_t inner = layout ? R : C, outer = layout ? C : R;
++	if (rs == 0) {
++		rs = inner;
++	}
++	const uint32_t need = N ? moff + ((outer - 1) * rs + inner) * 2 : 0;
+ 	bool down[GDX_FINGERS] = { false }, edge[GDX_FINGERS] = { false };
+ 	int32_t lx[GDX_FINGERS] = { 0 }, ly[GDX_FINGERS] = { 0 };
+ 	int32_t lrf[GDX_FINGERS] = { 0 }, lcf[GDX_FINGERS] = { 0 };    /* last position, nodes x256 */
+ 	uint32_t polls = 0, frames = 0, bad = 0, reports = 0, downs = 0, peaks_seen = 0, dumps = 0;
+-	int report = 0;
+-	/* xnu14: the mutual block is not where the debug frame mode puts it (phantom touches): until the
+-	 * streamed layout is known, touches go to iOS only with rodinthpreport=1, and frames are dumped. */
+-	PE_parse_boot_argn("rodinthpreport", &report, sizeof(report));
+ 	int32_t noise16 = 16 * 20, sign = 0, maxpos = 0, maxneg = 0;
+ 	static const uint8_t zero = 0;
+ 
+ 	printf("RODIN TOUCH: THP: %ux%u nodes, frames at 0x%x, head %u attr %u log %u mutual %u bytes; reading %u\n",
+ 	    R, C, gdx_frame_addr, gdx_frame_head_len, gdx_attr_len, gdx_log_len, gdx_mutual_len, need);
++	printf("RODIN THP layout: offset %u, row stride %u nodes, %s rows, %s-endian, %d dumps, report %d\n",
++	    moff, rs, layout ? "sensor" : "drive", be ? "big" : "little", ndump, report);
+ 	if (N == 0 || N > THP_MAX_NODES || need > GDX_MAX_LEN || gdx_mutual_len < 8 + N * 2 ||
+-	    gdx_frame_head_len < 8 || gdx_frame_head_len > 64) {
++	    gdx_frame_head_len < 8 || gdx_frame_head_len > 64 || moff < gdx_frame_head_len || rs < inner) {
+ 		printf("RODIN TOUCH: THP: unusable frame layout\n");
+ 		return;
+ 	}
+@@ -710,7 +723,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		}
+ 		frames++;
+ 		/* Full frame dumps: the first, then one every 2 s for 25 more (hold a finger on a known spot). */
+-		if (dumps < 26 && (frames == 1 || polls % 250 < 2)) {
++		if ((int)dumps < ndump && (frames == 1 || polls % 250 < 2)) {
+ 			dumps++;
+ 			printf("RODIN THP DUMP %u frame %u poll %u len %u\n", dumps, frames, polls, flen);
+ 			for (uint32_t o = 0; o < flen; o += 32) {
+@@ -734,10 +747,17 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			    m[-8], m[-7], m[-6], m[-5], m[-4], m[-3], m[-2], m[-1],
+ 			    (int16_t)(m[0] | (m[1] << 8)), (int16_t)(m[2] | (m[3] << 8)));
+ 		}
++		/* Raw node values into thp_d, row-major r * C + c (the baseline is subtracted below). */
++		for (uint32_t r = 0; r < R; r++) {
++			for (uint32_t c = 0; c < C; c++) {
++				const uint8_t *q = m + 2 * (layout ? c * rs + r : r * rs + c);
++				thp_d[r * C + c] = (int16_t)(be ? (q[0] << 8 | q[1]) : (q[0] | q[1] << 8));
++			}
++		}
+ 		/* Baseline: the mean of the first 16 frames (nothing touched at boot). */
+ 		if (frames <= 16) {
+ 			for (uint32_t i = 0; i < N; i++) {
+-				int32_t v = (int16_t)(m[2 * i] | (m[2 * i + 1] << 8));
++				int32_t v = thp_d[i];
+ 				thp_base[i] = (frames == 1 ? 0 : thp_base[i]) + v;
+ 			}
+ 			if (frames == 16) {
+@@ -752,7 +772,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		}
+ 		int32_t fpos = 0, fneg = 0;
+ 		for (uint32_t i = 0; i < N; i++) {
+-			int32_t v = (int16_t)(m[2 * i] | (m[2 * i + 1] << 8));
++			int32_t v = thp_d[i];
+ 			int32_t d = v - thp_base[i] / 16;
+ 			thp_d[i] = d;
+ 			fpos = MAX(fpos, d);
+@@ -774,7 +794,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		if (sign && fmax > thr) {
+ 			for (uint32_t r = 0; r < R; r++) {
+ 				for (uint32_t c = 0; c < C; c++) {
+-					uint32_t i = layout ? c * R + r : r * C + c;
++					uint32_t i = r * C + c;
+ 					int32_t v = sg * thp_d[i];
+ 					if (v <= thr) {
+ 						continue;
+@@ -784,7 +804,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 						for (int dc = -1; dc <= 1; dc++) {
+ 							int rr = (int)r + dr, cc = (int)c + dc;
+ 							if ((dr || dc) && rr >= 0 && cc >= 0 && rr < (int)R && cc < (int)C) {
+-								uint32_t j = layout ? (uint32_t)cc * R + (uint32_t)rr : (uint32_t)rr * C + (uint32_t)cc;
++								uint32_t j = (uint32_t)rr * C + (uint32_t)cc;
+ 								int32_t w = sg * thp_d[j];
+ 								if (w > v || (w == v && j < i)) {
+ 									top = false;
+@@ -835,7 +855,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 					if (rr < 0 || cc < 0 || rr >= (int)R || cc >= (int)C) {
+ 						continue;
+ 					}
+-					uint32_t j = layout ? (uint32_t)cc * R + (uint32_t)rr : (uint32_t)rr * C + (uint32_t)cc;
++					uint32_t j = (uint32_t)rr * C + (uint32_t)cc;
+ 					int32_t w = sg * thp_d[j];
+ 					if (w > 0) {
+ 						sw += w;

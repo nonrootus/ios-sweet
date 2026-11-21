@@ -184,5 +184,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0308-rodin-thp-frame-dumps.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP DUMP %u frame %u poll %u len %u' > /dev/null
 # 0309 (rodin): THP node layout (offset, row stride, byte order, dumps) set by boot-args.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0309-rodin-thp-layout-bootargs.patch"
-strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP layout: offset %u, row stride %u nodes' > /dev/null
+# 0310 changed 0309's rodin_input.c (and replaced its log line).
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0309-rodin-thp-layout-bootargs.patch"
+# 0310 (rodin): THP v17: mutual block 0x0a found in the frame, baseline per scan frequency, drive-line common mode removed.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0310-rodin-thp-common-mode.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v17: nodes %s %u, row stride %u' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP MAP %u: residual per node' > /dev/null

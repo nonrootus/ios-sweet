@@ -1,0 +1,79 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 84251e7..428b201 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2452,6 +2452,11 @@ rodin_wifi_fw_start(void)
+ 	for (uint32_t o = 0; o < 0x4000; o += 4) {
+ 		wr32(pool, o, 0);
+ 	}
++	/* asicConnac2xHifRst: WPDMA_HIF_RST (+0x100) 0, then 0x30: dmashdl and wpdma out of reset */
++	uint32_t hif0 = rd32(dma, 0x100);
++	wr32(dma, 0x100, 0);
++	wr32(dma, 0x100, 0x30);
++	printf("RODIN WIFI: FW start: HIF_RST 0x%08x -> 0x%08x\n", hif0, rd32(dma, 0x100));
+ 	/* WfdmaControl(enable) bits, then the manual prefetch (chain mode off) */
+ 	uint32_t glo = rd32(dma, 0x208) & ~((1u << 0) | (1u << 2));
+ 	glo |= (3u << 4) | (1u << 6) | (1u << 12) | (1u << 21) | (1u << 28) | (1u << 30);
+@@ -2492,7 +2497,7 @@ rodin_wifi_fw_start(void)
+ 	}
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ 	/* WpdmaConfig(enable): TX and RX DMA on (+ csr_wfdma_dummy_reg) */
+-	wr32(dma, 0x208, rd32(dma, 0x208) | (1u << 0) | (1u << 2) | (1u << 10));
++	wr32(dma, 0x208, rd32(dma, 0x208) | (1u << 0) | (1u << 2) | (1u << 10) | (1u << 26));  /* + addr ext (mask 36) */
+ 	printf("RODIN WIFI: FW start: WFDMA on, GLO_CFG 0x%08x, TX15 base 0x%08x cnt %u, RX2 base 0x%08x cidx %u\n",
+ 	    rd32(dma, 0x208), rd32(dma, 0x300 + WF_TXR * 0x10), rd32(dma, 0x304 + WF_TXR * 0x10), rd32(dma, 0x520),
+ 	    rd32(dma, 0x528));
+@@ -2507,18 +2512,44 @@ rodin_wifi_fw_start(void)
+ 	wr32(cmd, 32, (len - 32) & 0xffffu);                     /* u2TxByteCount, u2PQ_ID 0 */
+ 	wr32(cmd, 36, 0x42u | (0xa0u << 8) | (1u << 24));         /* CID 0x42, packet type 0xa0, seq 1 */
+ 	/* +40.. reserved, +68 u4Override 0, +72 u4Address 0 */
+-	wr32(pool, 0, WIFI_POOL_PA + 0x2000);                    /* TX descriptor 0: SDPtr0 */
+-	wr32(pool, 4, (len << 16) | (1u << 30));                 /* SDLen0, LastSec0 */
+-	__asm__ volatile ("dsb sy" ::: "memory");
+-	wr32(dma, 0x308 + WF_TXR * 0x10, 1);                     /* CPU index: one descriptor to send */
++	vm_offset_t mcu = ml_io_map(0x18402000, 0x1000);       /* WFDMA MCU DMA0 (chip 0x54000000) */
++	if (mcu) {
++		printf("RODIN WIFI: MCU DMA0: GLO_CFG 0x%08x, RX0 %08x/%u/%u/%u, RX1 %08x/%u/%u/%u, RX2 %08x/%u, RX3 %08x/%u\n",
++		    rd32(mcu, 0x208), rd32(mcu, 0x500), rd32(mcu, 0x504), rd32(mcu, 0x508), rd32(mcu, 0x50c),
++		    rd32(mcu, 0x510), rd32(mcu, 0x514), rd32(mcu, 0x518), rd32(mcu, 0x51c), rd32(mcu, 0x520),
++		    rd32(mcu, 0x524), rd32(mcu, 0x530), rd32(mcu, 0x534));
++	}
+ 	uint32_t didx = 0;
+-	for (int i = 0; i < 200 && didx != 1; i++) {
+-		didx = rd32(dma, 0x30c + WF_TXR * 0x10);
+-		if (didx != 1) {
+-			delay(1000);
++	for (int k = 0; k < 3 && didx == 0; k++) {
++		uint32_t ring = k < 2 ? WF_TXR : 16, dsc = k < 2 ? 0 : 0x800, slot = k == 1 ? 1 : 0;
++		if (k == 1) {
++			wr32(dma, 0x208, rd32(dma, 0x208) | (1u << 9));         /* bypass_dmashdl_txring */
++		}
++		if (k == 2) {
++			wr32(dma, 0x300 + 16 * 0x10, WIFI_POOL_PA + 0x800);
++			wr32(dma, 0x304 + 16 * 0x10, WF_TXN);
++			wr32(dma, 0x308 + 16 * 0x10, 0);
++		}
++		wr32(pool, dsc + slot * 16 + 0, WIFI_POOL_PA + 0x2000);     /* SDPtr0 */
++		wr32(pool, dsc + slot * 16 + 4, (len << 16) | (1u << 30));  /* SDLen0, LastSec0 */
++		wr32(pool, dsc + slot * 16 + 8, 0);
++		wr32(pool, dsc + slot * 16 + 12, 0);
++		__asm__ volatile ("dsb sy" ::: "memory");
++		uint32_t before = rd32(dma, 0x30c + ring * 0x10);
++		wr32(dma, 0x308 + ring * 0x10, slot + 1);              /* CPU index: one more descriptor */
++		didx = before;
++		for (int i = 0; i < 200 && didx == before; i++) {
++			didx = rd32(dma, 0x30c + ring * 0x10);
++			if (didx == before) {
++				delay(1000);
++			}
+ 		}
++		didx = didx != before ? didx : 0;
++		printf("RODIN WIFI: FW start try %d (TX ring %u%s): DMA index %u -> %u, descriptor 0x%08x; GLO_CFG 0x%08x, "
++		    "HIF_RST 0x%08x, INT_STA 0x%08x, DBG 0x%08x, LPCTL 0x%08x\n", k + 1, ring,
++		    k == 1 ? ", DMASHDL bypass" : "", before, rd32(dma, 0x30c + ring * 0x10), rd32(pool, dsc + slot * 16 + 4),
++		    rd32(dma, 0x208), rd32(dma, 0x100), rd32(dma, 0x200), rd32(dma, 0x128), rodin_conn_rd(0x18060010));
+ 	}
+-	printf("RODIN WIFI: FW start: command sent: TX15 DMA index %u, descriptor 0x%08x\n", didx, rd32(pool, 4));
+ 	/* the answer: any RX descriptor with DMADONE */
+ 	bool got = false;
+ 	for (int t = 0; t < 2000 && !got; t++) {

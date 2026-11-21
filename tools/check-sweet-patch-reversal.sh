@@ -227,5 +227,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0319-rodin-wifi-emi-remap.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: EMI remap by ATF -> 0x%llx' > /dev/null
 # 0320 (rodin): Wi-Fi step 4: driver own, host WFDMA rings in the Wi-Fi DMA pool, INIT_CMD_ID_FW_IMAGE_START.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0320-rodin-wifi-fw-start.patch"
-strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start: command sent: TX15 DMA index %u' > /dev/null
+# 0321 changed 0320's rodin_input.c (and replaced its sent line).
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0320-rodin-wifi-fw-start.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start: WFDMA on, GLO_CFG 0x%08x' > /dev/null
+# 0321 (rodin): Wi-Fi step 4b: HIF reset release, 36-bit addressing, three kick tries with WFDMA state dumps.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0321-rodin-wifi-fw-start-tries.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start try %d (TX ring %u%s)' > /dev/null

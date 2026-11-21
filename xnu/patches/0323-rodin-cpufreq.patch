@@ -1,0 +1,179 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index eec8e2c..3ec6843 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -1524,6 +1524,8 @@ rodin_charger_log(void)
+ 
+ int rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin);
+ 
++static volatile uint32_t rodin_batt_dk;         /* last battery temperature (0.1 K), for the CPU guard */
++
+ int
+ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvin)
+ {
+@@ -1557,6 +1559,7 @@ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvi
+ 	*mv = volt;
+ 	*ma = (int)(int16_t)curr;
+ 	*decikelvin = temp;
++	rodin_batt_dk = temp;
+ 	if (batt_reads++ % 10 == 0) {
+ 		int c10 = (int)temp - 2731, a10 = c10 < 0 ? -c10 : c10;
+ 		printf("RODIN BATTERY: %u%%, %u mV, %d mA, %s%d.%d C\n", soc, volt, (int)(int16_t)curr,
+@@ -2786,6 +2789,144 @@ rodin_wifi_thread(void *arg, wait_result_t result)
+ 	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);
+ }
+ 
++/*
++ * ---- CPU frequency (rodincpufreq=N: N % of each cluster's top frequency; 0 or absent: untouched) ----
++ * MT6899's CPU DVFS runs in the MCUPM firmware; the OS only asks. DT /soc/performance-controller@c0dd360
++ * "mediatek,cpufreq-hw": 3 performance domains of 0x120 (cpus 0-3, 4-6, 7): LUT +0x0 (32 x u32, MHz in
++ * bits 11:0), ENABLE +0x84, PERF_STATE +0x88, HW_STATE +0x8c, LATENCY +0x114. Linux writes ENABLE 1 and
++ * waits for HW_STATE bit 0. A request, by mode: FDVFS (/fdvfs@c068200, magic 0xabcd0001 at 0x0c0de474):
++ * one u32 per CPU at 0x0c068200 + 4 * cpu in units of 26 MHz; else "freq scaling" (CSRAM 0x0c0dd350
++ * + 0x4cc != 0): the frequency in kHz to PERF_STATE; else the LUT index to PERF_STATE. Register facts
++ * from the vendor drivers/cpufreq/mediatek-cpufreq-hw_main.c and _fdvfs.c (read as reference). Without
++ * it the clusters stay where LK left them. A guard asks for 60 % while the battery (bq28z610, read by
++ * SweetBattery every 30 s) is above 43 C and goes back below 39 C.
++ */
++static const uint8_t rodin_cpu_domain[8] = { 0, 0, 0, 0, 1, 1, 1, 2 };
++static vm_offset_t cf_lo, cf_hi, cf_fdvfs;
++static uint32_t cf_lut[3][32], cf_n[3];
++static int cf_mode;                     /* 2 FDVFS, 1 freq scaling, 0 index */
++static const char *const cf_modes[3] = { "LUT index", "freq scaling (kHz)", "FDVFS (26 MHz units)" };
++
++static vm_offset_t
++cf_dom(uint32_t d)
++{
++	return cf_lo + 0x360 + d * 0x120;
++}
++
++static uint32_t
++rodin_cpufreq_pick(uint32_t d, uint32_t pct, uint32_t *index)
++{
++	uint32_t max = 0, best = 0, bi = 0, lo = 0xffffffffu, li = 0;
++	for (uint32_t i = 0; i < cf_n[d]; i++) {
++		max = MAX(max, cf_lut[d][i]);
++	}
++	uint32_t want = max * pct / 100;
++	for (uint32_t i = 0; i < cf_n[d]; i++) {
++		if (cf_lut[d][i] <= want && cf_lut[d][i] > best) {
++			best = cf_lut[d][i];
++			bi = i;
++		}
++		if (cf_lut[d][i] < lo) {
++			lo = cf_lut[d][i];
++			li = i;
++		}
++	}
++	if (!best) {
++		best = lo;
++		bi = li;
++	}
++	*index = bi;
++	return best;
++}
++
++static void
++rodin_cpufreq_set(uint32_t pct, const char *why)
++{
++	uint32_t mhz[3];
++	for (uint32_t d = 0; d < 3; d++) {
++		uint32_t idx = 0;
++		mhz[d] = rodin_cpufreq_pick(d, pct, &idx);
++		if (cf_mode == 2) {
++			for (uint32_t cpu = 0; cpu < 8; cpu++) {
++				if (rodin_cpu_domain[cpu] == d) {
++					wr32(cf_fdvfs, 4 * cpu, (mhz[d] * 1000 + 25999) / 26000);
++				}
++			}
++		} else if (cf_mode == 1) {
++			wr32(cf_dom(d), 0x88, mhz[d] * 1000);
++		} else {
++			wr32(cf_dom(d), 0x88, idx);
++		}
++	}
++	printf("RODIN CPUFREQ: %u %% (%s): %u / %u / %u MHz\n", pct, why, mhz[0], mhz[1], mhz[2]);
++}
++
++static void
++rodin_cpufreq_thread(void *arg, wait_result_t result)
++{
++	uint32_t pct = (uint32_t)(uintptr_t)arg;
++	(void)result;
++	rodin_wait_ms(5000);
++	vm_offset_t sys = ml_io_map(0x0011b000, 0x1000);
++	cf_lo = ml_io_map(0x0c0dd000, 0x1000);
++	cf_hi = ml_io_map(0x0c0de000, 0x1000);
++	cf_fdvfs = ml_io_map(0x0c068000, 0x1000);
++	if (!sys || !cf_lo || !cf_hi || !cf_fdvfs) {
++		printf("RODIN CPUFREQ: no mapping\n");
++		return;
++	}
++	cf_fdvfs += 0x200;
++	uint32_t check = rd32(sys, 0xc00), scaling = rd32(cf_lo, 0x350 + 0x4cc), magic = rd32(cf_hi, 0x474);
++	cf_mode = magic == 0xabcd0001u ? 2 : (scaling ? 1 : 0);
++	printf("RODIN CPUFREQ: sysram check 0x%08x, freq scaling 0x%x, FDVFS magic 0x%08x: mode %s\n", check, scaling,
++	    magic, cf_modes[cf_mode]);
++	for (uint32_t d = 0; d < 3; d++) {
++		uint32_t prev = 0;
++		cf_n[d] = 0;
++		for (uint32_t i = 0; i < 32; i++) {
++			uint32_t f = rd32(cf_dom(d), 4 * i) & 0xfffu;
++			if (f == prev) {
++				break;
++			}
++			cf_lut[d][cf_n[d]++] = f;
++			prev = f;
++		}
++		printf("RODIN CPUFREQ: domain %u: enable 0x%x, perf state 0x%x, hw state 0x%x, latency %u us, %u steps:", d,
++		    rd32(cf_dom(d), 0x84), rd32(cf_dom(d), 0x88), rd32(cf_dom(d), 0x8c), rd32(cf_dom(d), 0x114), cf_n[d]);
++		for (uint32_t i = 0; i < cf_n[d]; i++) {
++			printf(" %u", cf_lut[d][i]);
++		}
++		printf("\n");
++	}
++	if (check != 0x55aa55aau || !cf_n[0] || !cf_n[1] || !cf_n[2]) {
++		printf("RODIN CPUFREQ: cpufreq hardware not ready, frequencies left alone\n");
++		return;
++	}
++	for (uint32_t d = 0; d < 3; d++) {
++		wr32(cf_dom(d), 0x84, 1);
++		bool on = rodin_poll_bit(cf_dom(d), 0x8c, 0, 1, 300, 1000);
++		printf("RODIN CPUFREQ: domain %u enabled: %d (hw state 0x%x)\n", d, on, rd32(cf_dom(d), 0x8c));
++	}
++	rodin_cpufreq_set(pct, "boot-arg");
++	rodin_wait_ms(200);
++	printf("RODIN CPUFREQ: after: perf state 0x%x / 0x%x / 0x%x, hw state 0x%x / 0x%x / 0x%x, per-core %u %u %u %u %u %u %u %u\n",
++	    rd32(cf_dom(0), 0x88), rd32(cf_dom(1), 0x88), rd32(cf_dom(2), 0x88), rd32(cf_dom(0), 0x8c),
++	    rd32(cf_dom(1), 0x8c), rd32(cf_dom(2), 0x8c), rd32(cf_hi, 0x6d0), rd32(cf_hi, 0x6d4), rd32(cf_hi, 0x6d8),
++	    rd32(cf_hi, 0x6dc), rd32(cf_hi, 0x6e0), rd32(cf_hi, 0x6e4), rd32(cf_hi, 0x6e8), rd32(cf_hi, 0x6ec));
++	bool hot = false;
++	for (;;) {
++		rodin_wait_ms(5000);
++		uint32_t dk = rodin_batt_dk;
++		if (!hot && dk > 3162) {
++			hot = true;
++			rodin_cpufreq_set(60, "battery above 43 C");
++		} else if (hot && dk && dk < 3121) {
++			hot = false;
++			rodin_cpufreq_set(pct, "battery below 39 C");
++		}
++	}
++}
++
+ void
+ rodin_input_init(void)
+ {
+@@ -2800,6 +2941,12 @@ rodin_input_init(void)
+ 	if (!enabled) {
+ 		return;
+ 	}
++	int cpufreq = 0;
++	PE_parse_boot_argn("rodincpufreq", &cpufreq, sizeof(cpufreq));
++	if (cpufreq > 0 && cpufreq <= 100 &&
++	    kernel_thread_start(rodin_cpufreq_thread, (void *)(uintptr_t)cpufreq, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
+ 	pmif = ml_io_map(PMIF_PA, 0x1000);
+ 	gpio = ml_io_map(GPIO_PA, 0x1000);
+ 	topck = ml_io_map(TOPCKGEN_PA, 0x1000);

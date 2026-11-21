@@ -235,4 +235,8 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0321-rodin-wifi-fw-start-tries.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start try %d (TX ring %u%s)' > /dev/null
 # 0322 (rodin): Wi-Fi WFDMA init in hal_pdma.c halWpdmaInitRing order (rings, prefetch, pointer reset, enable with chain mode).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0322-rodin-wifi-wfdma-linux-order.patch"
+# 0323 changed 0322's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0322-rodin-wifi-wfdma-linux-order.patch"
+# 0323 (rodin): CPU frequency requests to the MCUPM cpufreq hardware (rodincpufreq=N %), battery-temperature guard.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0323-rodin-cpufreq.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CPUFREQ: %u %% (%s): %u / %u / %u MHz' > /dev/null

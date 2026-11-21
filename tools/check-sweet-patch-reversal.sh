@@ -231,5 +231,8 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0320-rodin-wifi-fw-start.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start: WFDMA on, GLO_CFG 0x%08x' > /dev/null
 # 0321 (rodin): Wi-Fi step 4b: HIF reset release, 36-bit addressing, three kick tries with WFDMA state dumps.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0321-rodin-wifi-fw-start-tries.patch"
+# 0322 changed 0321's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0321-rodin-wifi-fw-start-tries.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: FW start try %d (TX ring %u%s)' > /dev/null
+# 0322 (rodin): Wi-Fi WFDMA init in hal_pdma.c halWpdmaInitRing order (rings, prefetch, pointer reset, enable with chain mode).
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0322-rodin-wifi-wfdma-linux-order.patch"

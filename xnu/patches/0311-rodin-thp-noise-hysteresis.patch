@@ -1,0 +1,71 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 61a9b86..9aec7b5 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -788,7 +788,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 
+ 	printf("RODIN TOUCH: THP: %ux%u nodes, frames at 0x%x, head %u, mutual %u bytes\n", R, C, gdx_frame_addr,
+ 	    gdx_frame_head_len, gdx_mutual_len);
+-	printf("RODIN THP v17: nodes %s %u, row stride %u, %s rows, %s-endian; threshold min %d, sign %d, report %d, "
++	printf("RODIN THP v18: nodes %s %u, row stride %u, %s rows, %s-endian; threshold min %d, sign %d, report %d, "
+ 	    "dumps %d + %d\n", foff ? "at offset" : "from block 0x0a, offset", foff ? foff : 12, rs,
+ 	    layout ? "sensor" : "drive", be ? "big" : "little", thr_min, sign, report, ndump, nev);
+ 	if (N == 0 || N > THP_MAX_NODES || C < 2 * THP_SEGS || C / THP_SEGS + 1 > THP_MAP_COLS || rs < inner ||
+@@ -933,12 +933,13 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		uint32_t pk[THP_PEAKS];
+ 		int32_t pv[THP_PEAKS];
+ 		uint32_t np = 0;
+-		if (sign && fmax > thr) {
++		const int32_t tlow = thr / 2;
++		if (sign && fmax > tlow) {
+ 			for (uint32_t r = 0; r < R; r++) {
+ 				for (uint32_t c = 0; c < C; c++) {
+ 					uint32_t i = r * C + c;
+ 					int32_t v = sg * thp_d[i];
+-					if (v <= thr) {
++					if (v <= tlow) {
+ 						continue;
+ 					}
+ 					bool top = true;
+@@ -979,11 +980,11 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		/* The baseline follows: untouched nodes at 1/64 per frame, touched ones at 1/1024 (a stuck
+ 		 * phantom fades in seconds). Noise: the frame's largest residual while nothing is touched. */
+ 		for (uint32_t i = 0; i < N; i++) {
+-			int32_t a = thp_d[i] < 0 ? -thp_d[i] : thp_d[i];
++			int32_t a = sign ? sign * thp_d[i] : (thp_d[i] < 0 ? -thp_d[i] : thp_d[i]);
+ 			base[i] += (thp_raw[i] * 16 - base[i]) / (a < thr / 2 ? 64 : 1024);
+ 		}
+ 		if (np == 0) {
+-			noise16 += (famp * 16 - noise16) / 32;
++			noise16 += (MIN(famp, thr_min) * 16 - noise16) / 32;     /* so thr stays <= 2 x thr_min */
+ 		}
+ 		peaks_seen += np;
+ 		/* Centroids, then match to the fingers of the last frame. */
+@@ -1019,6 +1020,9 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 					}
+ 				}
+ 			}
++			if (best < 0 && (pv[q] <= thr || pv[q] * 4 < pv[0])) {
++				continue;       /* not a new touch: below the threshold, or a ghost of a stronger one */
++			}
+ 			if (best < 0) {
+ 				for (int f = 0; f < (int)GDX_FINGERS && best < 0; f++) {
+ 					if (!down[f] && !seen[f]) {
+@@ -1044,7 +1048,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			if (!down[best]) {
+ 				edge[best] = nx < 2900 || nx > 65536 - 2900 || ny < 1310 || ny > 65536 - 1310;
+ 				held[best] = 0;
+-				if (downs++ < 60) {
++				if (downs++ < 200) {
+ 					printf("RODIN TOUCH: THP down id %d at node %d,%d (%d.%02d, %d.%02d) value %d thr %d -> %d,%d/65536\n",
+ 					    best, r0, c0, rf / 256, (rf % 256) * 100 / 256, cf / 256, (cf % 256) * 100 / 256,
+ 					    pv[q], thr, nx, ny);
+@@ -1064,7 +1068,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		for (int f = 0; f < (int)GDX_FINGERS; f++) {
+ 			if (down[f] && !seen[f]) {
+ 				down[f] = false;
+-				if (ups++ < 60) {
++				if (ups++ < 200) {
+ 					printf("RODIN TOUCH: THP up id %d after %u frames at %d,%d/65536\n", f, held[f], lx[f], ly[f]);
+ 				}
+ 				if (report) {

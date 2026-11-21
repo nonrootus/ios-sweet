@@ -187,6 +187,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 # 0310 changed 0309's rodin_input.c (and replaced its log line).
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0309-rodin-thp-layout-bootargs.patch"
 # 0310 (rodin): THP v17: mutual block 0x0a found in the frame, baseline per scan frequency, drive-line common mode removed.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0310-rodin-thp-common-mode.patch"
-strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v17: nodes %s %u, row stride %u' > /dev/null
+# 0311 changed 0310's rodin_input.c (and its version line).
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0310-rodin-thp-common-mode.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP MAP %u: residual per node' > /dev/null
+# 0311 (rodin): THP v18: noise from untouched frames only, hysteresis, ghost peaks dropped.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0311-rodin-thp-noise-hysteresis.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v18: nodes %s %u, row stride %u' > /dev/null

@@ -1,0 +1,91 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 3641189..495452e 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -599,6 +599,10 @@ gdx_read_info(void)
+ 	gdx_mutual_len = (uint32_t)(p[38] | (p[39] << 8));
+ 	gdx_drv = drv;
+ 	gdx_sen = sen;
++	printf("RODIN TOUCH: IC info misc lens: frame head %u, fw attr %u, fw log %u, pack max %u ver %u, stylus %u, "
++	    "mutual %u, self %u, noise %u, touch head %u, point %u\n", gdx_frame_head_len, gdx_attr_len, gdx_log_len,
++	    p[34], p[35], p[36] | (p[37] << 8), gdx_mutual_len, p[40] | (p[41] << 8), p[42] | (p[43] << 8),
++	    p[48] | (p[49] << 8), p[50] | (p[51] << 8));
+ 	printf("RODIN TOUCH: IC info misc: cmd 0x%x, fw state 0x%x (%u bytes), esd 0x%x, frame data 0x%x\n",
+ 	    gdx_cmd_addr, gdx_state_addr, gdx_state_len, gdx_esd_addr, le32(p + 24));
+ 	printf("RODIN TOUCH: IC info %u bytes: customer %02x version %02x die %02x ic %02x config %08x, "
+@@ -662,7 +666,11 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 	bool down[GDX_FINGERS] = { false }, edge[GDX_FINGERS] = { false };
+ 	int32_t lx[GDX_FINGERS] = { 0 }, ly[GDX_FINGERS] = { 0 };
+ 	int32_t lrf[GDX_FINGERS] = { 0 }, lcf[GDX_FINGERS] = { 0 };    /* last position, nodes x256 */
+-	uint32_t polls = 0, frames = 0, bad = 0, reports = 0, downs = 0, peaks_seen = 0;
++	uint32_t polls = 0, frames = 0, bad = 0, reports = 0, downs = 0, peaks_seen = 0, dumps = 0;
++	int report = 0;
++	/* xnu14: the mutual block is not where the debug frame mode puts it (phantom touches): until the
++	 * streamed layout is known, touches go to iOS only with rodinthpreport=1, and frames are dumped. */
++	PE_parse_boot_argn("rodinthpreport", &report, sizeof(report));
+ 	int32_t noise16 = 16 * 20, sign = 0, maxpos = 0, maxneg = 0;
+ 	static const uint8_t zero = 0;
+ 
+@@ -685,7 +693,9 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 		if (gdx_read(gdx_frame_addr, thp_frame, 8) || !(thp_frame[0] & 0x80)) {
+ 			continue;
+ 		}
+-		if (gdx_read(gdx_frame_addr, thp_frame, need)) {
++		uint32_t flen = (uint32_t)(thp_frame[3] | (thp_frame[4] << 8));
++		flen = flen < need ? need : (flen > GDX_MAX_LEN ? GDX_MAX_LEN : flen);
++		if (gdx_read(gdx_frame_addr, thp_frame, flen)) {
+ 			bad++;
+ 			continue;
+ 		}
+@@ -699,6 +709,23 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			continue;
+ 		}
+ 		frames++;
++		/* Full frame dumps: the first, then one every 2 s for 25 more (hold a finger on a known spot). */
++		if (dumps < 26 && (frames == 1 || polls % 250 < 2)) {
++			dumps++;
++			printf("RODIN THP DUMP %u frame %u poll %u len %u\n", dumps, frames, polls, flen);
++			for (uint32_t o = 0; o < flen; o += 32) {
++				char line[3 * 32 + 1];
++				uint32_t k = 0;
++				for (uint32_t j = o; j < o + 32 && j < flen; j++, k += 3) {
++					static const char hx[] = "0123456789abcdef";
++					line[k] = hx[thp_frame[j] >> 4];
++					line[k + 1] = hx[thp_frame[j] & 15];
++					line[k + 2] = ' ';
++				}
++				line[k] = 0;
++				printf("RODIN THP %u %04x: %s\n", dumps, o, line);
++			}
++		}
+ 		const uint8_t *m = thp_frame + moff;
+ 		if (frames == 1) {
+ 			printf("RODIN TOUCH: THP first frame: head %02x %02x %02x %02x %02x %02x %02x %02x len %u, mutual hdr %02x %02x %02x %02x %02x %02x %02x %02x, v0 %d v1 %d\n",
+@@ -855,7 +882,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			int32_t nx = (int32_t)MIN(MAX(fx, 0), 65535), ny = (int32_t)MIN(MAX(fy, 0), 65535);
+ 			if (!down[best]) {
+ 				edge[best] = nx < 2900 || nx > 65536 - 2900 || ny < 1310 || ny > 65536 - 1310;
+-				if (downs++ < 60) {
++				if (downs++ < 30) {
+ 					printf("RODIN TOUCH: THP down id %d at node %d,%d (%d.%02d, %d.%02d) value %d thr %d -> %d,%d/65536\n",
+ 					    best, r0, c0, rf / 256, (rf % 256) * 100 / 256, cf / 256, (cf % 256) * 100 / 256,
+ 					    pv[k], thr, nx, ny);
+@@ -867,12 +894,16 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			lcf[best] = cf;
+ 			lx[best] = nx;
+ 			ly[best] = ny;
+-			sweet_hid_touch_norm(best, 1, nx, ny, edge[best]);
++			if (report) {
++				sweet_hid_touch_norm(best, 1, nx, ny, edge[best]);
++			}
+ 		}
+ 		for (int f = 0; f < (int)GDX_FINGERS; f++) {
+ 			if (down[f] && !seen[f]) {
+ 				down[f] = false;
+-				sweet_hid_touch_norm(f, 0, lx[f], ly[f], edge[f]);
++				if (report) {
++					sweet_hid_touch_norm(f, 0, lx[f], ly[f], edge[f]);
++				}
+ 			}
+ 		}
+ 	}

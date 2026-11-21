@@ -176,5 +176,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0306-rodin-touch-no-confirm-reset-charger-log.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CHARGER: MT6375 vid' > /dev/null
 # 0307 (rodin): THP touch: raw frames from the GT9916K, baseline, peaks and centroids in the kernel.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0307-rodin-touch-thp-frames.patch"
+# 0308 changed 0307's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0307-rodin-touch-thp-frames.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: THP: %ux%u nodes' > /dev/null
+# 0308 (rodin): THP frame dumps, IC info struct lengths; touches to iOS only with rodinthpreport=1.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0308-rodin-thp-frame-dumps.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP DUMP %u frame %u poll %u len %u' > /dev/null

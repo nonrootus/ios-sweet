@@ -1,0 +1,147 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 91d992c..6e312bf 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -141,6 +141,9 @@ rodin_pmic_readable(uint8_t sid, uint16_t addr)
+ #define MT6363_VCN13_OPEN       0x1d16
+ #define MT6363_VBOCK0           0x024c  /* VS2 buck voltage: 0x74 = 1.45 V */
+ #define MT6363_VS2_VOTER_SET    0x149b  /* bit 4 = connsys' vote */
++#define MT6368_VANT18_EN        0x1c23  /* bit 0 enable, bit 1 low power (owner's yes 2026-11-21) */
++#define MT6368_VCN33_1_EN       0x1cc0
++#define MT6368_VCN33_2_EN       0x1cce
+ static bool
+ rodin_pmic_writable(uint8_t sid, uint16_t addr)
+ {
+@@ -149,7 +152,8 @@ rodin_pmic_writable(uint8_t sid, uint16_t addr)
+ 		       addr == MT6363_VCN13_EN || addr == MT6363_VCN13_OPEN || addr == MT6363_VBOCK0 ||
+ 		       addr == MT6363_VS2_VOTER_SET;
+ 	}
+-	return sid == MT6368_SID && addr == MT6368_LDO_VTP_EN;
++	return sid == MT6368_SID && (addr == MT6368_LDO_VTP_EN || addr == MT6368_VANT18_EN ||
++	       addr == MT6368_VCN33_1_EN || addr == MT6368_VCN33_2_EN);
+ }
+ 
+ static uint32_t pmif_last_sta;
+@@ -1712,6 +1716,8 @@ struct rodin_conn_op {
+ 	uint32_t pa, v, m;
+ };
+ 
++static void rodin_wifi_wf_on(void);
++
+ /* connsys_a_die_cfg_adie6637_PART1_mt6899_gen */
+ static const struct rodin_conn_op rodin_conn_adie_part1[] = {
+ 	{ 7, 0, 0, 0x00000064, 0x00007700, 0 },
+@@ -2241,6 +2247,113 @@ rodin_wifi_conninfra_rest(vm_offset_t spi, vm_offset_t sema, vm_offset_t sram, v
+ 	bad += rodin_conn_run("low power (end)", CONN_TABLE(rodin_conn_lp_end), spi, sema, false);
+ 	printf("RODIN WIFI: conninfra power-on done (RC mode %d), %u failures: %s\n", rcmode, bad,
+ 	    bad ? "SEE ABOVE" : "CONNINFRA UP");
++	if (bad == 0) {
++		rodin_wait_ms(2500);            /* that line on disk first */
++		rodin_wifi_wf_on();
++	}
++}
++
++/*
++ * Wi-Fi step 3: the Wi-Fi subsystem on and its MCU out of reset, up to "ROM done" (0x1d1e in the
++ * WF monitor flag), after gen4m chips/soc7_0 wf_pwr_on_consys_mcu (BSD-2-Clause; register facts
++ * from include/chips/coda/soc7_0). The firmware itself is in the connsys EMI already (LK).
++ */
++static bool
++rodin_conn_poll(uint32_t pa, uint32_t mask, uint32_t want, uint32_t tries, uint32_t us, uint32_t *last)
++{
++	vm_offset_t va = rodin_conn_va(pa);
++	uint32_t v = 0;
++	if (!va) {
++		return false;
++	}
++	for (uint32_t i = 0; i <= tries; i++) {
++		v = *(volatile uint32_t *)va;
++		if ((v & mask) == want) {
++			break;
++		}
++		delay(us);
++	}
++	if (last) {
++		*last = v;
++	}
++	return (v & mask) == want;
++}
++
++static uint32_t
++rodin_conn_rd(uint32_t pa)
++{
++	vm_offset_t va = rodin_conn_va(pa);
++	return va ? *(volatile uint32_t *)va : 0xdeadbeef;
++}
++
++static void
++rodin_conn_wr(uint32_t pa, uint32_t v)
++{
++	vm_offset_t va = rodin_conn_va(pa);
++	if (va) {
++		*(volatile uint32_t *)va = v;
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++}
++
++static void
++rodin_wifi_wf_on(void)
++{
++	uint32_t v = 0;
++	/* Wi-Fi supplies: VANT18, VCN33_1, VCN33_2 on (voltages as set: 1.8 V, 0x0d) */
++	rodin_pmif_hold = true;
++	rodin_wait_ms(60);
++	(void)rodin_pmic_update(MT6368_SID, MT6368_VANT18_EN, 0x03, 0x01, "VANT18 on");
++	(void)rodin_pmic_update(MT6368_SID, MT6368_VCN33_1_EN, 0x03, 0x01, "VCN33_1 on");
++	(void)rodin_pmic_update(MT6368_SID, MT6368_VCN33_2_EN, 0x03, 0x01, "VCN33_2 on");
++	rodin_pmif_hold = false;
++	delay(1000);
++	/* conn_infra wake-up for Wi-Fi */
++	rodin_conn_wr(0x180601a4, rodin_conn_rd(0x180601a4) | 1u);
++	delay(200);
++	bool ver = rodin_conn_poll(0x18011000, 0xffffffffu, CONN_HW_VER, 10, 1000, &v);
++	bool rdy = rodin_conn_poll(0x18001210, 0x10000u, 0x10000u, 10, 500, &v);
++	printf("RODIN WIFI: WF on: conn_infra awake: version %d, ready %d (0x%08x)\n", ver, rdy, v);
++	if (!ver || !rdy) {
++		return;
++	}
++	rodin_conn_wr(0x18012064, 0x01010101);                 /* coex PTA / UART PTA clocks */
++	rodin_conn_wr(0x18012074, 0x00000101);                 /* BSI, FDD coex clocks */
++	rodin_conn_wr(0x18000120, rodin_conn_rd(0x18000120) & ~1u);    /* WF CPU held in reset */
++	rodin_conn_wr(0x18001440, rodin_conn_rd(0x18001440) & ~1u);    /* WF sleep protection: HW */
++	v = rodin_conn_rd(0x18000010);
++	rodin_conn_wr(0x18000010, (v & ~0xffff0080u) | 0x57460000u | 0x80u);     /* WFSYS on-top power on */
++	bool pwr = rodin_conn_poll(0x18060a10, 1u << 30, 1u << 30, 10, 500, &v);
++	printf("RODIN WIFI: WF on: WFSYS power %s (states 0x%08x)\n", pwr ? "on" : "NOT ON", v);
++	if (!pwr) {
++		return;
++	}
++	bool slp = rodin_conn_poll(0x18001444, 0xa0000000u, 0, 100, 500, &v);
++	printf("RODIN WIFI: WF on: conn<->WF sleep protection %s (0x%08x); WF registers in 2.5 s\n",
++	    slp ? "off" : "STILL ON", v);
++	if (!slp) {
++		return;
++	}
++	rodin_wait_ms(2500);
++	bool p1 = rodin_conn_poll(0x184c300c, 0x00800000u, 0, 100, 500, &v);
++	bool p2 = rodin_conn_poll(0x184c300c, 0x00200000u, 0, 100, 500, &v);
++	uint32_t ip = 0;
++	for (int i = 0; i < 10 && !ip; i++) {
++		ip = rodin_conn_rd(0x184b0010);
++		if (!ip) {
++			delay(500);
++		}
++	}
++	printf("RODIN WIFI: WF on: WF top sleep protection %d/%d (0x%08x), WF IP version 0x%08x\n", p1, p2, v, ip);
++	/* WF monitor flag to the host mailbox, then the WF CPU out of reset */
++	rodin_conn_wr(0x18060b00, rodin_conn_rd(0x18060b00) | 1u);
++	rodin_conn_wr(0x18060b04, (rodin_conn_rd(0x18060b04) & ~0x1fu) | 0xcu);
++	rodin_conn_wr(0x18000120, rodin_conn_rd(0x18000120) | 1u);
++	uint32_t flag = 0;
++	bool rom = rodin_conn_poll(0x18060b10, 0xffffffffu, 0x1d1e, 1000, 1000, &flag);
++	printf("RODIN WIFI: WF on: monitor flag 0x%08x, ROM code index 0x%08x: %s\n", flag, rodin_conn_rd(0x184c1604),
++	    rom ? "WIFI MCU ROM DONE" : "no ROM done");
++	rodin_conn_wr(0x180601a4, rodin_conn_rd(0x180601a4) & ~1u);    /* conn_infra may sleep again */
+ }
+ 
+ static void

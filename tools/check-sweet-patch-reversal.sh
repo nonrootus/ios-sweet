@@ -215,5 +215,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0316-rodin-wifi-adie-id.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: A-die chip id 0x%08x (err %d): %s' > /dev/null
 # 0317 (rodin): Wi-Fi step 2c: A-die efuse/PART2, conn mode, sleep mode 3, AFE calibration, PLL, low-power setting (tables).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0317-rodin-wifi-conninfra-rest.patch"
+# 0318 changed 0317's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0317-rodin-wifi-conninfra-rest.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: conninfra power-on done (RC mode %d), %u failures: %s' > /dev/null
+# 0318 (rodin): Wi-Fi step 3: MT6368 Wi-Fi supplies, WFSYS power-on, WF MCU out of reset, ROM done.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0318-rodin-wifi-wf-on.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: WF on: monitor flag 0x%08x, ROM code index 0x%08x: %s' > /dev/null

@@ -207,5 +207,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0314-rodin-wifi-power-on.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: CONN_INFRA IP version 0x%08x (expected 0x%08x): %s' > /dev/null
 # 0315 (rodin): Wi-Fi RAM scan samples one page per MiB, never unmapped (xnu21 panicked in ml_io_unmap).
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0315-rodin-wifi-scan-samples.patch"
+# 0316 changed 0315's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0315-rodin-wifi-scan-samples.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'sampled pages (1 per MiB) hold data' > /dev/null
+# 0316 (rodin): Wi-Fi step 2b: D-die configuration, A-die (MT6637) clock, reset and chip id over the RF SPI.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0316-rodin-wifi-adie-id.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: A-die chip id 0x%08x (err %d): %s' > /dev/null

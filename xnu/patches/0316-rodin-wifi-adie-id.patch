@@ -1,0 +1,135 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 34960e9..148673b 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -1659,6 +1659,119 @@ rodin_poll_bit(vm_offset_t base, uint32_t off, uint32_t bit, uint32_t want, uint
+ 	return ((rd32(base, off) >> bit) & 1u) == want;
+ }
+ 
++/*
++ * Wi-Fi step 2b: D-die configuration and the A-die (MT6637, the RF die) up to its chip id, after
++ * conninfra mt6899 connsys_d_die_cfg / connsys_spi_master_cfg / connsys_a_die_cfg (first part).
++ * Clock: 52 MHz co-clock (mt6899_soc.c: "for 6899, clock for connsys is always 52M"). The A-die
++ * is left with its top clock on, in GPIO mode; efuse, calibration and conn mode come later.
++ */
++#define CONN_RGU_ON_PA          0x18000000u
++#define CONN_CFG_ON_PA          0x18001000u
++#define CONN_WT_SLP_PA          0x18003000u
++#define CONN_BUS_CR_ON_PA       0x1800e000u
++#define CONN_RF_SPI_PA          0x18042000u
++#define CONN_BUS_CR_PA          0x1804b000u
++#define CONN_SYSRAM_PA          0x18050000u     /* 20 KiB; software CRs at +0x3800 */
++#define CONN_SEMA_PA            0x18070000u     /* M2 own status +0x2000, release +0x2200 */
++#define CONN_SEMA_RFSPI         12u
++
++static void
++rodin_mask32(vm_offset_t base, uint32_t off, uint32_t val, uint32_t mask)
++{
++	wr32(base, off, (rd32(base, off) & ~mask) | (val & mask));
++}
++
++static int
++rodin_adie_spi_read(vm_offset_t spi, uint32_t addr, uint32_t *out)
++{
++	/* SYS_SPI_TOP: busy bit 5 of STA, ADDR +0x50 (read format 0xb000), WDAT +0x54, RDAT +0x58 */
++	if (!rodin_poll_bit(spi, 0x00, 5, 0, 100, 50)) {
++		return EBUSY;
++	}
++	wr32(spi, 0x50, 0xb000u | addr);
++	wr32(spi, 0x54, 0);
++	delay(1);
++	if (!rodin_poll_bit(spi, 0x00, 5, 0, 100, 50)) {
++		return ETIMEDOUT;
++	}
++	*out = rd32(spi, 0x58);
++	return 0;
++}
++
++static void
++rodin_wifi_adie(void)
++{
++	vm_offset_t rgu = ml_io_map(CONN_RGU_ON_PA, 0x1000), cfgon = ml_io_map(CONN_CFG_ON_PA, 0x1000);
++	vm_offset_t wt = ml_io_map(CONN_WT_SLP_PA, 0x1000), bcron = ml_io_map(CONN_BUS_CR_ON_PA, 0x1000);
++	vm_offset_t spi = ml_io_map(CONN_RF_SPI_PA, 0x1000), bcr = ml_io_map(CONN_BUS_CR_PA, 0x1000);
++	vm_offset_t sram = ml_io_map(CONN_SYSRAM_PA, 0x5000), sema = ml_io_map(CONN_SEMA_PA, 0x4000);
++	vm_offset_t cfg = ml_io_map(CONN_INFRA_CFG_PA, 0x1000);
++	if (!rgu || !cfgon || !wt || !bcron || !spi || !bcr || !sram || !sema || !cfg) {
++		printf("RODIN WIFI: A-die: no mapping\n");
++		return;
++	}
++	/* D-die: conn_von_top_host_ck_req to HW mode, conn_infra sysram cleared, conn2ap EMI window */
++	rodin_mask32(bcron, 0x120, 0x3, 0x3);
++	for (uint32_t o = 0; o < 0x5000; o += 4) {
++		wr32(sram, o, 0);
++	}
++	wr32(bcr, 0x70, 0x04000000);
++	wr32(bcr, 0x74, 0x43ffffff);
++	uint32_t efuse = rd32(cfg, 0x20);
++	wr32(sram, 0x3800 + 0x20, efuse);                      /* SW_CR_D_DIE_EFUSE */
++	wr32(rgu, 0x50, 0x0);                                   /* sysram: no HW power down */
++	wr32(rgu, 0x54, 0x3);                                   /* sysram: HW sleep */
++	wr32(rgu, 0x70, 0x0);                                   /* co-ext memory: no HW power down */
++	wr32(rgu, 0x74, 0x1);                                   /* co-ext memory: HW sleep */
++	rodin_mask32(rgu, 0x00, 0x494e0000, 0xffff0040);        /* MTCMOS memory ack not masked */
++	printf("RODIN WIFI: D-die configured (efuse 0x%08x)\n", efuse);
++	/* SPI master: wt_slp CRs for the A-die's ck_en / wake_en (adie6637) */
++	rodin_mask32(wt, 0x70, 0x0af40a04, 0x0fff0fff);
++	rodin_mask32(wt, 0x74, 0x00a00090, 0x0fff0fff);
++	rodin_mask32(wt, 0x78, 0x009c008c, 0x0fff0fff);
++	rodin_mask32(wt, 0x7c, 0xa08, 0xfff);
++	rodin_mask32(wt, 0x80, 0x94, 0xfff);
++	rodin_mask32(wt, 0x84, 0xa00, 0xfff);
++	rodin_mask32(wt, 0x88, 0x0afc0a0c, 0x0fff0fff);
++	rodin_mask32(wt, 0x8c, 0xf0, 0xfff);
++	rodin_mask32(wt, 0x90, 0xf4, 0xfff);
++	rodin_mask32(wt, 0x94, 0xfc, 0xfff);
++	rodin_mask32(wt, 0x98, 0xf8, 0xfff);
++	/* A-die: clock type 2 (52 MHz co-clock) for the firmware */
++	wr32(sram, 0x3800 + 0x3c, 2);
++	/* CONN_WF_CTRL2 (GPIO 197) to GPIO mode, output high (52 MHz) */
++	rodin_mask32(gpio, 0x480, 0, 0x700000);
++	wr32(gpio, 0x160, rd32(gpio, 0x160) | (1u << 5));
++	wr32(gpio, 0x060, rd32(gpio, 0x060) | (1u << 5));
++	/* A-die dig_top_ck on, A-die reset off */
++	wr32(wt, 0x120, rd32(wt, 0x120) | 1u);
++	bool ck = rodin_poll_bit(wt, 0x120, 1, 0, 100, 5);
++	wr32(cfgon, 0x10, rd32(cfgon, 0x10) | 1u);
++	printf("RODIN WIFI: A-die top clock %s (0x%08x), reset released; reading its id in 2.5 s\n",
++	    ck ? "on" : "NOT confirmed", rd32(wt, 0x120));
++	rodin_wait_ms(2500);
++	/* RF SPI semaphore (index 12): reading the M2 own status takes it */
++	bool got = false;
++	for (int i = 0; i < 1000 && !got; i++) {
++		got = (rd32(sema, 0x2000 + CONN_SEMA_RFSPI * 4) & 1u) != 0;
++		if (!got) {
++			delay(1);
++		}
++	}
++	if (!got) {
++		printf("RODIN WIFI: A-die: RF SPI semaphore not taken\n");
++		return;
++	}
++	uint32_t id = 0;
++	int e = rodin_adie_spi_read(spi, 0x2c, &id);           /* ADIE6637 ATOP_CHIP_ID */
++	wr32(sema, 0x2200 + CONN_SEMA_RFSPI * 4, 1);
++	printf("RODIN WIFI: A-die chip id 0x%08x (err %d): %s\n", id, e,
++	    (e == 0 && (id & 0xffff0000u) == 0x66370000u) ? "MT6637 ANSWERS" : "no MT6637");
++	if (e == 0) {
++		wr32(sram, 0x3800 + 0x00, id);                  /* SW_CR_A_DIE_CHIP_ID */
++	}
++}
++
+ static void
+ rodin_wifi_power_on(void)
+ {
+@@ -1744,6 +1857,10 @@ rodin_wifi_power_on(void)
+ 	}
+ 	printf("RODIN WIFI: CONN_INFRA IP version 0x%08x (expected 0x%08x): %s\n", id, CONN_HW_VER,
+ 	    id == CONN_HW_VER ? "THE CONNECTIVITY BLOCK ANSWERS" : "no answer");
++	if (id == CONN_HW_VER) {
++		rodin_wait_ms(2500);            /* that line on disk first */
++		rodin_wifi_adie();
++	}
+ }
+ 
+ static void

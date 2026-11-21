@@ -1,0 +1,152 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 9aec7b5..c7271fc 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -89,10 +89,34 @@ wr32(vm_offset_t base, uint32_t off, uint32_t v)
+ 	__asm__ volatile ("dsb osh" ::: "memory");
+ }
+ 
++/*
++ * Wi-Fi step 1 (rodinwifidiag=1): the PMIC supplies of the connectivity block, as conninfra's
++ * platform/mt6899/mt6899_pmic.c (Xiaomi bsp-rodin-v-oss) uses them, with the addresses of
++ * include/linux/regulator/mt6363-regulator.h and mt6368-regulator.h. Read only.
++ */
++static const struct {
++	uint8_t sid;
++	uint16_t addr;
++	const char *name;
++} rodin_wifi_pmic[] = {
++	{ 4, 0x1bcd, "MT6363 VRFIO18 en" }, { 4, 0x1f2c, "MT6363 VRFIO18 vosel" },
++	{ 4, 0x1bd4, "MT6363 VRFIO18 sw_op_en" }, { 4, 0x1d07, "MT6363 VCN13 en" },
++	{ 4, 0x1b3f, "MT6363 VCN13 vosel" }, { 4, 0x1d16, "MT6363 VCN13 sw_op_en" },
++	{ 4, 0x024c, "MT6363 VBOCK0 vosel" }, { 4, 0x149a, "MT6363 VS2 voter" },
++	{ 5, 0x1c23, "MT6368 VANT18 en" }, { 5, 0x1e09, "MT6368 VANT18 vosel" },
++	{ 5, 0x1cc0, "MT6368 VCN33_1 en" }, { 5, 0x1db1, "MT6368 VCN33_1 vosel" },
++	{ 5, 0x1cce, "MT6368 VCN33_2 en" }, { 5, 0x1db5, "MT6368 VCN33_2 vosel" },
++};
++
+ /* The only PMIC registers this file may read. */
+ static bool
+ rodin_pmic_readable(uint8_t sid, uint16_t addr)
+ {
++	for (uint32_t i = 0; i < sizeof(rodin_wifi_pmic) / sizeof(rodin_wifi_pmic[0]); i++) {
++		if (rodin_wifi_pmic[i].sid == sid && rodin_wifi_pmic[i].addr == addr) {
++			return true;
++		}
++	}
+ 	switch (sid) {
+ 	case MT6363_SID:
+ 		return addr == MT6363_TOPSTATUS || addr == 0x08 || addr == 0x09;  /* + chip id */
+@@ -788,7 +812,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 
+ 	printf("RODIN TOUCH: THP: %ux%u nodes, frames at 0x%x, head %u, mutual %u bytes\n", R, C, gdx_frame_addr,
+ 	    gdx_frame_head_len, gdx_mutual_len);
+-	printf("RODIN THP v18: nodes %s %u, row stride %u, %s rows, %s-endian; threshold min %d, sign %d, report %d, "
++	printf("RODIN THP v19: nodes %s %u, row stride %u, %s rows, %s-endian; threshold min %d, sign %d, report %d, "
+ 	    "dumps %d + %d\n", foff ? "at offset" : "from block 0x0a, offset", foff ? foff : 12, rs,
+ 	    layout ? "sensor" : "drive", be ? "big" : "little", thr_min, sign, report, ndump, nev);
+ 	if (N == 0 || N > THP_MAX_NODES || C < 2 * THP_SEGS || C / THP_SEGS + 1 > THP_MAP_COLS || rs < inner ||
+@@ -1020,7 +1044,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 					}
+ 				}
+ 			}
+-			if (best < 0 && (pv[q] <= thr || pv[q] * 4 < pv[0])) {
++			if (best < 0 && (pv[q] <= thr + thr / 2 || pv[q] * 4 < pv[0])) {
+ 				continue;       /* not a new touch: below the threshold, or a ghost of a stronger one */
+ 			}
+ 			if (best < 0) {
+@@ -1061,7 +1085,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 			lcf[best] = cf;
+ 			lx[best] = nx;
+ 			ly[best] = ny;
+-			if (report) {
++			if (report && held[best] >= 2) {       /* from the second frame on */
+ 				sweet_hid_touch_norm(best, 1, nx, ny, edge[best]);
+ 			}
+ 		}
+@@ -1071,7 +1095,7 @@ rodin_thp_loop(int flip, int layout, int32_t thr_min)
+ 				if (ups++ < 200) {
+ 					printf("RODIN TOUCH: THP up id %d after %u frames at %d,%d/65536\n", f, held[f], lx[f], ly[f]);
+ 				}
+-				if (report) {
++				if (report && held[f] >= 2) {
+ 					sweet_hid_touch_norm(f, 0, lx[f], ly[f], edge[f]);
+ 				}
+ 			}
+@@ -1514,6 +1538,64 @@ rodin_battery_read(unsigned *percent, unsigned *mv, int *ma, unsigned *decikelvi
+ 	return 0;
+ }
+ 
++/*
++ * ---- Wi-Fi step 1: a read-only look at the connectivity block (rodinwifidiag=1) ----
++ * MT6899's Wi-Fi is its own connectivity block (DT /soc/wifi@18000000, MediaTek gen4m chip SOC7_0,
++ * CFG_WLAN_LK_FWDL_SUPPORT: LK's app_load_connsys loads the firmware from partition connsys_wifi
++ * into the connsys EMI at every boot). Nothing is written. Printed: the PMIC supplies above, the
++ * SPM CONN power domain (scpsys mt6899: PWR_CON at +0xe04, status in its ack bits), the AP<->CONN
++ * bus protection (infra ifrbus ao 0x1002c000: INFRASYS0 en/sta 0x000/0x00c bits 25, 26, CONNSYS0
++ * 0x1c0/0x1cc bits 0, 1), and which 64 KiB blocks of the connsys EMI (0x8de00000, 12 MiB) and of the
++ * Wi-Fi DMA pool (0x8eb00000, 20 MiB) hold data. The block's own registers at 0x18000000 are not
++ * read: with the block off an access there may hang the bus.
++ */
++static void
++rodin_wifi_scan_ram(const char *what, uint64_t pa, uint32_t size)
++{
++	vm_offset_t va = ml_io_map((vm_offset_t)pa, size);
++	if (!va) {
++		printf("RODIN WIFI: %s: no mapping\n", what);
++		return;
++	}
++	uint32_t used = 0, shown = 0;
++	for (uint32_t o = 0; o < size; o += 0x10000) {
++		const volatile uint32_t *w = (const volatile uint32_t *)(va + o);
++		uint32_t a = w[0], b = w[1], c = w[2], d = w[3];
++		bool any = (a | b | c | d) != 0;
++		for (uint32_t k = 0x1000; k < 0x10000 && !any; k += 0x1000) {
++			const volatile uint32_t *q = (const volatile uint32_t *)(va + o + k);
++			any = (q[0] | q[1] | q[2] | q[3]) != 0;
++		}
++		if (any) {
++			used++;
++			if (shown++ < 48) {
++				printf("RODIN WIFI: %s +0x%06x: %08x %08x %08x %08x\n", what, o, a, b, c, d);
++			}
++		}
++	}
++	printf("RODIN WIFI: %s 0x%llx + 0x%x: %u of %u 64 KiB blocks hold data\n", what, pa, size, used,
++	    size / 0x10000);
++}
++
++static void
++rodin_wifi_diag(void)
++{
++	for (uint32_t i = 0; i < sizeof(rodin_wifi_pmic) / sizeof(rodin_wifi_pmic[0]); i++) {
++		uint8_t v = 0;
++		int e = rodin_pmic_read(rodin_wifi_pmic[i].sid, rodin_wifi_pmic[i].addr, &v);
++		printf("RODIN WIFI: PMIC %s (sid %u 0x%04x) = 0x%02x%s\n", rodin_wifi_pmic[i].name,
++		    rodin_wifi_pmic[i].sid, rodin_wifi_pmic[i].addr, v, e ? " (read error)" : "");
++	}
++	vm_offset_t spm = ml_io_map(0x1c001000, 0x1000), ifr = ml_io_map(0x1002c000, 0x1000);
++	if (spm && ifr) {
++		printf("RODIN WIFI: SPM CONN_PWR_CON 0x%08x; bus protection INFRASYS0 en 0x%08x sta 0x%08x, "
++		    "CONNSYS0 en 0x%08x sta 0x%08x\n", rd32(spm, 0xe04), rd32(ifr, 0x000), rd32(ifr, 0x00c),
++		    rd32(ifr, 0x1c0), rd32(ifr, 0x1cc));
++	}
++	rodin_wifi_scan_ram("connsys EMI", 0x8de00000ull, 0xc00000);
++	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);
++}
++
+ void
+ rodin_input_init(void)
+ {
+@@ -1542,6 +1624,11 @@ rodin_input_init(void)
+ 	printf("RODIN INPUT: PMIF SWINF2 sta 0x%08x, MT6363 id %02x%02x (err %d)\n",
+ 	    pmif_last_sta, idh, idl, e);
+ 	rodin_touch_diag();
++	int wifidiag = 0;
++	PE_parse_boot_argn("rodinwifidiag", &wifidiag, sizeof(wifidiag));
++	if (wifidiag) {
++		rodin_wifi_diag();     /* before the keys thread: it shares the PMIF channel */
++	}
+ 	int touch = 0;
+ 	PE_parse_boot_argn("rodintouch", &touch, sizeof(touch));
+ 	/* VTP first, here: the keys thread below shares the PMIF channel. */

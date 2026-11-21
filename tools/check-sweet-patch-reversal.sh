@@ -191,5 +191,9 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0310-rodin-thp-common-mode.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP MAP %u: residual per node' > /dev/null
 # 0311 (rodin): THP v18: noise from untouched frames only, hysteresis, ghost peaks dropped.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0311-rodin-thp-noise-hysteresis.patch"
-strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v18: nodes %s %u, row stride %u' > /dev/null
+# 0312 changed 0311's rodin_input.c (and its version line).
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0311-rodin-thp-noise-hysteresis.patch"
+# 0312 (rodin): Wi-Fi step 1, read-only (rodinwifidiag=1); THP v19: new touches debounced.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0312-rodin-wifi-diag-touch-debounce.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN THP v19: nodes %s %u, row stride %u' > /dev/null
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: SPM CONN_PWR_CON 0x%08x' > /dev/null

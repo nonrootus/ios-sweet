@@ -1,0 +1,65 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 6e312bf..8c10d2e 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2356,9 +2356,60 @@ rodin_wifi_wf_on(void)
+ 	rodin_conn_wr(0x180601a4, rodin_conn_rd(0x180601a4) & ~1u);    /* conn_infra may sleep again */
+ }
+ 
++/*
++ * conninfra's POS part 3 step 1, the connsys EMI remapping, is done by ATF on mt6899
++ * (mt6899_atf.c: MTK_SIP_KERNEL_CONNSYS_CONTROL = SiP 0x534, op 70, all other arguments 0). Without
++ * it the WF MCU cannot reach the firmware LK put in the connsys EMI (xnu25: no ROM progress).
++ */
++#define SIP_CONNSYS_CONTROL     0xC2000534ull
++#define CONNSYS_OP_EMI_REMAP    70
++
++static uint64_t
++rodin_smc_conn(uint64_t op)
++{
++	register uint64_t x0 __asm__("x0") = SIP_CONNSYS_CONTROL;
++	register uint64_t x1 __asm__("x1") = op;
++	register uint64_t x2 __asm__("x2") = 0;
++	register uint64_t x3 __asm__("x3") = 0;
++	register uint64_t x4 __asm__("x4") = 0;
++	register uint64_t x5 __asm__("x5") = 0;
++	register uint64_t x6 __asm__("x6") = 0;
++	register uint64_t x7 __asm__("x7") = 0;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) : :
++	    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	return x0;
++}
++
++static void
++rodin_wifi_emi_remap(void)
++{
++	vm_offset_t csr = ml_io_map(0x18060000, 0x1000), bcr = ml_io_map(CONN_BUS_CR_PA, 0x1000);
++	if (!csr || !bcr) {
++		return;
++	}
++	uint32_t b0 = rd32(csr, 0x354), b1 = rd32(csr, 0x360), b2 = rd32(bcr, 0x364);
++	uint64_t r = rodin_smc_conn(CONNSYS_OP_EMI_REMAP);
++	printf("RODIN WIFI: EMI remap by ATF -> 0x%llx: MCU EMI 0x%08x -> 0x%08x, GPS EMI 0x%08x -> 0x%08x, "
++	    "WF peri 0x%08x -> 0x%08x, scpsys sram 0x%08x\n", r, b0, rd32(csr, 0x354), b1, rd32(csr, 0x360), b2,
++	    rd32(bcr, 0x364), rd32(bcr, 0x370));
++	if ((rd32(csr, 0x354) & 0xfffffu) == 0) {
++		/* ATF did not: the same writes ourselves (mt6899_pos_gen.c, EMI base >> 16; DT consys
++		 * emi-addr 0x8de00000, gps emi-addr 0x8ea00000) */
++		wr32(csr, 0x354, (rd32(csr, 0x354) & ~0xfffffu) | (0x8de00000u >> 16));
++		wr32(csr, 0x360, (rd32(csr, 0x360) & ~0xfffffu) | (0x8ea00000u >> 16));
++		rodin_mask32(bcr, 0x364, 0x1000, 0xfffff);
++		rodin_mask32(bcr, 0x368, 0x1100, 0xfffff);
++		rodin_mask32(bcr, 0x36c, 0x1c00, 0xfffff);
++		rodin_mask32(bcr, 0x370, 0x1ca0, 0xfffff);
++		printf("RODIN WIFI: EMI remap written by the kernel: MCU EMI 0x%08x, GPS EMI 0x%08x, WF peri 0x%08x\n",
++		    rd32(csr, 0x354), rd32(csr, 0x360), rd32(bcr, 0x364));
++	}
++}
++
+ static void
+ rodin_wifi_adie(void)
+ {
++	rodin_wifi_emi_remap();
+ 	vm_offset_t rgu = ml_io_map(CONN_RGU_ON_PA, 0x1000), cfgon = ml_io_map(CONN_CFG_ON_PA, 0x1000);
+ 	vm_offset_t wt = ml_io_map(CONN_WT_SLP_PA, 0x1000), bcron = ml_io_map(CONN_BUS_CR_ON_PA, 0x1000);
+ 	vm_offset_t spi = ml_io_map(CONN_RF_SPI_PA, 0x1000), bcr = ml_io_map(CONN_BUS_CR_PA, 0x1000);

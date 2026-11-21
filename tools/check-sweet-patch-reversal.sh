@@ -172,5 +172,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0305-rodin-touch-sync-battery-gauge.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN BATTERY: %s clock gate' > /dev/null
 # 0306 (rodin): touch probed by reading the version (no boot-option write), Android-style reset; MT6375 charger state logged.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0306-rodin-touch-no-confirm-reset-charger-log.patch"
+# 0307 changed 0306's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0306-rodin-touch-no-confirm-reset-charger-log.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CHARGER: MT6375 vid' > /dev/null
+# 0307 (rodin): THP touch: raw frames from the GT9916K, baseline, peaks and centroids in the kernel.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0307-rodin-touch-thp-frames.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN TOUCH: THP: %ux%u nodes' > /dev/null

@@ -1,0 +1,367 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 66dccf7..3641189 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -334,7 +334,7 @@ rodin_keys_thread(void *arg, wait_result_t result)
+ #define GDX_BOOTOPTION          0x10000u
+ #define GDX_IC_INFO             0x10070u
+ #define GDX_IC_INFO_BRA         0x10068u
+-#define GDX_MAX_LEN             1024u
++#define GDX_MAX_LEN             2600u   /* one THP frame (Xiaomi: 2500) */
+ #define GDX_HEAD                8u
+ #define GDX_POINT               8u
+ #define GDX_FINGERS             10u
+@@ -345,6 +345,8 @@ static uint32_t spi_cs_on = SPI_CMD_CS_POL;
+ static uint32_t gdx_dummy = 3;          /* dummy bytes after a read address: 3, or 4 on Berlin-A */
+ static uint32_t gdx_touch_addr;
+ static uint32_t gdx_state_addr, gdx_state_len, gdx_esd_addr, gdx_cmd_addr;  /* IC info misc, logged only */
++/* THP frame layout from IC info misc: frame data, its head, firmware attr/log blocks, mutual struct */
++static uint32_t gdx_frame_addr, gdx_frame_head_len, gdx_attr_len, gdx_log_len, gdx_mutual_len, gdx_drv, gdx_sen;
+ static uint8_t gdx_tx[8 + GDX_MAX_LEN], gdx_rx[8 + GDX_MAX_LEN];
+ 
+ static void
+@@ -448,7 +450,8 @@ gdx_read(uint32_t addr, uint8_t *data, uint32_t len)
+ static int
+ gdx_write(uint32_t addr, const uint8_t *data, uint32_t len)
+ {
+-	if (!((addr == GDX_BOOTOPTION && len == 8) || (gdx_touch_addr && addr == gdx_touch_addr && len == 1))) {
++	if (!((addr == GDX_BOOTOPTION && len == 8) || (gdx_touch_addr && addr == gdx_touch_addr && len == 1) ||
++	    (gdx_frame_addr && addr == gdx_frame_addr && len == 1) || (gdx_cmd_addr && addr == gdx_cmd_addr && len == 16))) {
+ 		printf("RODIN TOUCH: refusing a write of %u bytes to 0x%x\n", len, addr);
+ 		return EPERM;
+ 	}
+@@ -561,7 +564,7 @@ gdx_read_info(void)
+ 	uint8_t l[2];
+ 	int e = gdx_read(at, l, 2);
+ 	uint32_t len = (uint32_t)(l[0] | (l[1] << 8));
+-	if (e || len < 64 || len >= GDX_MAX_LEN) {
++	if (e || len < 64 || len >= 1024) {
+ 		printf("RODIN TOUCH: IC info length %u at 0x%x (err %d)\n", len, at, e);
+ 		return e ? e : EINVAL;
+ 	}
+@@ -589,6 +592,13 @@ gdx_read_info(void)
+ 	gdx_state_addr = le32(p + 12);
+ 	gdx_state_len = (uint32_t)(p[16] | (p[17] << 8));
+ 	gdx_esd_addr = p + 114 <= gdx_info + len ? le32(p + 110) : 0;
++	gdx_frame_addr = le32(p + 24);
++	gdx_frame_head_len = (uint32_t)(p[28] | (p[29] << 8));
++	gdx_attr_len = (uint32_t)(p[30] | (p[31] << 8));
++	gdx_log_len = (uint32_t)(p[32] | (p[33] << 8));
++	gdx_mutual_len = (uint32_t)(p[38] | (p[39] << 8));
++	gdx_drv = drv;
++	gdx_sen = sen;
+ 	printf("RODIN TOUCH: IC info misc: cmd 0x%x, fw state 0x%x (%u bytes), esd 0x%x, frame data 0x%x\n",
+ 	    gdx_cmd_addr, gdx_state_addr, gdx_state_len, gdx_esd_addr, le32(p + 24));
+ 	printf("RODIN TOUCH: IC info %u bytes: customer %02x version %02x die %02x ic %02x config %08x, "
+@@ -597,6 +607,277 @@ gdx_read_info(void)
+ 	return gdx_touch_addr ? 0 : EINVAL;
+ }
+ 
++/*
++ * ---- THP: touches computed here from the chip's raw frames ----
++ * Rodin's GT9916K runs Xiaomi's Touch Host Processing firmware (OrangeFox: goodix_core_rodin.ko
++ * "probe IN THP", libtouchreport_alg_goodix.so, rodin_gtp_thp_config.ini: 18 x 40 nodes,
++ * 1220 x 2712, use_diff_frame=0): it reports no coordinates, it posts raw mutual-capacitance
++ * frames at frame_data_addr and holds its IRQ low until the host clears that sync byte. Frame:
++ * head (frame_data_head_len, u8 checksum; byte 0 bit 7 = ready, u16 cur_frame_len at 3), firmware
++ * attr and log blocks, then the mutual struct (8 bytes, then drv x sen s16 values). Here: a per-node
++ * baseline (first 16 frames, then follows while nothing is touched), peaks above an adaptive
++ * threshold, 3x3 centroids, nearest-match finger ids. The sign of a touch and the threshold are
++ * found and logged at run time; boot-args rodintouchthr (minimum threshold), rodintouchlayout
++ * (1: sense-major data) and rodintouchflip (1 x, 2 y, 4 swap) adjust it.
++ */
++#define THP_MAX_NODES           1024u
++#define THP_PEAKS               5u
++static int32_t thp_base[THP_MAX_NODES];        /* baseline, x16 */
++static int32_t thp_d[THP_MAX_NODES];           /* raw - baseline */
++static uint8_t thp_frame[GDX_MAX_LEN];
++
++/* Xiaomi brl_send_cmd: state, ack, len, cmd, data, u8-sum checksum; written whole, ack 0x80 = done.
++ * Only the data-type switch (0x90) is ever sent. */
++static int
++gdx_cmd_90(uint8_t type)
++{
++	uint8_t b[16] = { 0 }, ack[16];
++	b[2] = 5;               /* len: len, cmd, 1 data byte, 2 checksum bytes */
++	b[3] = 0x90;
++	b[4] = type;
++	uint16_t sum = (uint16_t)(b[2] + b[3] + b[4]);
++	b[5] = (uint8_t)sum;
++	b[6] = (uint8_t)(sum >> 8);
++	for (int tries = 0; tries < 6; tries++) {
++		int e = gdx_write(gdx_cmd_addr, b, 16);
++		if (e) {
++			return e;
++		}
++		for (int i = 0; i < 6; i++) {
++			if (gdx_read(gdx_cmd_addr, ack, 16) == 0 && ack[1] == 0x80) {
++				return 0;
++			}
++			rodin_wait_ms(2);
++		}
++	}
++	return ETIMEDOUT;
++}
++
++static void
++rodin_thp_loop(int flip, int layout, int32_t thr_min)
++{
++	const uint32_t R = gdx_drv, C = gdx_sen, N = R * C;
++	const uint32_t moff = gdx_frame_head_len + gdx_attr_len + gdx_log_len + 8;
++	const uint32_t need = moff + N * 2;
++	bool down[GDX_FINGERS] = { false }, edge[GDX_FINGERS] = { false };
++	int32_t lx[GDX_FINGERS] = { 0 }, ly[GDX_FINGERS] = { 0 };
++	int32_t lrf[GDX_FINGERS] = { 0 }, lcf[GDX_FINGERS] = { 0 };    /* last position, nodes x256 */
++	uint32_t polls = 0, frames = 0, bad = 0, reports = 0, downs = 0, peaks_seen = 0;
++	int32_t noise16 = 16 * 20, sign = 0, maxpos = 0, maxneg = 0;
++	static const uint8_t zero = 0;
++
++	printf("RODIN TOUCH: THP: %ux%u nodes, frames at 0x%x, head %u attr %u log %u mutual %u bytes; reading %u\n",
++	    R, C, gdx_frame_addr, gdx_frame_head_len, gdx_attr_len, gdx_log_len, gdx_mutual_len, need);
++	if (N == 0 || N > THP_MAX_NODES || need > GDX_MAX_LEN || gdx_mutual_len < 8 + N * 2 ||
++	    gdx_frame_head_len < 8 || gdx_frame_head_len > 64) {
++		printf("RODIN TOUCH: THP: unusable frame layout\n");
++		return;
++	}
++	for (;;) {
++		rodin_wait_ms(8);
++		polls++;
++		if (polls % 250 == 0 && reports < 90) {
++			reports++;
++			printf("RODIN TOUCH: THP %u polls, %u frames, %u bad, sign %d, max +%d/-%d, noise %d, peaks %u, downs %u\n",
++			    polls, frames, bad, sign, maxpos, -maxneg, noise16 / 16, peaks_seen, downs);
++			maxpos = maxneg = 0;
++		}
++		if (gdx_read(gdx_frame_addr, thp_frame, 8) || !(thp_frame[0] & 0x80)) {
++			continue;
++		}
++		if (gdx_read(gdx_frame_addr, thp_frame, need)) {
++			bad++;
++			continue;
++		}
++		(void)gdx_write(gdx_frame_addr, &zero, 1);      /* frame taken: the chip may post the next */
++		if (!gdx_checksum_ok(thp_frame, gdx_frame_head_len)) {
++			if (bad++ < 5) {
++				printf("RODIN TOUCH: THP frame head checksum error %02x %02x %02x %02x %02x %02x %02x %02x\n",
++				    thp_frame[0], thp_frame[1], thp_frame[2], thp_frame[3], thp_frame[4], thp_frame[5],
++				    thp_frame[6], thp_frame[7]);
++			}
++			continue;
++		}
++		frames++;
++		const uint8_t *m = thp_frame + moff;
++		if (frames == 1) {
++			printf("RODIN TOUCH: THP first frame: head %02x %02x %02x %02x %02x %02x %02x %02x len %u, mutual hdr %02x %02x %02x %02x %02x %02x %02x %02x, v0 %d v1 %d\n",
++			    thp_frame[0], thp_frame[1], thp_frame[2], thp_frame[3], thp_frame[4], thp_frame[5],
++			    thp_frame[6], thp_frame[7], thp_frame[3] | (thp_frame[4] << 8),
++			    m[-8], m[-7], m[-6], m[-5], m[-4], m[-3], m[-2], m[-1],
++			    (int16_t)(m[0] | (m[1] << 8)), (int16_t)(m[2] | (m[3] << 8)));
++		}
++		/* Baseline: the mean of the first 16 frames (nothing touched at boot). */
++		if (frames <= 16) {
++			for (uint32_t i = 0; i < N; i++) {
++				int32_t v = (int16_t)(m[2 * i] | (m[2 * i + 1] << 8));
++				thp_base[i] = (frames == 1 ? 0 : thp_base[i]) + v;
++			}
++			if (frames == 16) {
++				int32_t lo = INT32_MAX, hi = INT32_MIN;
++				for (uint32_t i = 0; i < N; i++) {
++					lo = MIN(lo, thp_base[i] / 16);
++					hi = MAX(hi, thp_base[i] / 16);
++				}
++				printf("RODIN TOUCH: THP baseline from 16 frames: %d..%d\n", lo, hi);
++			}
++			continue;
++		}
++		int32_t fpos = 0, fneg = 0;
++		for (uint32_t i = 0; i < N; i++) {
++			int32_t v = (int16_t)(m[2 * i] | (m[2 * i + 1] << 8));
++			int32_t d = v - thp_base[i] / 16;
++			thp_d[i] = d;
++			fpos = MAX(fpos, d);
++			fneg = MIN(fneg, d);
++		}
++		maxpos = MAX(maxpos, fpos);
++		maxneg = MIN(maxneg, fneg);
++		int32_t thr = MAX(thr_min, 4 * noise16 / 16);
++		if (!sign && (fpos > 2 * thr || -fneg > 2 * thr)) {
++			sign = fpos >= -fneg ? 1 : -1;
++			printf("RODIN TOUCH: THP touch sign %d (frame %u: max +%d/-%d, threshold %d)\n", sign, frames,
++			    fpos, -fneg, thr);
++		}
++		int32_t sg = sign ? sign : 1, fmax = sg > 0 ? fpos : -fneg;
++		/* Peaks: local maxima above the threshold, the THP_PEAKS strongest. */
++		uint32_t pk[THP_PEAKS];
++		int32_t pv[THP_PEAKS];
++		uint32_t np = 0;
++		if (sign && fmax > thr) {
++			for (uint32_t r = 0; r < R; r++) {
++				for (uint32_t c = 0; c < C; c++) {
++					uint32_t i = layout ? c * R + r : r * C + c;
++					int32_t v = sg * thp_d[i];
++					if (v <= thr) {
++						continue;
++					}
++					bool top = true;
++					for (int dr = -1; dr <= 1 && top; dr++) {
++						for (int dc = -1; dc <= 1; dc++) {
++							int rr = (int)r + dr, cc = (int)c + dc;
++							if ((dr || dc) && rr >= 0 && cc >= 0 && rr < (int)R && cc < (int)C) {
++								uint32_t j = layout ? (uint32_t)cc * R + (uint32_t)rr : (uint32_t)rr * C + (uint32_t)cc;
++								int32_t w = sg * thp_d[j];
++								if (w > v || (w == v && j < i)) {
++									top = false;
++									break;
++								}
++							}
++						}
++					}
++					if (!top) {
++						continue;
++					}
++					uint32_t at;
++					if (np < THP_PEAKS) {
++						at = np++;
++					} else if (v > pv[THP_PEAKS - 1]) {
++						at = THP_PEAKS - 1;     /* replaces the weakest */
++					} else {
++						continue;
++					}
++					pk[at] = r * 256 + c;
++					pv[at] = v;
++					for (uint32_t k = at; k > 0 && pv[k] > pv[k - 1]; k--) {     /* keep sorted */
++						uint32_t tk = pk[k]; int32_t tv = pv[k];
++						pk[k] = pk[k - 1]; pv[k] = pv[k - 1];
++						pk[k - 1] = tk; pv[k - 1] = tv;
++					}
++				}
++			}
++		}
++		if (np == 0) {
++			/* Nothing touched: the baseline follows slowly, noise is the frame's largest deviation. */
++			for (uint32_t i = 0; i < N; i++) {
++				int32_t v = thp_d[i] + thp_base[i] / 16;
++				thp_base[i] += (v * 16 - thp_base[i]) / 64;     /* x16, follows at 1/64 per frame */
++			}
++			int32_t a = MAX(fpos, -fneg);
++			noise16 += (a * 16 - noise16) / 32;
++		}
++		peaks_seen += np;
++		/* Centroids, then match to the fingers of the last frame. */
++		bool seen[GDX_FINGERS] = { false };
++		for (uint32_t k = 0; k < np; k++) {
++			int r0 = (int)(pk[k] >> 8), c0 = (int)(pk[k] & 0xff);
++			int64_t sw = 0, sr = 0, sc = 0;
++			for (int dr = -1; dr <= 1; dr++) {
++				for (int dc = -1; dc <= 1; dc++) {
++					int rr = r0 + dr, cc = c0 + dc;
++					if (rr < 0 || cc < 0 || rr >= (int)R || cc >= (int)C) {
++						continue;
++					}
++					uint32_t j = layout ? (uint32_t)cc * R + (uint32_t)rr : (uint32_t)rr * C + (uint32_t)cc;
++					int32_t w = sg * thp_d[j];
++					if (w > 0) {
++						sw += w;
++						sr += (int64_t)w * rr;
++						sc += (int64_t)w * cc;
++					}
++				}
++			}
++			int32_t rf = (int32_t)(sw ? (sr * 256 + sw / 2) / sw : r0 * 256);  /* nodes x256 */
++			int32_t cf = (int32_t)(sw ? (sc * 256 + sw / 2) / sw : c0 * 256);
++			/* nearest finger of the last frame within 3 nodes, else a free id */
++			int best = -1;
++			int64_t bd = (int64_t)(3 * 256) * (3 * 256);
++			for (int f = 0; f < (int)GDX_FINGERS; f++) {
++				if (down[f] && !seen[f]) {
++					int64_t dx = rf - lrf[f], dy = cf - lcf[f], dd = dx * dx + dy * dy;
++					if (dd < bd) {
++						bd = dd;
++						best = f;
++					}
++				}
++			}
++			if (best < 0) {
++				for (int f = 0; f < (int)GDX_FINGERS && best < 0; f++) {
++					if (!down[f] && !seen[f]) {
++						best = f;
++					}
++				}
++			}
++			if (best < 0) {
++				continue;
++			}
++			int64_t fx = (((int64_t)rf + 128) << 16) / (int64_t)(R * 256);
++			int64_t fy = (((int64_t)cf + 128) << 16) / (int64_t)(C * 256);
++			if (flip & 4) {
++				int64_t t = fx; fx = fy; fy = t;
++			}
++			if (flip & 1) {
++				fx = 65535 - fx;
++			}
++			if (flip & 2) {
++				fy = 65535 - fy;
++			}
++			int32_t nx = (int32_t)MIN(MAX(fx, 0), 65535), ny = (int32_t)MIN(MAX(fy, 0), 65535);
++			if (!down[best]) {
++				edge[best] = nx < 2900 || nx > 65536 - 2900 || ny < 1310 || ny > 65536 - 1310;
++				if (downs++ < 60) {
++					printf("RODIN TOUCH: THP down id %d at node %d,%d (%d.%02d, %d.%02d) value %d thr %d -> %d,%d/65536\n",
++					    best, r0, c0, rf / 256, (rf % 256) * 100 / 256, cf / 256, (cf % 256) * 100 / 256,
++					    pv[k], thr, nx, ny);
++				}
++			}
++			seen[best] = true;
++			down[best] = true;
++			lrf[best] = rf;
++			lcf[best] = cf;
++			lx[best] = nx;
++			ly[best] = ny;
++			sweet_hid_touch_norm(best, 1, nx, ny, edge[best]);
++		}
++		for (int f = 0; f < (int)GDX_FINGERS; f++) {
++			if (down[f] && !seen[f]) {
++				down[f] = false;
++				sweet_hid_touch_norm(f, 0, lx[f], ly[f], edge[f]);
++			}
++		}
++	}
++}
++
+ static void
+ rodin_touch_thread(void *arg, wait_result_t result)
+ {
+@@ -680,6 +961,33 @@ rodin_touch_thread(void *arg, wait_result_t result)
+ 		    fwv[10], fwv[11], fwv[12], fwv[13], fwv[14], fwv[15], fwv[16], fwv[17],
+ 		    fwv[18], fwv[19], fwv[20], fwv[21], fwv[23]);
+ 	}
++	/* THP firmware: frames at frame_data_addr. Clear the sync byte; a frame must follow. */
++	{
++		static const uint8_t z = 0;
++		uint8_t fh[8] = { 0 };
++		bool thp = false;
++		for (int attempt = 0; attempt < 2 && !thp && gdx_frame_addr; attempt++) {
++			if (attempt == 1) {
++				int e = gdx_cmd_90(0x81);       /* Xiaomi: data type 0x81 = frame data */
++				printf("RODIN TOUCH: no frames yet: switched to frame data (cmd 0x90 0x81) -> %d\n", e);
++			}
++			(void)gdx_write(gdx_frame_addr, &z, 1);
++			for (int i = 0; i < 25 && !thp; i++) {
++				rodin_wait_ms(4);
++				thp = gdx_read(gdx_frame_addr, fh, 8) == 0 && (fh[0] & 0x80);
++			}
++		}
++		printf("RODIN TOUCH: frame data at 0x%x %s: %02x %02x %02x %02x %02x %02x %02x %02x\n", gdx_frame_addr,
++		    thp ? "ready (THP firmware)" : "not posted", fh[0], fh[1], fh[2], fh[3], fh[4], fh[5], fh[6], fh[7]);
++		if (thp) {
++			int flip = 0, layout = 0, thr = 40;
++			PE_parse_boot_argn("rodintouchflip", &flip, sizeof(flip));
++			PE_parse_boot_argn("rodintouchlayout", &layout, sizeof(layout));
++			PE_parse_boot_argn("rodintouchthr", &thr, sizeof(thr));
++			rodin_thp_loop(flip, layout, thr);
++			return;
++		}
++	}
+ 	printf("RODIN TOUCH: polling every 8 ms; coordinates %s\n",
+ 	    scale > 0 ? "scaled by rodintouchscale" : "auto-scaled (x1 or x10 of 1220x2712)");
+ 	/*

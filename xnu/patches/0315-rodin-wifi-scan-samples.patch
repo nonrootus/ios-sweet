@@ -1,0 +1,50 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 35118c8..34960e9 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -1577,9 +1577,10 @@ static void
+ rodin_wifi_scan_ram(const char *what, uint64_t pa, uint32_t size)
+ {
+ 	uint32_t used = 0, shown = 0;
+-	/* One 64 KiB window at a time (xnu19: ml_io_map of 12 MiB at once panicked in kmem_alloc). */
+-	for (uint32_t o = 0; o < size; o += 0x10000) {
+-		vm_offset_t va = ml_io_map((vm_offset_t)(pa + o), 0x10000);
++	/* One 16 KiB page every 1 MiB. xnu19: ml_io_map of 12 MiB at once failed in kmem_alloc; xnu21:
++	 * ml_io_unmap panicked (io_map entries are permanent), so the pages stay mapped: 32 in all. */
++	for (uint32_t o = 0; o < size; o += 0x100000) {
++		vm_offset_t va = ml_io_map((vm_offset_t)(pa + o), 0x4000);
+ 		if (!va) {
+ 			printf("RODIN WIFI: %s +0x%06x: no mapping\n", what, o);
+ 			return;
+@@ -1587,11 +1588,10 @@ rodin_wifi_scan_ram(const char *what, uint64_t pa, uint32_t size)
+ 		const volatile uint32_t *w = (const volatile uint32_t *)va;
+ 		uint32_t a = w[0], b = w[1], c = w[2], d = w[3];
+ 		bool any = (a | b | c | d) != 0;
+-		for (uint32_t k = 0x1000; k < 0x10000 && !any; k += 0x1000) {
++		for (uint32_t k = 0x400; k < 0x4000 && !any; k += 0x400) {
+ 			const volatile uint32_t *q = (const volatile uint32_t *)(va + k);
+ 			any = (q[0] | q[1] | q[2] | q[3]) != 0;
+ 		}
+-		ml_io_unmap(va, 0x10000);
+ 		if (any) {
+ 			used++;
+ 			if (shown++ < 48) {
+@@ -1599,8 +1599,8 @@ rodin_wifi_scan_ram(const char *what, uint64_t pa, uint32_t size)
+ 			}
+ 		}
+ 	}
+-	printf("RODIN WIFI: %s 0x%llx + 0x%x: %u of %u 64 KiB blocks hold data\n", what, pa, size, used,
+-	    size / 0x10000);
++	printf("RODIN WIFI: %s 0x%llx + 0x%x: %u of %u sampled pages (1 per MiB) hold data\n", what, pa, size,
++	    used, size / 0x100000);
+ }
+ 
+ static void
+@@ -1761,6 +1761,7 @@ rodin_wifi_thread(void *arg, wait_result_t result)
+ 	if (!(what & 2)) {
+ 		return;
+ 	}
++	rodin_wait_ms(3000);                    /* the power-on lines reach the disk first */
+ 	printf("RODIN WIFI: scanning the connsys EMI and the Wi-Fi DMA pool\n");
+ 	rodin_wifi_scan_ram("connsys EMI", 0x8de00000ull, 0xc00000);
+ 	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);

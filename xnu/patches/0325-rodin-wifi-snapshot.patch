@@ -1,0 +1,51 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 7f1f7fa..f2e1d3a 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2432,9 +2432,38 @@ rodin_wifi_emi_remap(void)
+ #define WF_RXN                  8u              /* RX descriptors per ring */
+ #define WF_RXBUF                2048u
+ 
++/*
++ * Wi-Fi state snapshot: is the WF MCU alive and where (conn_dbg_ctl 0x18023000: +0x610 PC log, +0x608
++ * GPR/LR log, soc7_0.h), the ROM flag and index, and the PLE / PSE packet buffers (WF UMAC chip
++ * 0x820c0000 / 0x820c8000 -> AXI 0x18408000 / 0x1840c000: PBUF_CTRL, page groups, free page count,
++ * head/tail, HIF/CPU page info, queue empty, error status; coda soc7_0 wf_ple_top.h / wf_pse_top.h).
++ */
++static void
++rodin_wifi_snapshot(const char *tag)
++{
++	uint32_t pc[5], lr[5];
++	for (int i = 0; i < 5; i++) {
++		pc[i] = rodin_conn_rd(0x18023610);
++		lr[i] = rodin_conn_rd(0x18023608);
++		delay(200);
++	}
++	printf("RODIN WIFI: [%s] WF MCU PC %08x %08x %08x %08x %08x, LR %08x %08x %08x %08x %08x; flag 0x%x rom 0x%x\n",
++	    tag, pc[0], pc[1], pc[2], pc[3], pc[4], lr[0], lr[1], lr[2], lr[3], lr[4], rodin_conn_rd(0x18060b10),
++	    rodin_conn_rd(0x184c1604));
++	printf("RODIN WIFI: [%s] PLE pbuf 0x%08x hif grp 0x%08x cpu grp 0x%08x free 0x%08x head/tail 0x%08x hif pg 0x%08x "
++	    "cpu pg 0x%08x empty 0x%08x err 0x%08x\n", tag, rodin_conn_rd(0x18408004), rodin_conn_rd(0x1840800c),
++	    rodin_conn_rd(0x18408018), rodin_conn_rd(0x18408380), rodin_conn_rd(0x18408384), rodin_conn_rd(0x18408388),
++	    rodin_conn_rd(0x18408394), rodin_conn_rd(0x18408360), rodin_conn_rd(0x18408304));
++	printf("RODIN WIFI: [%s] PSE pbuf 0x%08x hif0 grp 0x%08x cpu grp 0x%08x free 0x%08x head/tail 0x%08x cpu pg 0x%08x "
++	    "empty 0x%08x err 0x%08x\n", tag, rodin_conn_rd(0x1840c004), rodin_conn_rd(0x1840c110),
++	    rodin_conn_rd(0x1840c118), rodin_conn_rd(0x1840c380), rodin_conn_rd(0x1840c384), rodin_conn_rd(0x1840c158),
++	    rodin_conn_rd(0x1840c0b0), rodin_conn_rd(0x1840c034));
++}
++
+ static void
+ rodin_wifi_fw_start(void)
+ {
++	rodin_wifi_snapshot("after ROM done");
+ 	vm_offset_t dma = ml_io_map(WFDMA_PA, 0x1000), pool = ml_io_map(WIFI_POOL_PA, 0x10000);
+ 	if (!dma || !pool) {
+ 		printf("RODIN WIFI: FW start: no mapping\n");
+@@ -2643,6 +2672,7 @@ rodin_wifi_fw_start(void)
+ 			printf("RODIN WIFI: DMASHDL status 0x%08x, gp0 0x%08x, error flags 0x%08x\n", rd32(shdl2, 0x100),
+ 			    rd32(shdl2, 0x140), rd32(shdl2, 0xdc));
+ 		}
++		rodin_wifi_snapshot("after the tries");
+ 	}
+ }
+ 

@@ -242,5 +242,9 @@ git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0323-rodin-cpufreq.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CPUFREQ: %u %% (%s): %u / %u / %u MHz' > /dev/null
 # 0324 (rodin): Wi-Fi HIF DMA scheduler (DMASHDL) init before the rings, WPDMA debug probe dump.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0324-rodin-wifi-dmashdl.patch"
+# 0325 changed 0324's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0324-rodin-wifi-dmashdl.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: DMASHDL: status 0x%08x' > /dev/null
+# 0325 (rodin): Wi-Fi snapshot: WF MCU PC/LR log, ROM flag, PLE/PSE buffers, after ROM done and after the tries.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0325-rodin-wifi-snapshot.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: [%s] WF MCU PC %08x' > /dev/null

@@ -238,5 +238,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 # 0323 changed 0322's rodin_input.c.
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0322-rodin-wifi-wfdma-linux-order.patch"
 # 0323 (rodin): CPU frequency requests to the MCUPM cpufreq hardware (rodincpufreq=N %), battery-temperature guard.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0323-rodin-cpufreq.patch"
+# 0324 changed 0323's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0323-rodin-cpufreq.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN CPUFREQ: %u %% (%s): %u / %u / %u MHz' > /dev/null
+# 0324 (rodin): Wi-Fi HIF DMA scheduler (DMASHDL) init before the rings, WPDMA debug probe dump.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0324-rodin-wifi-dmashdl.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: DMASHDL: status 0x%08x' > /dev/null

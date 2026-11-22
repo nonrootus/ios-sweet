@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 3ec6843..7f1f7fa 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2460,6 +2460,38 @@ rodin_wifi_fw_start(void)
+ 	wr32(dma, 0x100, 0);
+ 	wr32(dma, 0x100, 0x30);
+ 	printf("RODIN WIFI: FW start: HIF_RST 0x%08x -> 0x%08x\n", hif0, rd32(dma, 0x100));
++	/* soc7_0DmashdlInit (hal_dmashdl_soc7_0.c, BSD-2-Clause; values hal_dmashdl_soc7_0.h): the HIF DMA
++	 * scheduler at 0x18026000 (chip 0x7c026000): packet max size PLE 1 / PSE 0x18 pages, refill on for
++	 * groups 0..3, quotas (max/min) 0x200/0x10 x 3, 0x1ff/0x10, 0x30/0x30 for group 15, queue -> group
++	 * map, priority -> group identity, slot arbiter off, HIF ack count threshold 4, active groups 0x8007 */
++	vm_offset_t shdl = ml_io_map(0x18026000, 0x1000);
++	if (shdl) {
++		static const uint8_t q2g[32] = { 0, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0, 2, 1, 1, 1, 2,
++			                         0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1 };
++		uint32_t st0 = rd32(shdl, 0x100);
++		rodin_mask32(shdl, 0x1c, (1u << 0) | (0x18u << 16), 0x0fff0fffu);
++		uint32_t refill = rd32(shdl, 0x10);
++		for (uint32_t g = 0; g < 16; g++) {
++			refill = g < 4 ? (refill & ~(1u << (16 + g))) : (refill | (1u << (16 + g)));
++		}
++		wr32(shdl, 0x10, refill);
++		for (uint32_t g = 0; g < 16; g++) {
++			uint32_t mx = g < 3 ? 0x200 : (g == 3 ? 0x1ff : (g == 15 ? 0x30 : 0));
++			uint32_t mn = g < 4 ? 0x10 : (g == 15 ? 0x30 : 0);
++			rodin_mask32(shdl, 0x20 + 4 * g, (mx << 16) | mn, 0x0fff0fffu);
++		}
++		for (uint32_t q = 0; q < 32; q++) {
++			rodin_mask32(shdl, 0x60 + (q >> 3) * 4, (uint32_t)q2g[q] << ((q % 8) * 4), 0xfu << ((q % 8) * 4));
++		}
++		for (uint32_t pr = 0; pr < 16; pr++) {
++			rodin_mask32(shdl, 0x70 + (pr >> 3) * 4, pr << ((pr % 8) * 4), 0xfu << ((pr % 8) * 4));
++		}
++		wr32(shdl, 0x0c, rd32(shdl, 0x0c) & ~(1u << 16));
++		rodin_mask32(shdl, 0x08, (4u << 16) | 0x8007u, 0x00ffffffu);
++		printf("RODIN WIFI: DMASHDL: status 0x%08x -> 0x%08x, packet max 0x%08x, refill 0x%08x, group0 0x%08x, "
++		    "group15 0x%08x, optional 0x%08x\n", st0, rd32(shdl, 0x100), rd32(shdl, 0x1c), rd32(shdl, 0x10),
++		    rd32(shdl, 0x20), rd32(shdl, 0x5c), rd32(shdl, 0x08));
++	}
+ 	/* hal_pdma.c halWpdmaInitRing order (xnu27/28 did it differently and the TX DMA never moved):
+ 	 * 1. pdmaSetup(FALSE): WfdmaControl(disable) - DMA off, chain/omit bits off, wait idle */
+ 	uint32_t glo = rd32(dma, 0x208);
+@@ -2595,6 +2627,22 @@ rodin_wifi_fw_start(void)
+ 	if (!got) {
+ 		printf("RODIN WIFI: FW start: no answer in 2 s (RX DMA indexes %u %u %u %u, INT_STA 0x%08x)\n",
+ 		    rd32(dma, 0x50c), rd32(dma, 0x51c), rd32(dma, 0x52c), rd32(dma, 0x53c), rd32(dma, 0x200));
++		/* WPDMA debug probe: DBG_IDX (+0x124) selects, DBG_PROBE (+0x128) reads */
++		for (uint32_t i = 0; i < 0x40; i += 8) {
++			uint32_t v[8];
++			for (uint32_t k = 0; k < 8; k++) {
++				wr32(dma, 0x124, i + k);
++				delay(1);
++				v[k] = rd32(dma, 0x128);
++			}
++			printf("RODIN WIFI: WPDMA probe %02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", i, v[0], v[1], v[2],
++			    v[3], v[4], v[5], v[6], v[7]);
++		}
++		vm_offset_t shdl2 = ml_io_map(0x18026000, 0x1000);
++		if (shdl2) {
++			printf("RODIN WIFI: DMASHDL status 0x%08x, gp0 0x%08x, error flags 0x%08x\n", rd32(shdl2, 0x100),
++			    rd32(shdl2, 0x140), rd32(shdl2, 0xdc));
++		}
+ 	}
+ }
+ 

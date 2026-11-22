@@ -1,0 +1,67 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index f2e1d3a..34969f9 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2460,6 +2460,21 @@ rodin_wifi_snapshot(const char *tag)
+ 	    rodin_conn_rd(0x1840c0b0), rodin_conn_rd(0x1840c034));
+ }
+ 
++static void
++rodin_wifi_dbg_flags(const char *who, vm_offset_t base)
++{
++	for (uint32_t f = 0x100; f <= 0x131; f += 8) {
++		uint32_t v[8];
++		for (uint32_t k = 0; k < 8; k++) {
++			wr32(base, 0x124, f + k);
++			delay(1);
++			v[k] = rd32(base, 0x128);
++		}
++		printf("RODIN WIFI: %s WPDMA dbg %03x: %08x %08x %08x %08x %08x %08x %08x %08x\n", who, f, v[0], v[1], v[2],
++		    v[3], v[4], v[5], v[6], v[7]);
++	}
++}
++
+ static void
+ rodin_wifi_fw_start(void)
+ {
+@@ -2656,17 +2671,31 @@ rodin_wifi_fw_start(void)
+ 	if (!got) {
+ 		printf("RODIN WIFI: FW start: no answer in 2 s (RX DMA indexes %u %u %u %u, INT_STA 0x%08x)\n",
+ 		    rd32(dma, 0x50c), rd32(dma, 0x51c), rd32(dma, 0x52c), rd32(dma, 0x53c), rd32(dma, 0x200));
+-		/* WPDMA debug probe: DBG_IDX (+0x124) selects, DBG_PROBE (+0x128) reads */
+-		for (uint32_t i = 0; i < 0x40; i += 8) {
+-			uint32_t v[8];
+-			for (uint32_t k = 0; k < 8; k++) {
+-				wr32(dma, 0x124, i + k);
+-				delay(1);
+-				v[k] = rd32(dma, 0x128);
++		/* WPDMA debug flags as dbg_connac2x.c connac2x_dump_wfdma_dbg_value: select 0x100..0x131 at +0x124,
++		 * read +0x128; host side here, the MCU side below through the AP2WF remap window */
++		rodin_wifi_dbg_flags("host", dma);
++		/* soc7_0_DumpAXIMasterDebugCr: HW AXI bus debug CRs 0x1802750c + 4 * 0..9 */
++		printf("RODIN WIFI: AXI master dbg: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
++		    rodin_conn_rd(0x1802750c), rodin_conn_rd(0x18027510), rodin_conn_rd(0x18027514), rodin_conn_rd(0x18027518),
++		    rodin_conn_rd(0x1802751c), rodin_conn_rd(0x18027520), rodin_conn_rd(0x18027524), rodin_conn_rd(0x18027528),
++		    rodin_conn_rd(0x1802752c), rodin_conn_rd(0x18027530));
++		/* the MCU-side WFDMA (chip 0x54000000) through WF_MCU_BUS_CR_AP2WF_REMAP_1 (0x18400120) and the
++		 * SOC7_REMAP0 window 0x18500000 (soc7_0.c does the same for its debug CRs) */
++		uint32_t remap0 = rodin_conn_rd(0x18400120);
++		rodin_conn_wr(0x18400120, 0x54000000);
++		vm_offset_t mdma = ml_io_map(0x18500000, 0x1000);
++		if (mdma) {
++			printf("RODIN WIFI: MCU WFDMA (remap 0x%08x -> 0x%08x): GLO_CFG 0x%08x INT_STA 0x%08x HIF_RST 0x%08x\n",
++			    remap0, rodin_conn_rd(0x18400120), rd32(mdma, 0x208), rd32(mdma, 0x200), rd32(mdma, 0x100));
++			for (uint32_t r = 0; r < 4; r++) {
++				printf("RODIN WIFI: MCU WFDMA RX%u %08x/%u/%u/%u, TX%u %08x/%u/%u/%u\n", r, rd32(mdma, 0x500 + r * 16),
++				    rd32(mdma, 0x504 + r * 16), rd32(mdma, 0x508 + r * 16), rd32(mdma, 0x50c + r * 16), r,
++				    rd32(mdma, 0x300 + r * 16), rd32(mdma, 0x304 + r * 16), rd32(mdma, 0x308 + r * 16),
++				    rd32(mdma, 0x30c + r * 16));
+ 			}
+-			printf("RODIN WIFI: WPDMA probe %02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", i, v[0], v[1], v[2],
+-			    v[3], v[4], v[5], v[6], v[7]);
++			rodin_wifi_dbg_flags("MCU", mdma);
+ 		}
++		rodin_conn_wr(0x18400120, remap0);
+ 		vm_offset_t shdl2 = ml_io_map(0x18026000, 0x1000);
+ 		if (shdl2) {
+ 			printf("RODIN WIFI: DMASHDL status 0x%08x, gp0 0x%08x, error flags 0x%08x\n", rd32(shdl2, 0x100),

@@ -246,5 +246,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0324-rodin-wifi-dmashdl.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: DMASHDL: status 0x%08x' > /dev/null
 # 0325 (rodin): Wi-Fi snapshot: WF MCU PC/LR log, ROM flag, PLE/PSE buffers, after ROM done and after the tries.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0325-rodin-wifi-snapshot.patch"
+# 0326 changed 0325's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0325-rodin-wifi-snapshot.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: [%s] WF MCU PC %08x' > /dev/null
+# 0326 (rodin): Wi-Fi WFDMA debug flags 0x100..0x131 (host and MCU side via the AP2WF remap), AXI master debug CRs.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0326-rodin-wifi-dbg-flags.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: %s WPDMA dbg %03x' > /dev/null

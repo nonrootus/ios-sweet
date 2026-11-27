@@ -1,0 +1,234 @@
+diff --git a/bsd/dev/rodin_input.c b/bsd/dev/rodin_input.c
+index 34969f9..e2f55a0 100644
+--- a/bsd/dev/rodin_input.c
++++ b/bsd/dev/rodin_input.c
+@@ -2040,7 +2040,7 @@ static const uint32_t rodin_conn_cmdbt[1024] = {
+ static struct {
+ 	uint32_t pa;
+ 	vm_offset_t va;
+-} rodin_conn_pages[48];
++} rodin_conn_pages[64];
+ 
+ /* One permanent 4 KiB mapping per page of the connectivity block (io_map entries cannot be freed). */
+ static vm_offset_t
+@@ -2896,6 +2896,208 @@ rodin_wifi_thread(void *arg, wait_result_t result)
+ 	rodin_wifi_scan_ram("Wi-Fi DMA pool", 0x8eb00000ull, 0x1400000);
+ }
+ 
++/*
++ * ---- GPU, step by step (rodingpu=N performs steps 1..N; 0 or absent: untouched) ----
++ * The Mali-G720 (DT /soc/mali@13000000 "arm,mali-valhall", CSF; 0x13000000 + 0x480000; SPI 0x286 GPU,
++ * 0x287 MMU, 0x288 JOB, 0x289 EVENT, 0x28a PWR). Its power, clocks and voltages belong to MediaTek's
++ * GPUEB microcontroller (/soc/gpueb@13c00000: firmware from the bootloader, always on here, its DT
++ * ghpm-support = 0). The OS asks it over mailbox 0 (tinysys IPI): 160 shared 4-byte slots at
++ * 0x13c4fd80, AP->EB doorbell bits written to 0x13c62004 (pending: 0x13c62000), EB->AP pending bits at
++ * 0x13c62078, cleared by writing them to 0x13c62074. Pin layout (DT send/recv tables; send pins first,
++ * then recv pins, offsets in slots): IPI_ID_GPUFREQ = send pin 1 at slot 4 (8 slots), its reply = recv
++ * pin 1 at slot 58 (8 slots). Message gpufreq_ipi_data {magic, cmd, target, pad, union of 16 bytes} =
++ * 32 bytes; the magic is what the firmware left in its GPR13 (0x13c4fd50). Order as gpufreq v2:
++ * CMD_INIT_SHARED_MEM (0) with the GPUEB_SHARED reserve (0x7f880000, first 0x4000 bytes, zeroed),
++ * then CMD_POWER_CONTROL (6) with GPU_PWR_ON (1) before the Mali is touched, GPU_PWR_OFF (0) after.
++ * MFG power: MFG0 (GPUEB's own) = SPM 0x1c001f38 bit 1 (and the DT's mfg0_pwr_con 0x1c001f04, ACK
++ * bits 31:30); MFGn, n >= 1 = bit n of MFG_RPC 0x13f91200 (MFG1 = the GPU's top). Facts from the
++ * vendor drivers/gpu/mediatek/gpufreq/v2, gpueb/, soc/mediatek/mtk-mbox.c, rpmsg/mtk_rpmsg_mbox.c
++ * (read as reference only).
++ *   1  reads   MFG0 power, GPUEB's core state (MDSP_CFG 0x13c60634: bit 4 halt, bit 5 gated), its 25
++ *              GPRs, the mailbox pending bits, the MFGn power status
++ *   2  writes  the shared memory zeroed, CMD_INIT_SHARED_MEM; reads the shared status back
++ *   3  writes  CMD_POWER_CONTROL on; reads the Mali's identity (only with MFG1 on); then off again
++ *              (rodingpukeep=1: stays on)
++ */
++#define GPUEB_MBOX_SLOTS        0x13c4fd80u
++#define GPUEB_MBOX_SEND_STA     0x13c62000u
++#define GPUEB_MBOX_SET          0x13c62004u
++#define GPUEB_MBOX_CLR          0x13c62074u
++#define GPUEB_MBOX_RECV_STA     0x13c62078u
++#define GPUEB_GPR(n)            (0x13c4fd1cu + 4u * (n))
++#define GPUEB_SHARED_PA         0x7f880000u
++#define GPUEB_SHARED_SIZE       0x4000u
++#define GPUFREQ_SEND_PIN        1u
++#define GPUFREQ_SEND_SLOT       4u
++#define GPUFREQ_RECV_PIN        1u
++#define GPUFREQ_RECV_SLOT       58u
++#define GPUFREQ_MSG_WORDS       8u
++
++static uint32_t rodin_gpu_magic;
++
++static uint32_t
++rodin_gpu_mfg_status(void)
++{
++	uint32_t s = (rodin_conn_rd(0x1c001f38) >> 1) & 1u;
++	if (s) {
++		s |= rodin_conn_rd(0x13f91200) & ~1u;
++	}
++	return s;
++}
++
++/* One gpufreq command to GPUEB, polled like IPI_SEND_POLLING; returns 0 and the reply, or an error. */
++static int
++rodin_gpu_ipi(uint32_t cmd, const uint32_t *u, uint32_t nu, uint32_t reply[GPUFREQ_MSG_WORDS])
++{
++	uint32_t msg[GPUFREQ_MSG_WORDS] = { rodin_gpu_magic, cmd, 0, 0 };
++	for (uint32_t i = 0; i < nu && 4 + i < GPUFREQ_MSG_WORDS; i++) {
++		msg[4 + i] = u[i];
++	}
++	uint32_t sta = 0;
++	if (!rodin_conn_poll(GPUEB_MBOX_SEND_STA, 1u << GPUFREQ_SEND_PIN, 0, 100, 100, &sta)) {
++		printf("RODIN GPU: IPI %u: send pin still busy (0x%08x)\n", cmd, sta);
++		return EBUSY;
++	}
++	/* a stale reply of an earlier run would be taken for ours */
++	uint32_t old = rodin_conn_rd(GPUEB_MBOX_RECV_STA);
++	if (old & (1u << GPUFREQ_RECV_PIN)) {
++		rodin_conn_wr(GPUEB_MBOX_CLR, 1u << GPUFREQ_RECV_PIN);
++	}
++	for (uint32_t i = 0; i < GPUFREQ_MSG_WORDS; i++) {
++		rodin_conn_wr(GPUEB_MBOX_SLOTS + 4u * (GPUFREQ_SEND_SLOT + i), msg[i]);
++	}
++	rodin_conn_wr(GPUEB_MBOX_SET, 1u << GPUFREQ_SEND_PIN);
++	/* up to 1 s, as IPI_TIMEOUT_MS order */
++	if (!rodin_conn_poll(GPUEB_MBOX_RECV_STA, 1u << GPUFREQ_RECV_PIN, 1u << GPUFREQ_RECV_PIN, 10000, 100,
++	    &sta)) {
++		printf("RODIN GPU: IPI %u: no reply (recv 0x%08x send 0x%08x, before 0x%08x)\n", cmd, sta,
++		    rodin_conn_rd(GPUEB_MBOX_SEND_STA), old);
++		return ETIMEDOUT;
++	}
++	rodin_conn_wr(GPUEB_MBOX_CLR, 1u << GPUFREQ_RECV_PIN);
++	for (uint32_t i = 0; i < GPUFREQ_MSG_WORDS; i++) {
++		reply[i] = rodin_conn_rd(GPUEB_MBOX_SLOTS + 4u * (GPUFREQ_RECV_SLOT + i));
++	}
++	printf("RODIN GPU: IPI %u reply: %08x %08x %08x %08x | %08x %08x %08x %08x\n", cmd, reply[0], reply[1],
++	    reply[2], reply[3], reply[4], reply[5], reply[6], reply[7]);
++	return 0;
++}
++
++static void
++rodin_gpu_shared_dump(const char *tag)
++{
++	uint32_t w[28];
++	for (uint32_t i = 0; i < 28; i++) {
++		w[i] = rodin_conn_rd(GPUEB_SHARED_PA + 4u * i);
++	}
++	printf("RODIN GPU: [%s] shared: magic %08x opp gpu %d stack %d of %d/%d, power %d buck %d mtcmos %d cg %d "
++	    "active %d, temp %d, f gpu %u stack %u kHz, v gpu %u stack %u\n", tag, w[0], (int)w[1], (int)w[2], (int)w[3],
++	    (int)w[4], (int)w[7], (int)w[8], (int)w[9], (int)w[10], (int)w[11], (int)w[12], w[17], w[18], w[23], w[24]);
++}
++
++static void
++rodin_gpu_mali_ids(void)
++{
++	static const struct {
++		uint16_t off;
++		const char *name;
++	} r[] = {
++		{ 0x000, "GPU_ID" }, { 0x004, "L2_FEATURES" }, { 0x008, "CORE_FEATURES" }, { 0x00c, "TILER_FEATURES" },
++		{ 0x010, "MEM_FEATURES" }, { 0x014, "MMU_FEATURES" }, { 0x018, "AS_PRESENT" }, { 0x01c, "CSF_ID" },
++		{ 0x020, "GPU_IRQ_RAWSTAT" }, { 0x034, "GPU_STATUS" }, { 0x03c, "GPU_FAULTSTATUS" },
++		{ 0x100, "SHADER_PRESENT" }, { 0x110, "TILER_PRESENT" }, { 0x120, "L2_PRESENT" },
++		{ 0x140, "SHADER_READY" }, { 0x160, "L2_READY" }, { 0x700, "MCU_CONTROL" }, { 0x704, "MCU_STATUS" },
++	};
++	for (uint32_t i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
++		printf("RODIN GPU: Mali %-16s (+0x%03x) = 0x%08x\n", r[i].name, r[i].off,
++		    rodin_conn_rd(0x13000000u + r[i].off));
++	}
++}
++
++static void
++rodin_gpu_thread(void *arg, wait_result_t result)
++{
++	uint32_t steps = (uint32_t)(uintptr_t)arg;
++	(void)result;
++	rodin_wait_ms(20000);
++	/* step 1: read only */
++	uint32_t f04 = rodin_conn_rd(0x1c001f04), ec8 = rodin_conn_rd(0x1c001ec8), x38 = rodin_conn_rd(0x1c001f38);
++	printf("RODIN GPU: step 1: SPM mfg0_pwr_con(0x1f04) 0x%08x MFG0_PWR_CON(0x1ec8) 0x%08x XPU_PWR_STATUS 0x%08x "
++	    "2ND 0x%08x\n", f04, ec8, x38, rodin_conn_rd(0x1c001f3c));
++	if (!((x38 >> 1) & 1u) && (f04 & 0xc0000000u) != 0xc0000000u) {
++		printf("RODIN GPU: MFG0 (GPUEB's domain) is off: stop (GPUEB is not reachable)\n");
++		return;
++	}
++	uint32_t mdsp = rodin_conn_rd(0x13c60634);
++	printf("RODIN GPU: GPUEB MDSP_CFG 0x%08x (%s%s), mailbox send 0x%08x recv 0x%08x\n", mdsp,
++	    (mdsp & 0x10) ? "halt " : "running ", (mdsp & 0x20) ? "gated" : "", rodin_conn_rd(GPUEB_MBOX_SEND_STA),
++	    rodin_conn_rd(GPUEB_MBOX_RECV_STA));
++	uint32_t g[25];
++	for (uint32_t i = 0; i < 25; i++) {
++		g[i] = rodin_conn_rd(GPUEB_GPR(i));
++	}
++	printf("RODIN GPU: GPUEB GPR0-12: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n", g[0], g[1],
++	    g[2], g[3], g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11], g[12]);
++	printf("RODIN GPU: GPUEB GPR13-24: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n", g[13], g[14],
++	    g[15], g[16], g[17], g[18], g[19], g[20], g[21], g[22], g[23], g[24]);
++	uint32_t mfg = rodin_gpu_mfg_status();
++	printf("RODIN GPU: MFG power status 0x%08x (MFG1 %s), MFG1_PWR_CON 0x%08x MFG2 0x%08x MFG3 0x%08x\n", mfg,
++	    (mfg & 2) ? "on" : "off", rodin_conn_rd(0x13f91070), rodin_conn_rd(0x13f910a0), rodin_conn_rd(0x13f910a4));
++	rodin_gpu_shared_dump("before");
++	rodin_gpu_magic = g[13];
++	if (steps < 2) {
++		return;
++	}
++	if (!rodin_gpu_magic) {
++		printf("RODIN GPU: no IPI magic in GPR13: stop\n");
++		return;
++	}
++	/* step 2: shared memory to GPUEB */
++	rodin_wait_ms(2500);                    /* the lines above reach the disk first */
++	for (uint32_t i = 0; i < GPUEB_SHARED_SIZE; i += 4) {
++		rodin_conn_wr(GPUEB_SHARED_PA + i, 0);
++	}
++	uint32_t reply[GPUFREQ_MSG_WORDS] = { 0 };
++	uint32_t u[4] = { GPUEB_SHARED_PA, 0, GPUEB_SHARED_SIZE, 0 };   /* base (u64), size */
++	printf("RODIN GPU: step 2: CMD_INIT_SHARED_MEM 0x%08x + 0x%x, magic 0x%08x\n", GPUEB_SHARED_PA,
++	    GPUEB_SHARED_SIZE, rodin_gpu_magic);
++	if (rodin_gpu_ipi(0, u, 4, reply)) {
++		return;
++	}
++	rodin_wait_ms(50);
++	rodin_gpu_shared_dump("after init");
++	if (steps < 3) {
++		return;
++	}
++	/* step 3: the GPU on, its identity, off */
++	rodin_wait_ms(2500);
++	uint32_t on = 1;
++	printf("RODIN GPU: step 3: CMD_POWER_CONTROL on\n");
++	int e = rodin_gpu_ipi(6, &on, 1, reply);
++	rodin_wait_ms(20);
++	mfg = rodin_gpu_mfg_status();
++	printf("RODIN GPU: after power on: ipi %d return %d, MFG power status 0x%08x, MFG1_PWR_CON 0x%08x\n", e,
++	    (int)reply[4], mfg, rodin_conn_rd(0x13f91070));
++	rodin_gpu_shared_dump("after on");
++	if (e || !(mfg & 2)) {
++		printf("RODIN GPU: MFG1 not on: the Mali is not read\n");
++		return;
++	}
++	rodin_wait_ms(2500);                    /* if the Mali's bus faults, the log so far is on disk */
++	rodin_gpu_mali_ids();
++	int keep = 0;
++	PE_parse_boot_argn("rodingpukeep", &keep, sizeof(keep));
++	if (keep) {
++		printf("RODIN GPU: left on (rodingpukeep=1)\n");
++		return;
++	}
++	uint32_t off = 0;
++	e = rodin_gpu_ipi(6, &off, 1, reply);
++	rodin_wait_ms(20);
++	printf("RODIN GPU: after power off: ipi %d return %d, MFG power status 0x%08x\n", e, (int)reply[4],
++	    rodin_gpu_mfg_status());
++}
++
+ /*
+  * ---- CPU frequency (rodincpufreq=N: N % of each cluster's top frequency; 0 or absent: untouched) ----
+  * MT6899's CPU DVFS runs in the MCUPM firmware; the OS only asks. DT /soc/performance-controller@c0dd360
+@@ -3081,6 +3283,11 @@ rodin_input_init(void)
+ 			thread_deallocate(thread);
+ 		}
+ 	}
++	int gpu = 0;
++	PE_parse_boot_argn("rodingpu", &gpu, sizeof(gpu));
++	if (gpu > 0 && kernel_thread_start(rodin_gpu_thread, (void *)(uintptr_t)gpu, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
+ 	int touch = 0;
+ 	PE_parse_boot_argn("rodintouch", &touch, sizeof(touch));
+ 	/* VTP first, here: the keys thread below shares the PMIF channel. */

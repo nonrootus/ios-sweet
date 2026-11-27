@@ -250,5 +250,9 @@ strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F '
 git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0325-rodin-wifi-snapshot.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: [%s] WF MCU PC %08x' > /dev/null
 # 0326 (rodin): Wi-Fi WFDMA debug flags 0x100..0x131 (host and MCU side via the AP2WF remap), AXI master debug CRs.
-git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0326-rodin-wifi-dbg-flags.patch"
+# 0327 changed 0326's rodin_input.c.
+git -C dxb/xnu apply --reverse --check --exclude=bsd/dev/rodin_input.c "$GITHUB_WORKSPACE/xnu/patches/0326-rodin-wifi-dbg-flags.patch"
 strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN WIFI: %s WPDMA dbg %03x' > /dev/null
+# 0327 (rodin): GPU step by step (rodingpu=N): GPUEB state, gpufreq IPI over its mailbox (shared memory, power), Mali ids.
+git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/xnu/patches/0327-rodin-gpu-gpueb.patch"
+strings dxb/fakeroot/System/Library/Kernels/kernel.development.sweet | grep -F 'RODIN GPU: IPI %u reply: %08x' > /dev/null
